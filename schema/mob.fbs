@@ -1,0 +1,23 @@
+include "common.fbs";
+
+namespace maestro.fbs;
+
+// Land-mob (`WalkNodeEvaluator`) pathfinding profile, referenced by `class_id`
+// in each request. Distinct count is bounded by the number of mob types, so
+// these are registered once.
+table MobClass {
+  class_id:ushort;
+  width:float;
+  height:float;
+  malus:[float];             // Effective malus per `PathType` ordinal
+  max_up_step:float;         // Step-up height without jumping
+  can_pass_doors:bool;
+  can_open_doors:bool;
+  can_float:bool;
+  can_walk_over_fences:bool;
+  max_follow_range:ushort;   // A* search bound, in blocks
+}
+
+table MobClassTable {
+  classes:[MobClass];
+}

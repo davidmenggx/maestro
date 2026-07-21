@@ -1,0 +1,18 @@
+include "common.fbs";
+
+namespace maestro.fbs;
+
+// `PathType` at a cell (translated server-side), not a block id. A block change
+// can alter neighboring cells' `PathType`, so the producer emits every
+// affected cell, not just the one that changed.
+struct CellDelta {
+  pos:Vec3i;
+  node_type:PathType;
+}
+
+// One frame of the ordered world stream, applied on the immediately preceding
+// `sequence`. A snapshot is just a frame whose `cells` cover the whole region.
+table WorldDelta {
+  sequence:ulong;
+  cells:[CellDelta];
+}
