@@ -1,0 +1,34 @@
+include "common.fbs";
+
+namespace maestro.fbs;
+
+// At-least-once and idempotent, keyed by `request_id`. `world_sequence` pins the
+// state the request is posed against, so the node can block on a stale snapshot.
+table PathRequest {
+  request_id:ulong;
+  mob_id:uint;
+  class_id:ushort;
+  start:Vec3i;
+  target:Vec3i;
+  world_sequence:ulong;
+}
+
+table PathRequestBatch {
+  requests:[PathRequest];
+}
+
+// `nodes` is the Minecraft path (one block position per Node). Empty means no
+// path was found. `reached` mirrors `Path.reached`. `cost` is the malus-weighted
+// A* path cost. `computed_tick` drives last-write-wins within a tick.
+table PathResponse {
+  request_id:ulong;
+  reached:bool;
+  nodes:[Vec3i];
+  cost:float;
+  computed_tick:ulong;
+  world_sequence:ulong;
+}
+
+table PathResponseBatch {
+  responses:[PathResponse];
+}

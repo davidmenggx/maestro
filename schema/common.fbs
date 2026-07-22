@@ -1,0 +1,45 @@
+namespace maestro.fbs;
+
+// Mirrors Minecraft's `PathType` enum. Ordinals must match. Cell node types and
+// the per-mob `malus` table both index into this.
+enum PathType : ubyte {
+  BLOCKED,
+  OPEN,
+  WALKABLE,
+  WALKABLE_DOOR,
+  TRAPDOOR,
+  POWDER_SNOW,
+  ON_TOP_OF_POWDER_SNOW,
+  FENCE,
+  LAVA,
+  WATER,
+  WATER_BORDER,
+  RAIL,
+  UNPASSABLE_RAIL,
+  FIRE_IN_NEIGHBOR,
+  FIRE,
+  DAMAGING_IN_NEIGHBOR,
+  DAMAGING,
+  DOOR_OPEN,
+  DOOR_WOOD_CLOSED,
+  DOOR_IRON_CLOSED,
+  BREACH,
+  LEAVES,
+  STICKY_HONEY,
+  COCOA,
+  DAMAGE_CAUTIOUS,
+  ON_TOP_OF_TRAPDOOR,
+  BIG_MOBS_CLOSE_TO_DANGER
+}
+
+// Positions are region-relative (stateful) or horizon-relative (stateless).
+struct Vec3i {
+  x:int;
+  y:int;
+  z:int;
+}
+
+struct Vec2i {
+  x:int;
+  z:int;
+}

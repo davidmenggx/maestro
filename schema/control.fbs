@@ -1,0 +1,48 @@
+include "common.fbs";
+include "world.fbs";
+include "mob.fbs";
+include "pathfinding.fbs";
+
+namespace maestro.fbs;
+
+table Hello {
+  node_id:string;
+}
+
+// Assigns a square, full-height region. `region_id` is a
+// server-assigned monotonic id. `resume_from_sequence`
+// is where the world stream resumes; 0 requests a full
+// snapshot.
+table RegionAssignment {
+  region_id:uint;
+  min_xz:Vec2i;
+  max_xz:Vec2i;
+  resume_from_sequence:ulong;
+}
+
+table Ping {
+  sequence:ulong;
+  send_micros:ulong; // For phi-accural.
+}
+
+table Pong {
+  sequence:ulong;
+  send_micros:ulong;
+  queue_depth:uint; // For load management.
+}
+
+// One union per stream so the reader dispatches on a single root type.
+union WorldMsg { WorldDelta, RegionAssignment }
+table WorldFrame { body:WorldMsg; }
+
+union RequestMsg { PathRequest, PathRequestBatch, MobClassTable }
+table RequestFrame { body:RequestMsg; }
+
+union ResponseMsg { PathResponse, PathResponseBatch, Pong }
+table ResponseFrame { body:ResponseMsg; }
+
+union ControlMsg { Hello, Ping, RegionAssignment }
+table ControlFrame { body:ControlMsg; }
+
+// flatc allows one root_type. Other frames are read via GetRoot<T>() in code.
+root_type WorldFrame;

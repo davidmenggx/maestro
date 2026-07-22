@@ -1,0 +1,28 @@
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+
+  # ---- C++ ----
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v21.1.8
+    hooks:
+      - id: clang-format
+        types_or: [c, c++, c#, cuda]
+
+  # ---- Java ----
+  # The pre-commit mirror for google-java-format was removed upstream, so run a
+  # pinned, JDK-25-compatible gjf via a local wrapper instead.
+  - repo: local
+    hooks:
+      - id: google-java-format
+        name: google-java-format
+        entry: tools/run-google-java-format.sh
+        language: script
+        types: [java]
