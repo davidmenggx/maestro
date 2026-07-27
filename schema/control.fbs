@@ -32,7 +32,7 @@ table Pong {
 }
 
 // One union per stream so the reader dispatches on a single root type.
-union WorldMsg { WorldDelta, RegionAssignment }
+union WorldMsg { WorldDelta, RegionAssignment, WorldSnapshot }
 table WorldFrame { body:WorldMsg; }
 
 union RequestMsg { PathRequest, PathRequestBatch, MobClassTable }

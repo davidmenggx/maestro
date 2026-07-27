@@ -17,6 +17,9 @@
       "com.smpler.maestro.MaestroServer"
     ]
   },
+  "mixins": [
+    "maestro.mixins.json"
+  ],
   "depends": {
     "fabricloader": ">=0.18.4",
     "fabric-api": "*",

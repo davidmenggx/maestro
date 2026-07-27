@@ -23,6 +23,12 @@ repositories {
 // directory as an extra source root rather than committing generated code.
 sourceSets.main.java.srcDir "${projectDir}/src/generated/java"
 
+configurations {
+  // Resolved separately so the whole OpenTelemetry graph can be nested. See the
+  // `include` loop below.
+  otelBundle
+}
+
 dependencies {
   // Minecraft 26.1 is unobfuscated: there is no `mappings` dependency, and mod
   // dependencies are plain `implementation` (nothing is remapped).
@@ -34,16 +40,27 @@ dependencies {
   // mod jar via Fabric's Jar-in-Jar (`include`).
   include implementation("com.google.flatbuffers:flatbuffers-java:${flatbuffers_version}")
 
-  // OpenTelemetry is wired onto the compile/runtime classpath via the BOM.
-  // It is NOT Jar-in-Jar'd yet: Loom's `include` does not pull transitives, so
-  // bundling the full OTel graph for the modded runtime is a follow-up.
+  // OpenTelemetry is wired onto the compile/runtime classpath via the BOM, and
+  // mirrored into `otelBundle` so the resolved graph can be Jar-in-Jar'd.
   implementation platform("io.opentelemetry:opentelemetry-bom:${opentelemetry_version}")
   implementation "io.opentelemetry:opentelemetry-api"
   implementation "io.opentelemetry:opentelemetry-sdk"
   implementation "io.opentelemetry:opentelemetry-exporter-otlp"
 
+  otelBundle platform("io.opentelemetry:opentelemetry-bom:${opentelemetry_version}")
+  otelBundle "io.opentelemetry:opentelemetry-api"
+  otelBundle "io.opentelemetry:opentelemetry-sdk"
+  otelBundle "io.opentelemetry:opentelemetry-exporter-otlp"
+
   testImplementation "org.junit.jupiter:junit-jupiter:5.11.4"
   testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+// Loom's `include` nests one artifact at a time and does not follow transitive
+// dependencies, so every artifact `otelBundle` resolves to is nested by hand.
+configurations.otelBundle.resolvedConfiguration.resolvedArtifacts.each { artifact ->
+  def id = artifact.moduleVersion.id
+  dependencies.add("include", "${id.group}:${id.name}:${id.version}")
 }
 
 java {
@@ -67,6 +84,34 @@ processResources {
   inputs.property "version", project.version
   filesMatching("fabric.mod.json") {
     expand "version": project.version
+  }
+}
+
+// Loom's `server` run configuration already passes `--nogui`, but it manages
+// neither the EULA nor `server.properties`. A superflat, fixed-seed overworld
+// keeps every dev boot and benchmark run identical. `max-tick-time=-1` stops the
+// watchdog from killing a server paused in a debugger.
+def devRunDir = file("${projectDir}/run")
+def devServerProperties = [
+  "level-type": "minecraft:flat",
+  "level-seed": "maestro",
+  "online-mode": "false",
+  "spawn-protection": "0",
+  "max-tick-time": "-1",
+]
+
+tasks.named("runServer") {
+  doFirst {
+    devRunDir.mkdirs()
+    new File(devRunDir, "eula.txt").text = "eula=true\n"
+
+    def propertiesFile = new File(devRunDir, "server.properties")
+    def properties = new Properties()
+    if (propertiesFile.exists()) {
+      propertiesFile.withInputStream { properties.load(it) }
+    }
+    devServerProperties.each { key, value -> properties.setProperty(key, value) }
+    propertiesFile.withOutputStream { properties.store(it, "Written by the runServer task") }
   }
 }
 

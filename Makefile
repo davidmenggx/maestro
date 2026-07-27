@@ -9,6 +9,7 @@
 #   make node       build the C++ compute node
 #   make server     build the Fabric mod jar
 #   make test       run both test suites
+#   make test-boot  boot a dev server and assert the mixins applied
 #   make clean      remove build outputs (keeps fetched deps)
 #   make help       list targets
 
@@ -25,7 +26,7 @@ GEN_JAVA := $(ROOT)/server/src/generated/java
 FLATC := $(BUILD)/tools/bin/flatc
 
 # The Gradle daemon JVM is pinned in server/gradle.properties (JDK 25, required
-# by Gradle 9.4); the mod is compiled to Java 21 via the toolchain there.
+# by Minecraft 26.1). The mod is compiled to Java 25 via the toolchain there.
 GRADLE := ./gradlew
 
 # Toggle the OpenTelemetry C++ SDK (heavy) for the node build.
@@ -33,7 +34,7 @@ MAESTRO_WITH_OTEL ?= ON
 
 .PHONY: all help flatc schema schema-cpp schema-java \
         node node-configure node-test \
-        server server-test test run-node clean distclean
+        server server-test test test-boot run-node run-server clean distclean
 
 all: node server ## Build the C++ node and the Java mod
 
@@ -42,7 +43,7 @@ help: ## List available targets
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n",$$1,$$2}'
 
 # ---------------------------------------------------------------------------
-# FlatBuffers compiler (built once; rebuild by `make distclean` or deleting it)
+# FlatBuffers compiler
 # ---------------------------------------------------------------------------
 $(FLATC):
 	cmake -S tools -B $(BUILD)/tools -DCMAKE_BUILD_TYPE=Release
@@ -87,6 +88,12 @@ server: schema-java ## Build the Fabric server mod jar
 
 server-test: schema-java ## Run the Java unit tests
 	cd server && $(GRADLE) test
+
+run-server: schema-java ## Boot a dev dedicated server with Maestro loaded
+	cd server && $(GRADLE) runServer
+
+test-boot: schema-java ## Boot the dev server and assert the mixins applied
+	tools/boot-smoke-test.sh
 
 # ---------------------------------------------------------------------------
 # Aggregate / cleanup

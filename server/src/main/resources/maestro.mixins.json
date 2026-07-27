@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8.7",
+  "package": "com.smpler.maestro.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "server": [
+    "EnderEyeItemMixin",
+    "EntityMixin",
+    "MinecraftServerMixin",
+    "PortalShapeMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

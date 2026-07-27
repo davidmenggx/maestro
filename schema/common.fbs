@@ -2,6 +2,12 @@ namespace maestro.fbs;
 
 // Mirrors Minecraft's `PathType` enum. Ordinals must match. Cell node types and
 // the per-mob `malus` table both index into this.
+//
+// Cells on the wire only ever carry the values `getPathTypeFromState` can
+// return. The rest are derived on the node: `WALKABLE`, `ON_TOP_OF_POWDER_SNOW`,
+// `ON_TOP_OF_TRAPDOOR`, `WATER_BORDER` and the two `*_IN_NEIGHBOR` types come
+// from the static composition, while `WALKABLE_DOOR`, `UNPASSABLE_RAIL`,
+// `BREACH` and `BIG_MOBS_CLOSE_TO_DANGER` depend on the mob.
 enum PathType : ubyte {
   BLOCKED,
   OPEN,

@@ -2,17 +2,42 @@ include "common.fbs";
 
 namespace maestro.fbs;
 
-// `PathType` at a cell (translated server-side), not a block id. A block change
-// can alter neighboring cells' `PathType`, so the producer emits every
-// affected cell, not just the one that changed.
+// The per-block `PathType` at a cell: Minecraft's `getPathTypeFromState`, which
+// is a pure function of that one block state, not a block id. The
+// neighbour-dependent and mob-dependent types are derived on the node at query
+// time, so a block change produces exactly one `CellDelta`.
 struct CellDelta {
   pos:Vec3i;
   node_type:PathType;
 }
 
 // One frame of the ordered world stream, applied on the immediately preceding
-// `sequence`. A snapshot is just a frame whose `cells` cover the whole region.
+// `sequence`.
 table WorldDelta {
   sequence:ulong;
   cells:[CellDelta];
+}
+
+// A run of vertically contiguous cells sharing one `PathType`.
+struct CellRun {
+  length:ushort;
+  node_type:PathType;
+}
+
+// Full region state at `sequence`, sent on node join or when a node has fallen
+// too far behind to resume. Full-height columns stay cheap under run encoding:
+// size tracks terrain complexity rather than world height, which a per-cell
+// encoding does not.
+//
+// Columns are implicit and cover the region densely, indexed
+// `(x - min_x) * width + (z - min_z)` against the bounds in `RegionAssignment`.
+// `run_counts` holds each column's run count in that order, and `runs` is every
+// column's runs concatenated in the same order, so a column's slice starts at
+// the prefix sum of the counts before it. Runs within a column go upward from
+// `base_y` and their lengths sum to the region height.
+table WorldSnapshot {
+  sequence:ulong;
+  base_y:int;
+  run_counts:[ushort];
+  runs:[CellRun];
 }
