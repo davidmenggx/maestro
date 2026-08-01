@@ -11,8 +11,7 @@ import java.nio.file.Path;
 
 /**
  * Startup settings read from `<config dir>/maestro.json`. A missing file is written with the
- * defaults below; a malformed or incomplete one aborts startup rather than silently running the
- * fleet in the wrong mode.
+ * defaults below, a malformed or incomplete one aborts startup.
  */
 public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint, boolean devMode) {
 

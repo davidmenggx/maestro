@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 #
 # Boots a dedicated 26.1 server through Loom's `runServer`, waits for it to come
-# up, stops it, and asserts that the Maestro mixins were applied. Mixin
-# application is a runtime property, so this is the integration-level equivalent
-# of a unit test for the hook pipeline.
+# up, stops it, and asserts that the Maestro mixins were applied.
 
 set -euo pipefail
 

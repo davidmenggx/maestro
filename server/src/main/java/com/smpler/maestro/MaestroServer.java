@@ -19,7 +19,7 @@ public final class MaestroServer implements DedicatedServerModInitializer {
 
   public static MaestroConfig config() {
     if (config == null) {
-      throw new IllegalStateException("Maestro config read before initialisation");
+      throw new IllegalStateException("Maestro config read before initialization");
     }
     return config;
   }
@@ -33,7 +33,7 @@ public final class MaestroServer implements DedicatedServerModInitializer {
     ServerLifecycleEvents.SERVER_STOPPED.register(server -> Telemetry.shutdown());
 
     LOG.info(
-        "Maestro {} initialising: mode={} subMode={} otlp={} dev={}",
+        "Maestro {} initializing: mode={} subMode={} otlp={} dev={}",
         VERSION,
         config.mode(),
         config.subMode(),

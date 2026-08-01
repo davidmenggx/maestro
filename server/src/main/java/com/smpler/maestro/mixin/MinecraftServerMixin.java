@@ -33,6 +33,6 @@ public abstract class MinecraftServerMixin {
 
   @Inject(method = "loadLevel", at = @At("TAIL"))
   private void maestro$afterLoadLevel(CallbackInfo ci) {
-    LOG.info("Maestro mixin applied: level loaded, overworld is the only live dimension");
+    LOG.info("Maestro mixin applied and level loaded");
   }
 }
