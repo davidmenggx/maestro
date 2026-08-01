@@ -14,7 +14,7 @@ public final class WireProbe {
 
   private WireProbe() {}
 
-  /** Serialise a liveness Ping into a FlatBuffers buffer. */
+  /** Serialize a liveness Ping into a FlatBuffers buffer. */
   public static ByteBuffer buildPing(long sequence, long sendMicros) {
     FlatBufferBuilder builder = new FlatBufferBuilder(64);
     Ping.startPing(builder);
