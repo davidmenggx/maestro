@@ -89,8 +89,8 @@ server: schema-java ## Build the Fabric server mod jar
 server-test: schema-java ## Run the Java unit tests
 	cd server && $(GRADLE) test
 
-run-server: schema-java ## Boot a dev dedicated server with Maestro loaded
-	cd server && $(GRADLE) runServer
+run-server: schema-java ## Boot a dev server (WORLD=<name> loads worlds/<name>)
+	cd server && $(GRADLE) runServer $(if $(WORLD),-Pworld=$(WORLD)) $(if $(KEEP_WORLD),-PkeepWorld)
 
 test-boot: schema-java ## Boot the dev server and assert the mixins applied
 	tools/boot-smoke-test.sh

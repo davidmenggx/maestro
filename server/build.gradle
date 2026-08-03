@@ -92,6 +92,7 @@ processResources {
 // keeps every dev boot and benchmark run identical. `max-tick-time=-1` stops the
 // watchdog from killing a server paused in a debugger.
 def devRunDir = file("${projectDir}/run")
+def worldFixtureDir = file("${projectDir}/../worlds")
 def devServerProperties = [
   "level-type": "minecraft:flat",
   "level-seed": "maestro",
@@ -105,12 +106,47 @@ tasks.named("runServer") {
     devRunDir.mkdirs()
     new File(devRunDir, "eula.txt").text = "eula=true\n"
 
+    // `-Pworld=<name>` boots against the committed fixture in `worlds/<name>`
+    // rather than a freshly generated superflat.
+    def levelName = "world"
+    if (project.hasProperty("world")) {
+      def fixture = new File(worldFixtureDir, project.world)
+      if (!new File(fixture, "level.dat").isFile()) {
+        def available = worldFixtureDir.isDirectory()
+            ? worldFixtureDir.listFiles().findAll { it.isDirectory() }.collect { it.name }.sort()
+            : []
+        throw new GradleException(
+            "No world fixture at ${fixture} (expected a level.dat inside). Available: ${available}")
+      }
+
+      levelName = "world-${project.world}"
+      def working = new File(devRunDir, levelName)
+      // The server writes back to whichever world it loads, so each run starts
+      // from a fresh copy of the fixture. `-PkeepWorld` retains the working copy
+      // when iterating on terrain instead.
+      if (working.isDirectory() && project.hasProperty("keepWorld")) {
+        logger.lifecycle("Maestro: reusing existing world at ${working}")
+      } else {
+        if (working.isDirectory()) {
+          working.deleteDir()
+        }
+        logger.lifecycle("Maestro: copying world fixture '${project.world}' to ${working}")
+        copy {
+          from fixture
+          into working
+        }
+      }
+    }
+
     def propertiesFile = new File(devRunDir, "server.properties")
     def properties = new Properties()
     if (propertiesFile.exists()) {
       propertiesFile.withInputStream { properties.load(it) }
     }
     devServerProperties.each { key, value -> properties.setProperty(key, value) }
+    // Always written: a previous `-Pworld=` run would otherwise leave its
+    // `level-name` behind and silently redirect the next default boot.
+    properties.setProperty("level-name", levelName)
     propertiesFile.withOutputStream { properties.store(it, "Written by the runServer task") }
   }
 }

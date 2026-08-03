@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch makes the in-flight run redundant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "25"
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      # `flatc` is built from a pinned tag and every schema target depends on it.
+      - name: Cache flatc
+        uses: actions/cache@v4
+        with:
+          path: build/tools
+          key: flatc-${{ runner.os }}-${{ hashFiles('tools/CMakeLists.txt') }}
+
+      - name: Cache C++ dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: cpp-deps-${{ runner.os }}-${{ hashFiles('node/cmake/Dependencies.cmake') }}
+
+      # The OpenTelemetry C++ SDK builds gRPC from source and would dominate the
+      # run; the node's own code is unaffected by the toggle.
+      - name: Unit tests
+        run: make test MAESTRO_WITH_OTEL=OFF
+
+      # Mixin application is a runtime property, so it needs a real server boot.
+      # A cold runner downloads Minecraft and fabric-api first, hence the raised
+      # timeout.
+      - name: Server boot
+        run: make test-boot
+        env:
+          STARTUP_TIMEOUT: "600"
+
+      - name: Upload boot log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-smoke-test-log
+          path: server/build/boot-smoke-test.log
+          if-no-files-found: ignore
+
+  format:
+    name: Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # google-java-format runs from a local hook and needs a JDK.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - run: pip install pre-commit
+
+      - run: pre-commit run --all-files --show-diff-on-failure
