@@ -51,3 +51,5 @@ When implementing features, prefer a minimalistic implementation, but always ask
 DO NOT EVER DIRECTLY COMMIT CODE, I WILL ALWAYS REVIEW IT FIRST!
 
 Access the Minecraft source at https://mcsrc.dev/1/26.1/net/minecraft/world/level/pathfinder/PathType
+
+Communicate in simplified technical english.
