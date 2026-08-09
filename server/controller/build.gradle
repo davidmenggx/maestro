@@ -1,0 +1,52 @@
+plugins {
+  id 'java-library'
+}
+
+group = project.maven_group
+version = project.mod_version
+
+repositories {
+  mavenCentral()
+}
+
+// flatc emits the FlatBuffers bindings here (via `make schema-java`). They live
+// with the controller because the transport seam carries encoded frames; the mod
+// project sees them through the `api` dependency below.
+sourceSets.main.java.srcDir "${projectDir}/src/generated/java"
+
+dependencies {
+  api "com.google.flatbuffers:flatbuffers-java:${flatbuffers_version}"
+
+  testImplementation "org.junit.jupiter:junit-jupiter:${junit_version}"
+  testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+java {
+  toolchain {
+    languageVersion = JavaLanguageVersion.of(25)
+  }
+}
+
+tasks.withType(JavaCompile).configureEach {
+  options.encoding = 'UTF-8'
+  options.release = 25
+}
+
+test {
+  useJUnitPlatform()
+
+  // Forwarded to the forked test JVM, which does not inherit the Gradle JVM's
+  // properties. `make dst SEED=n` replays a seed reported by a failing run.
+  ["maestro.dst.seed", "maestro.dst.runs"].each { key ->
+    def value = System.getProperty(key)
+    if (value != null) {
+      systemProperty key, value
+    }
+  }
+
+  // A seed printed on failure is the whole replay story, so keep test output.
+  testLogging {
+    showStandardStreams = true
+    exceptionFormat = 'full'
+  }
+}

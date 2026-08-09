@@ -33,7 +33,8 @@ p99 latency < 3 ticks. Framed as latency, but the real target is throughput unde
 
 TESTING
 Fuzz testing compares Maestro vs vanilla Minecraft pathfinding by malus-weighted A* path cost across randomly generated regions. Test worlds are superflat with mild hills and obstacles but no overhangs or caves, so world state is a single vertical band per column. Some margin of error allowed since vanilla pathfinding isn't always optimal and Maestro uses optimizations like flow fields; this testing is for statistics/observability, not strict correctness.
-Live trials run on single-AZ AWS compute nodes. No Kubernetes, to allow direct fault injection. ChaosMonkey and tc used to test failover under network/node faults. A reproducible load generator is needed for live experiments.
+Deterministic simulation testing (DST) is the primary correctness mechanism for the Java controller's distributed logic: stream sequencing, resume-from-N, resharding, phi accrual, node loss and handoff, at-least-once duplicate delivery, last-write-wins, and queue-depth rejection. Scope is the controller only. Minecraft is an input source, not a participant: the simulation consumes tick boundaries, block changes, and mob requests through the world boundary interface, fed by a trace instead of by mixins. Compute nodes are modeled, not run; the real C++ node is covered by unit tests plus wire-level fixtures shared with the Java side. Simulated time is tick-driven with a deterministic intra-tick event queue. Runs are seeded and any failure replays from its seed. The simulator controls message delivery order, latency, drops, duplicates, and node death. Invariants asserted: per-region sequence monotonicity with no gaps, state after failover equal to a fresh full recomputation, every request answered or explicitly dropped, duplicate delivery idempotent, and p99 within the tick budget.
+Live trials run on single-AZ AWS compute nodes. ChaosMonkey and tc used to test failover under network/node faults. A reproducible load generator is needed for live experiments.
 Add thorough unit tests.
 
 OBSERVABILITY
@@ -47,6 +48,9 @@ After each long task completion, produce a `WHAT_CHANGED_X.md` file in the `ai-c
 Follow C++20 best practices and LLVM code style.
 
 When implementing features, prefer a minimalistic implementation, but always ask clarifying questions.
+
+Controller code must take all nondeterminism from injected interfaces, never from globals: wall clock and tick source, randomness, task scheduling, and transport. Production wires the real implementations, the simulator wires deterministic ones. Do not call System.currentTimeMillis, nanoTime, Instant.now, new Random, ThreadLocalRandom, Executors, or open sockets directly. Collections on the controller path must have deterministic iteration order, so key maps on values (longs, records) or use LinkedHashMap; identity hash codes vary per run and silently break replay.
+Controller code lives in `server/controller`, a plain Java module with no Minecraft, Fabric or Loom on its classpath, so a Minecraft type cannot reach it even by accident. The seams are in `com.smpler.maestro.controller.env` (Clock, Rng, Offload, Transport, Metrics, bundled as ControllerEnv) and the world boundary is in `...controller.world` (WorldEvent/WorldInput in, WorldOutput out, WorldSource for region reads). The mod holds the production implementations in `com.smpler.maestro.bridge` and the Minecraft-facing code. The simulator, its fault model and the invariants live in the controller module's test sources; `make dst` runs them, `make dst SEED=n` replays a seed.
 
 DO NOT EVER DIRECTLY COMMIT CODE, I WILL ALWAYS REVIEW IT FIRST!
 

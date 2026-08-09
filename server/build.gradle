@@ -19,14 +19,16 @@ repositories {
   }
 }
 
-// flatc emits the FlatBuffers bindings here (via `make schema-java`); treat the
-// directory as an extra source root rather than committing generated code.
-sourceSets.main.java.srcDir "${projectDir}/src/generated/java"
-
 configurations {
   // Resolved separately so the whole OpenTelemetry graph can be nested. See the
   // `include` loop below.
   otelBundle
+
+  // The controller is a library, not a mod, so its classes are merged into the
+  // mod jar rather than nested. Non-transitive: flatbuffers is nested on its own.
+  controllerClasses {
+    transitive = false
+  }
 }
 
 dependencies {
@@ -36,9 +38,15 @@ dependencies {
   implementation "net.fabricmc:fabric-loader:${loader_version}"
   implementation "net.fabricmc.fabric-api:fabric-api:${fabric_version}"
 
+  // Controller logic and the generated FlatBuffers bindings. This module is the
+  // one under deterministic simulation, so nothing Minecraft-shaped may leak in.
+  implementation project(':controller')
+  controllerClasses project(':controller')
+
   // flatbuffers-java has no transitive dependencies, so it is bundled into the
-  // mod jar via Fabric's Jar-in-Jar (`include`).
-  include implementation("com.google.flatbuffers:flatbuffers-java:${flatbuffers_version}")
+  // mod jar via Fabric's Jar-in-Jar (`include`). It reaches the compile
+  // classpath through the controller's `api` dependency, so `include` alone.
+  include "com.google.flatbuffers:flatbuffers-java:${flatbuffers_version}"
 
   // OpenTelemetry is wired onto the compile/runtime classpath via the BOM, and
   // mirrored into `otelBundle` so the resolved graph can be Jar-in-Jar'd.
@@ -52,7 +60,7 @@ dependencies {
   otelBundle "io.opentelemetry:opentelemetry-sdk"
   otelBundle "io.opentelemetry:opentelemetry-exporter-otlp"
 
-  testImplementation "org.junit.jupiter:junit-jupiter:5.11.4"
+  testImplementation "org.junit.jupiter:junit-jupiter:${junit_version}"
   testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 }
 
@@ -151,6 +159,13 @@ tasks.named("runServer") {
 }
 
 jar {
+  // Merged rather than nested: `controllerClasses` resolves to the controller
+  // jar alone, and the closure keeps resolution out of the configuration phase.
+  dependsOn configurations.controllerClasses
+  from({ configurations.controllerClasses.collect { zipTree(it) } }) {
+    exclude 'META-INF/**'
+  }
+
   // LICENSE lives at the repository root, one level above the Gradle project.
   def licenseFile = file("${projectDir}/../LICENSE")
   if (licenseFile.exists()) {
