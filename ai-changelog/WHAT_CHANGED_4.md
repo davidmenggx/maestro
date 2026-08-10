@@ -1,7 +1,7 @@
 # Mixin pipeline, dev server, overworld-only policy, config and telemetry
 
 The mod can now hook Minecraft internals and boot. `server/src/main/resources/maestro.mixins.json`
-declares a server-side mixin list under `com.smpler.maestro.mixin` and is referenced from
+declares a server-side mixin list under `io.github.davidmenggx.maestro.mixin` and is referenced from
 `fabric.mod.json`. Four mixins land: `MinecraftServerMixin` logs once at the tail of `loadLevel` to
 prove the pipeline applies, and redirects the `Registry.entrySet()` call inside `createLevels` to an
 empty set so no dimension but the overworld is ever constructed; `EntityMixin` refuses any

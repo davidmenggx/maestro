@@ -8,7 +8,7 @@ FlatBuffers bindings moved there too (`server/controller/src/generated/java`, `G
 dependency and the mod jar merges the module's classes rather than nesting them, which
 `unzip -l` on `maestro-0.1.0.jar` confirms.
 
-The seams themselves are in `com.smpler.maestro.controller.env`: `Clock` (tick plus monotonic
+The seams themselves are in `io.github.davidmenggx.maestro.controller.env`: `Clock` (tick plus monotonic
 nanos), `Rng` (a `RandomGenerator` with a named `derive` for independent substreams, implemented
 once by `SeededRng` on a pinned `L64X128MixRandom`), `Offload` (work off the main thread whose
 completion runs back on the controller thread at a tick boundary), `Transport` (byte frames over
@@ -17,7 +17,7 @@ instead of reaching for a global. The world boundary is in `...controller.world`
 `WorldEvent` covering tick boundaries, block changes, chunk load and unload, mob lifecycle, path
 requests and player positions; `WorldInput` to push them in; `WorldOutput` to hand back a
 `PathResult` or a `DropReason`; and `WorldSource` for the pull-side region reads a snapshot needs.
-`com.smpler.maestro.bridge` holds the production half, `ServerClock` and `PoolOffload`, wired in
+`io.github.davidmenggx.maestro.bridge` holds the production half, `ServerClock` and `PoolOffload`, wired in
 `MaestroServer` to `END_SERVER_TICK`.
 
 The harness is in the controller module's test sources. `Simulation` runs a tick-driven event queue
