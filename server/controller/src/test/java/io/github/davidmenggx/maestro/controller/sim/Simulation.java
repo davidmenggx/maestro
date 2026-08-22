@@ -23,10 +23,23 @@ import java.util.function.Supplier;
  */
 public final class Simulation {
 
+  /**
+   * Intra-tick resolution. One step is {@code NANOS_PER_TICK / STEPS_PER_TICK} = 50 microseconds.
+   */
   public static final int STEPS_PER_TICK = 1000;
 
-  /** One tick is 50ms, so one step is 50 microseconds. */
-  public static final long NANOS_PER_STEP = 50_000L;
+  /**
+   * A Minecraft tick is 50ms. The two constants above and below must keep multiplying out to this.
+   */
+  private static final long NANOS_PER_TICK = 50_000_000L;
+
+  private static final long NANOS_PER_STEP = NANOS_PER_TICK / STEPS_PER_TICK;
+
+  /**
+   * Where in the tick the fleet works. Mid-tick rather than at the edge, so a response is not
+   * pushed into the following tick purely by where the loop puts it.
+   */
+  private static final int SERVICE_STEP = STEPS_PER_TICK / 2;
 
   private record Scheduled(long time, long order, String name, Runnable action)
       implements Comparable<Scheduled> {
@@ -38,7 +51,6 @@ public final class Simulation {
     }
   }
 
-  private final long seed;
   private final FaultPlan faults;
   private final SeededRng rng;
   private final Rng offloadRng;
@@ -54,7 +66,6 @@ public final class Simulation {
   private long tick = -1;
 
   public Simulation(long seed, FaultPlan faults) {
-    this.seed = seed;
     this.faults = faults;
     this.rng = SeededRng.of(seed);
     this.offloadRng = rng.derive("offload");
@@ -68,10 +79,6 @@ public final class Simulation {
     return env;
   }
 
-  public SimTransport transport() {
-    return transport;
-  }
-
   public SimMetrics metrics() {
     return metrics;
   }
@@ -82,10 +89,6 @@ public final class Simulation {
 
   public Rng rng() {
     return rng;
-  }
-
-  public long tick() {
-    return tick;
   }
 
   /** Absolute step time. */
@@ -111,7 +114,7 @@ public final class Simulation {
     if (delaySteps < 1) {
       throw new IllegalArgumentException("delay must be at least one step: " + delaySteps);
     }
-    queue.add(new Scheduled(now + delaySteps, order++, name, action));
+    scheduleAt(now + delaySteps, name, action);
   }
 
   public void scheduleAt(long time, String name, Runnable action) {
@@ -136,9 +139,7 @@ public final class Simulation {
       deliver(controller, new WorldEvent.TickBegan(tick));
       workload.tick(tick, event -> deliver(controller, event));
 
-      // The fleet works through the tick rather than at its edge, so a response
-      // is not pushed into the next tick purely by where the loop puts it.
-      drainUntil(now + STEPS_PER_TICK / 2);
+      drainUntil(now + SERVICE_STEP);
       for (ModeledNode node : nodes.values()) {
         node.service(tick);
       }

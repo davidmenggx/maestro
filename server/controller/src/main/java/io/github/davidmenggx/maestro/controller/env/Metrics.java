@@ -1,9 +1,8 @@
 package io.github.davidmenggx.maestro.controller.env;
 
 /**
- * Counters and distributions. Deliberately free of timing calls of its own: every value is derived
- * from {@link Clock}, so a replayed run reports the same numbers. Production forwards to
- * OpenTelemetry; the simulator records the values and asserts on them.
+ * Counters and distributions. Free of timing calls of its own: every value is derived from {@link
+ * Clock}. Production forwards to OpenTelemetry.
  *
  * <p>{@code labels} are alternating key and value strings, kept as an array so iteration order is
  * fixed.

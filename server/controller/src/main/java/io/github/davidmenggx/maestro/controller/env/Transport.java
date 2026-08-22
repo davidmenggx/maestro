@@ -39,10 +39,7 @@ public interface Transport {
 
     void onConnected(NodeId node);
 
-    /**
-     * The link is gone: process death or a reset. Silence alone does not trigger this, so a frozen
-     * or partitioned node is only found by the failure detector.
-     */
+    /** The link is gone (process death or a reset). Separate from unresponsive node. */
     void onDisconnected(NodeId node);
   }
 

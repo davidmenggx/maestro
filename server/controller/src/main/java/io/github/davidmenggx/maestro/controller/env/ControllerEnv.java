@@ -2,11 +2,7 @@ package io.github.davidmenggx.maestro.controller.env;
 
 import java.util.Objects;
 
-/**
- * Every source of nondeterminism the controller is allowed to reach. Production wires the real
- * implementations, the simulator wires deterministic ones; controller code takes this record and
- * nothing else, which is what keeps a run replayable from its seed.
- */
+/** Every source of nondeterminism the controller is allowed to reach. */
 public record ControllerEnv(
     Clock clock, Rng rng, Offload offload, Transport transport, Metrics metrics) {
 

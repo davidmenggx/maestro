@@ -39,7 +39,7 @@ dependencies {
   implementation "net.fabricmc.fabric-api:fabric-api:${fabric_version}"
 
   // Controller logic and the generated FlatBuffers bindings. This module is the
-  // one under deterministic simulation, so nothing Minecraft-shaped may leak in.
+  // one under deterministic simulation, so nothing related to Minecraft may leak in.
   implementation project(':controller')
   controllerClasses project(':controller')
 

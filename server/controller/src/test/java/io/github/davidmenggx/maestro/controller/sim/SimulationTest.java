@@ -1,12 +1,14 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.env.NodeId;
+import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class SimulationTest {
@@ -26,11 +28,16 @@ class SimulationTest {
   }
 
   @Test
-  void differentSeedsProduceDifferentRuns() {
-    SimRun first = SimRun.of(7L, FaultPlan.reliable(), TICKS).go();
-    SimRun second = SimRun.of(8L, FaultPlan.reliable(), TICKS).go();
-
-    assertNotEquals(first.sim.digest().value(), second.sim.digest().value());
+  void everySeedProducesItsOwnRun() {
+    // Guards against the seed being ignored somewhere in the wiring. Two runs
+    // colliding by chance needs an FNV-1a collision across 64 bits, so for a
+    // sweep this size the false failure rate is far below one in a billion.
+    Set<Long> digests = new LinkedHashSet<>();
+    for (int i = 0; i < SimRun.runCount(); i++) {
+      digests.add(
+          SimRun.of(SimRun.baseSeed() + i, FaultPlan.reliable(), TICKS).go().sim.digest().value());
+    }
+    assertEquals(SimRun.runCount(), digests.size(), "two seeds produced the same run");
   }
 
   @Test
@@ -40,32 +47,65 @@ class SimulationTest {
       assertEquals(List.of(), run.violations(), run.describe());
       assertTrue(run.out.answered() > 0, run.describe());
       assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
+      assertEquals(0, run.out.dropped(DropReason.SHED), run.describe());
     }
   }
 
   @Test
-  void invariantsHoldWhenRequestsAreLostAndDuplicated() {
+  void eachRegionIsSnapshottedOnceThenStreamedAsDeltas() {
+    SimRun run = SimRun.of(3L, FaultPlan.reliable(), TICKS).go();
+
+    assertEquals(
+        run.regions.count(),
+        run.sim.metrics().counter("offload.submitted", "job", "snapshot"),
+        run.describe());
+    assertTrue(
+        run.sim.metrics().counter("offload.submitted", "job", "delta") > run.regions.count(),
+        run.describe());
+    for (ModeledNode node : run.sim.nodes()) {
+      assertTrue(node.hasState(), run.describe());
+      assertTrue(node.lastSequence() > 1, run.describe());
+    }
+  }
+
+  @Test
+  void lossHitsTheRequestStreamAndNeverTheWorldStream() {
     FaultPlan lossy = FaultPlan.reliable().withLoss(0.05, 0.05);
     long duplicatesSeen = 0;
+    long requestFramesDropped = 0;
 
     for (int i = 0; i < SimRun.runCount(); i++) {
       SimRun run = SimRun.of(SimRun.baseSeed() + i, lossy, TICKS).go();
       assertEquals(List.of(), run.violations(), run.describe());
       duplicatesSeen += run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum();
-
+      requestFramesDropped += counter(run, "transport.dropped", Channel.REQUEST);
       // The ordered stream is TCP-shaped: nothing on it is silently lost.
       assertEquals(
-          run.sim.metrics().counter("transport.sent", "node", "node-0", "channel", "WORLD"),
-          run.sim.metrics().counter("transport.received", "node", "node-0", "channel", "WORLD"),
+          counter(run, "transport.sent", Channel.WORLD),
+          counter(run, "transport.received", Channel.WORLD),
           run.describe());
+      assertEquals(0, counter(run, "transport.dropped", Channel.WORLD), run.describe());
     }
 
     assertTrue(duplicatesSeen > 0, "expected the request stream to duplicate at least once");
+    assertTrue(requestFramesDropped > 0, "expected the request stream to drop at least once");
+  }
+
+  @Test
+  void aDuplicatedRequestIsAnsweredOnceByTheController() {
+    SimRun run = SimRun.of(5L, FaultPlan.reliable().withLoss(0.0, 0.4), TICKS).go();
+
+    // The node re-answers a retry with the same bytes, so the controller sees more
+    // responses than requests and must discard the extras rather than double-apply.
+    assertTrue(run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum() > 0);
+    assertTrue(run.sim.metrics().counter("path.response.stale") > 0, run.describe());
+    assertEquals(List.of(), run.violations(), run.describe());
   }
 
   @Test
   void saturationIsRejectedBeforeSendingRatherThanMissedLater() {
-    SimRun run = SimRun.saturated(SimRun.baseSeed(), FaultPlan.reliable(), TICKS).go();
+    SimRun run =
+        SimRun.of(SimRun.baseSeed(), FaultPlan.reliable(), TICKS, SimRun.Scenario.SATURATED).go();
 
     assertTrue(run.out.dropped(DropReason.QUEUE_DEPTH) > 0, run.describe());
     assertTrue(run.out.answered() > 0, run.describe());
@@ -90,6 +130,11 @@ class SimulationTest {
     assertTrue(
         first.out.dropped(DropReason.NODE_LOST) + first.out.dropped(DropReason.NO_NODE) > 0,
         first.describe());
+    // The world stream restarts from a fresh snapshot rather than resuming into a gap.
+    assertTrue(first.sim.node(victim).hasState(), first.describe());
+    assertTrue(
+        first.sim.metrics().counter("offload.submitted", "job", "snapshot") > first.regions.count(),
+        first.describe());
   }
 
   @Test
@@ -108,5 +153,19 @@ class SimulationTest {
     // request timeout does, which is exactly the gap a failure detector fills.
     assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
     assertTrue(run.out.dropped(DropReason.SHED) > 0, run.describe());
+    // Held rather than lost, so the stream has no gap once the partition lifts.
+    assertTrue(counter(run, "transport.held", Channel.WORLD) > 0, run.describe());
+    assertTrue(run.sim.node(victim).lastSequence() > 1, run.describe());
+  }
+
+  private static long counter(SimRun run, String name, Channel channel) {
+    long total = 0;
+    for (int i = 0; i < run.regions.count(); i++) {
+      total +=
+          run.sim
+              .metrics()
+              .counter(name, "node", NodeId.of(i).toString(), "channel", channel.name());
+    }
+    return total;
   }
 }

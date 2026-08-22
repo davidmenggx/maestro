@@ -13,6 +13,8 @@ import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -45,7 +47,7 @@ import maestro.fbs.WorldSnapshot;
  * Minimal controller used to prove the seams carry a real workload: it assigns regions, snapshots
  * them, streams deltas in sequence, batches requests per tick and applies responses. Sharding,
  * failover and the failure detector are deliberately absent, since those are the logic this harness
- * exists to test later.
+ * exists to test.
  *
  * <p>The one non-obvious part is the outbox. Encoding is offloaded, completions come back in an
  * order the controller does not choose, and the world stream must still leave in sequence order, so
@@ -53,10 +55,13 @@ import maestro.fbs.WorldSnapshot;
  */
 public final class ProbeController implements WorldInput, Transport.Listener {
 
-  private static final int HEARTBEAT_TICKS = 20;
-
-  /** A request that cannot be answered within this many ticks is not worth sending. */
+  /**
+   * A request that cannot be answered within this many ticks is not worth sending or waiting for.
+   */
   public static final int MAX_TICKS_LATE = 10;
+
+  private static final int HEARTBEAT_TICKS = 20;
+  private static final int CHUNK_SIZE = 16;
 
   private record Outstanding(int mobId, NodeId node, long issuedTick) {}
 
@@ -66,15 +71,18 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private final WorldSource world;
   private final WorldOutput out;
   private final RegionMap regions;
-  private final int nodeCapacityPerTick;
+  private final int nodeCapacity;
 
   private final Map<Integer, Short> mobs = new LinkedHashMap<>();
-  private final Map<Integer, Pos> players = new LinkedHashMap<>();
-  private final Map<Long, Outstanding> outstanding = new LinkedHashMap<>();
-  private final Map<Integer, Long> requestByMob = new LinkedHashMap<>();
   private final Set<Long> loadedChunks = new LinkedHashSet<>();
   private final Set<NodeId> connected = new LinkedHashSet<>();
   private final Set<Integer> snapshotted = new LinkedHashSet<>();
+
+  /** Insertion ordered, and request ids only grow, so this is also issue-tick order. */
+  private final Map<Long, Outstanding> outstanding = new LinkedHashMap<>();
+
+  private final Map<Integer, Long> requestByMob = new LinkedHashMap<>();
+  private final Map<NodeId, Integer> inFlight = new LinkedHashMap<>();
   private final Map<NodeId, Integer> queueDepth = new LinkedHashMap<>();
   private final Map<NodeId, Long> lastSequence = new LinkedHashMap<>();
   private final Map<NodeId, Long> nextToSend = new LinkedHashMap<>();
@@ -88,18 +96,16 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private int requestsIssued;
 
   public ProbeController(
-      ControllerEnv env,
-      WorldSource world,
-      WorldOutput out,
-      RegionMap regions,
-      int nodeCapacityPerTick) {
+      ControllerEnv env, WorldSource world, WorldOutput out, RegionMap regions, int nodeCapacity) {
     this.env = env;
     this.world = world;
     this.out = out;
     this.regions = regions;
-    this.nodeCapacityPerTick = nodeCapacityPerTick;
+    this.nodeCapacity = nodeCapacity;
     env.transport().listen(this);
   }
+
+  // Assertion surface for the harness. Everything below this point is behaviour.
 
   public int requestsIssued() {
     return requestsIssued;
@@ -120,8 +126,10 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       case WorldEvent.MobSpawned e -> mobs.put(e.mobId(), e.classId());
       case WorldEvent.MobRemoved e -> onMobRemoved(e.mobId());
       case WorldEvent.PathRequested e -> onPathRequested(e);
-      case WorldEvent.PlayerMoved e -> players.put(e.playerId(), e.pos());
-      case WorldEvent.PlayerLeft e -> players.remove(e.playerId());
+      // Consumed once shedding and failover priorities exist; both order by
+      // distance to the nearest player.
+      case WorldEvent.PlayerMoved ignored -> {}
+      case WorldEvent.PlayerLeft ignored -> {}
     }
   }
 
@@ -138,16 +146,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   public void onDisconnected(NodeId node) {
     connected.remove(node);
     reset(node);
-    List<Long> lost =
-        outstanding.entrySet().stream()
-            .filter(e -> e.getValue().node().equals(node))
-            .map(Map.Entry::getKey)
-            .toList();
-    for (Long requestId : lost) {
-      Outstanding dropped = outstanding.remove(requestId);
-      requestByMob.remove(dropped.mobId());
-      out.pathDropped(dropped.mobId(), DropReason.NODE_LOST);
-    }
+    dropWhere(node, DropReason.NODE_LOST);
   }
 
   @Override
@@ -156,8 +155,10 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     switch (response.bodyType()) {
       case ResponseMsg.PathResponse ->
           onPathResponse((PathResponse) response.body(new PathResponse()));
-      case ResponseMsg.Pong ->
-          queueDepth.put(node, (int) ((Pong) response.body(new Pong())).queueDepth());
+      case ResponseMsg.Pong -> {
+        Pong pong = (Pong) response.body(new Pong());
+        queueDepth.put(node, (int) pong.queueDepth());
+      }
       default -> env.metrics().count("controller.unknown.response", 1);
     }
   }
@@ -186,26 +187,27 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   /**
    * A request nobody answered within the budget is given up on. A lost frame on the request stream
    * ends here, and so does a request to a node that went silent without resetting its connection.
+   * {@code outstanding} is in issue order, so the scan stops at the first live entry.
    */
   private void expireOutstanding(long tick) {
-    List<Long> expired =
-        outstanding.entrySet().stream()
-            .filter(e -> tick - e.getValue().issuedTick() > MAX_TICKS_LATE)
-            .map(Map.Entry::getKey)
-            .toList();
-    for (Long requestId : expired) {
-      Outstanding dropped = outstanding.remove(requestId);
-      requestByMob.remove(dropped.mobId());
+    Iterator<Map.Entry<Long, Outstanding>> entries = outstanding.entrySet().iterator();
+    while (entries.hasNext()) {
+      Map.Entry<Long, Outstanding> entry = entries.next();
+      if (tick - entry.getValue().issuedTick() <= MAX_TICKS_LATE) {
+        return;
+      }
+      entries.remove();
+      forget(entry.getValue());
       env.metrics().count("path.expired", 1);
-      out.pathDropped(dropped.mobId(), DropReason.SHED);
+      out.pathDropped(entry.getValue().mobId(), DropReason.SHED);
     }
   }
 
   private void onMobRemoved(int mobId) {
     mobs.remove(mobId);
-    Long requestId = requestByMob.remove(mobId);
-    if (requestId != null && outstanding.remove(requestId) != null) {
-      out.pathDropped(mobId, DropReason.MOB_GONE);
+    Long requestId = requestByMob.get(mobId);
+    if (requestId != null) {
+      drop(requestId, DropReason.MOB_GONE);
     }
   }
 
@@ -229,12 +231,10 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       return;
     }
 
-    // Heartbeats are far apart, so the reported depth is only a lower bound. What
+    // Heartbeats are far apart, so a reported depth is only a lower bound. What
     // the controller already has in flight to that node is the better estimate.
-    List<Queued> queued = pendingRequests.computeIfAbsent(node, k -> new ArrayList<>());
-    long inFlight = outstanding.values().stream().filter(o -> o.node().equals(node)).count();
-    long depth = Math.max(queueDepth.getOrDefault(node, 0), inFlight) + 1;
-    if (depth > (long) MAX_TICKS_LATE * nodeCapacityPerTick) {
+    long depth = Math.max(queueDepth.getOrDefault(node, 0), inFlight.getOrDefault(node, 0)) + 1;
+    if (depth > (long) MAX_TICKS_LATE * nodeCapacity) {
       env.metrics().count("path.rejected", 1, "reason", "queue_depth");
       out.pathDropped(mobId, DropReason.QUEUE_DEPTH);
       return;
@@ -243,23 +243,27 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     // One outstanding request per mob. The older one is reported dropped rather
     // than left dangling, so every request still ends in exactly one callback.
     Long previous = requestByMob.get(mobId);
-    if (previous != null && outstanding.remove(previous) != null) {
-      out.pathDropped(mobId, DropReason.SUPERSEDED);
+    if (previous != null) {
+      drop(previous, DropReason.SUPERSEDED);
     }
 
     long requestId = nextRequestId++;
     requestByMob.put(mobId, requestId);
     outstanding.put(requestId, new Outstanding(mobId, node, event.tick()));
-    queued.add(new Queued(requestId, mobId, classId, event.start(), event.target()));
+    inFlight.merge(node, 1, Integer::sum);
+    pendingRequests
+        .computeIfAbsent(node, k -> new ArrayList<>())
+        .add(new Queued(requestId, mobId, classId, event.start(), event.target()));
   }
 
   private void onPathResponse(PathResponse response) {
     Outstanding request = outstanding.remove(response.requestId());
     if (request == null) {
+      // A retry, or the answer to a request already superseded or given up on.
       env.metrics().count("path.response.stale", 1);
       return;
     }
-    requestByMob.remove(request.mobId());
+    forget(request);
 
     List<Pos> nodes = new ArrayList<>(response.nodesLength());
     Vec3i scratch = new Vec3i();
@@ -278,6 +282,36 @@ public final class ProbeController implements WorldInput, Transport.Listener {
             request.issuedTick()));
   }
 
+  /** Drops one known request id. */
+  private void drop(long requestId, DropReason reason) {
+    Outstanding request = outstanding.remove(requestId);
+    if (request == null) {
+      return;
+    }
+    forget(request);
+    out.pathDropped(request.mobId(), reason);
+  }
+
+  private void dropWhere(NodeId node, DropReason reason) {
+    List<Long> matching = new ArrayList<>();
+    for (Map.Entry<Long, Outstanding> entry : outstanding.entrySet()) {
+      if (entry.getValue().node().equals(node)) {
+        matching.add(entry.getKey());
+      }
+    }
+    for (Long requestId : matching) {
+      drop(requestId, reason);
+    }
+  }
+
+  /**
+   * Releases the per-mob and per-node bookkeeping for a request already out of {@code outstanding}.
+   */
+  private void forget(Outstanding request) {
+    requestByMob.remove(request.mobId());
+    inFlight.merge(request.node(), -1, Integer::sum);
+  }
+
   private void snapshotReadyRegions() {
     for (int region = 0; region < regions.count(); region++) {
       NodeId node = regions.owner(region);
@@ -286,10 +320,12 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       }
       snapshotted.add(region);
       // Read on the main thread, encode off it: `WorldSource` is only safe here.
-      int[] runCounts = new int[regions.regionSize() * regions.regionSize()];
-      List<int[]> runs = readRegionRuns(world, regions, region, runCounts);
+      int columns = regions.regionSize() * regions.regionSize();
+      int[] runCounts = new int[columns];
+      Runs runs = readRegionRuns(world, regions, region, runCounts);
+      int baseY = world.minY();
       long sequence = lastSequence.merge(node, 1L, Long::sum);
-      offload(node, sequence, "snapshot", () -> encodeSnapshot(sequence, runCounts, runs));
+      offload(node, sequence, "snapshot", () -> encodeSnapshot(sequence, baseY, runCounts, runs));
     }
   }
 
@@ -379,9 +415,9 @@ public final class ProbeController implements WorldInput, Transport.Listener {
 
   private boolean regionLoaded(int region) {
     int size = regions.regionSize();
-    for (int x = regions.minX(region); x < regions.minX(region) + size; x += 16) {
-      for (int z = regions.minZ(region); z < regions.minZ(region) + size; z += 16) {
-        if (!loadedChunks.contains(chunkKey(x >> 4, z >> 4))) {
+    for (int x = regions.minX(region); x < regions.minX(region) + size; x += CHUNK_SIZE) {
+      for (int z = regions.minZ(region); z < regions.minZ(region) + size; z += CHUNK_SIZE) {
+        if (!loadedChunks.contains(chunkKey(x / CHUNK_SIZE, z / CHUNK_SIZE))) {
           return false;
         }
       }
@@ -389,61 +425,87 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     return true;
   }
 
+  private void send(NodeId node, Channel channel, byte[] frame) {
+    env.metrics().record("frame.bytes", frame.length, "channel", channel.name());
+    env.transport().send(node, channel, ByteBuffer.wrap(frame));
+  }
+
   /** Region snapshot as the controller would build it, exposed so tests can recompute one. */
   static byte[] snapshotFrame(WorldSource world, RegionMap regions, int region, long sequence) {
     int[] runCounts = new int[regions.regionSize() * regions.regionSize()];
-    return encodeSnapshot(sequence, runCounts, readRegionRuns(world, regions, region, runCounts));
+    Runs runs = readRegionRuns(world, regions, region, runCounts);
+    return encodeSnapshot(sequence, world.minY(), runCounts, runs);
   }
 
-  private static List<int[]> readRegionRuns(
+  /**
+   * Column runs packed one per int as {@code (length << 8) | pathType}, which keeps a full-height
+   * region's worth of runs out of the allocator.
+   */
+  private static final class Runs {
+
+    private int[] packed = new int[64];
+    private int count;
+
+    void add(int length, byte pathType) {
+      if (count == packed.length) {
+        packed = Arrays.copyOf(packed, count * 2);
+      }
+      packed[count++] = (length << 8) | (pathType & 0xFF);
+    }
+
+    int length(int index) {
+      return packed[index] >>> 8;
+    }
+
+    int pathType(int index) {
+      return packed[index] & 0xFF;
+    }
+  }
+
+  private static Runs readRegionRuns(
       WorldSource world, RegionMap regions, int region, int[] runCounts) {
     int size = regions.regionSize();
     int minX = regions.minX(region);
     int minZ = regions.minZ(region);
-    List<int[]> runs = new ArrayList<>();
+    int height = world.height();
+    Runs runs = new Runs();
     for (int dx = 0; dx < size; dx++) {
       for (int dz = 0; dz < size; dz++) {
-        int column = dx * size + dz;
         int count = 0;
         int runLength = 0;
         byte runType = 0;
-        for (int dy = 0; dy < world.height(); dy++) {
+        for (int dy = 0; dy < height; dy++) {
           byte type = world.pathTypeAt(minX + dx, world.minY() + dy, minZ + dz);
           if (runLength > 0 && type == runType) {
             runLength++;
             continue;
           }
           if (runLength > 0) {
-            runs.add(new int[] {runLength, runType});
+            runs.add(runLength, runType);
             count++;
           }
           runType = type;
           runLength = 1;
         }
-        runs.add(new int[] {runLength, runType});
-        runCounts[column] = count + 1;
+        runs.add(runLength, runType);
+        runCounts[dx * size + dz] = count + 1;
       }
     }
     return runs;
   }
 
-  private void send(NodeId node, Channel channel, byte[] frame) {
-    env.metrics().record("frame.bytes", frame.length, "channel", channel.name());
-    env.transport().send(node, channel, ByteBuffer.wrap(frame));
-  }
-
-  private static byte[] encodeSnapshot(long sequence, int[] runCounts, List<int[]> runs) {
+  private static byte[] encodeSnapshot(long sequence, int baseY, int[] runCounts, Runs runs) {
     FlatBufferBuilder builder = new FlatBufferBuilder(4096);
     int counts = WorldSnapshot.createRunCountsVector(builder, runCounts);
-    WorldSnapshot.startRunsVector(builder, runs.size());
-    for (int i = runs.size() - 1; i >= 0; i--) {
-      CellRun.createCellRun(builder, runs.get(i)[0], runs.get(i)[1]);
+    WorldSnapshot.startRunsVector(builder, runs.count);
+    for (int i = runs.count - 1; i >= 0; i--) {
+      CellRun.createCellRun(builder, runs.length(i), runs.pathType(i));
     }
     int runsVector = builder.endVector();
 
     WorldSnapshot.startWorldSnapshot(builder);
     WorldSnapshot.addSequence(builder, sequence);
-    WorldSnapshot.addBaseY(builder, SimWorld.MIN_Y);
+    WorldSnapshot.addBaseY(builder, baseY);
     WorldSnapshot.addRunCounts(builder, counts);
     WorldSnapshot.addRuns(builder, runsVector);
     int snapshot = WorldSnapshot.endWorldSnapshot(builder);

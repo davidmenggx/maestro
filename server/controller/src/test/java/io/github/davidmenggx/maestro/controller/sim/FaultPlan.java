@@ -2,7 +2,6 @@ package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -30,7 +29,7 @@ public record FaultPlan(
 
   public record NodeRecovered(long tick, NodeId node) implements Fault {}
 
-  /** Silent black hole in both directions. No disconnect, so only the detector notices. */
+  /** Partitions are only found by the failure detector (as opposed to disconnects). */
   public record Partitioned(long tick, NodeId node, boolean on) implements Fault {}
 
   public FaultPlan {
@@ -48,10 +47,6 @@ public record FaultPlan(
     return new FaultPlan(2, 12, 0.0, 0.0, List.of());
   }
 
-  public FaultPlan withLatency(int minSteps, int maxSteps) {
-    return new FaultPlan(minSteps, maxSteps, dropRate, duplicateRate, faults);
-  }
-
   public FaultPlan withLoss(double drop, double duplicate) {
     return new FaultPlan(minLatencySteps, maxLatencySteps, drop, duplicate, faults);
   }
@@ -64,20 +59,5 @@ public record FaultPlan(
 
   public List<Fault> at(long tick) {
     return faults.stream().filter(f -> f.tick() == tick).toList();
-  }
-
-  @Override
-  public String toString() {
-    return "FaultPlan[latency="
-        + minLatencySteps
-        + ".."
-        + maxLatencySteps
-        + " drop="
-        + dropRate
-        + " dup="
-        + duplicateRate
-        + " faults="
-        + Arrays.toString(faults.toArray())
-        + "]";
   }
 }

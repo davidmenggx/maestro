@@ -11,10 +11,16 @@ import java.lang.classfile.ClassModel;
 import java.lang.classfile.constantpool.MemberRefEntry;
 import java.lang.classfile.constantpool.PoolEntry;
 import java.net.URISyntaxException;
+import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
@@ -65,28 +71,126 @@ class NondeterminismGuardTest {
   /** flatc output is not controller code and is not held to the rule. */
   private static final String GENERATED = "maestro/fbs/";
 
+  /** One sample per category the rules exist to catch. */
+  private static final List<Class<?>> VIOLATIONS =
+      List.of(
+          WallClock.class,
+          MonotonicClock.class,
+          InstantClock.class,
+          Randomness.class,
+          CoinFlip.class,
+          Identity.class,
+          OwnThread.class,
+          ThreadPool.class,
+          AsyncFuture.class,
+          RawSocket.class);
+
   @Test
   void controllerCodeTakesItsNondeterminismFromTheSeams() throws IOException, URISyntaxException {
-    List<String> findings = scan(classesRoot(Clock.class));
-    assertEquals(List.of(), findings);
+    assertEquals(List.of(), scanTree(classesRoot(Clock.class)));
   }
 
   @Test
-  void theScanFindsAViolationWhenThereIsOne() throws IOException, URISyntaxException {
-    Path self =
-        classesRoot(NondeterminismGuardTest.class)
-            .resolve(
-                "io/github/davidmenggx/maestro/controller/NondeterminismGuardTest$Naughty.class");
-    assertTrue(Files.exists(self), "expected the sample class at " + self);
-
-    List<String> findings = scan(self);
-    assertFalse(findings.isEmpty(), "the scan missed a direct System.nanoTime call");
+  void theScanCatchesEveryCategoryItClaimsTo() throws IOException, URISyntaxException {
+    List<String> missed = new ArrayList<>();
+    for (Class<?> sample : VIOLATIONS) {
+      if (scanClass(sample).isEmpty()) {
+        missed.add(sample.getSimpleName());
+      }
+    }
+    assertEquals(List.of(), missed, "the scan let a known violation through");
   }
 
-  /** Deliberately breaks the rule, so the scan has something to catch. */
-  static final class Naughty {
+  @Test
+  void theScanLeavesSeamOnlyCodeAlone() throws IOException, URISyntaxException {
+    assertEquals(List.of(), scanClass(Wellbehaved.class));
+  }
+
+  @Test
+  void everyRuleIsWellFormed() {
+    for (Rule rule : RULES) {
+      assertFalse(rule.owner().contains("."), "owners are internal names: " + rule.owner());
+      assertTrue(!rule.member().isBlank(), "empty member in " + rule.owner());
+    }
+  }
+
+  // Samples. Each one breaks the rule in exactly one way.
+
+  @SuppressWarnings("unused")
+  static final class WallClock {
+    long now() {
+      return System.currentTimeMillis();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class MonotonicClock {
     long now() {
       return System.nanoTime();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class InstantClock {
+    long now() {
+      return Instant.now().toEpochMilli();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class Randomness {
+    int draw() {
+      return new Random().nextInt();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class CoinFlip {
+    double draw() {
+      return Math.random();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class Identity {
+    String key() {
+      return UUID.randomUUID().toString();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class OwnThread {
+    void go(Runnable task) {
+      new Thread(task).start();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class ThreadPool {
+    void go(Runnable task) {
+      Executors.newSingleThreadExecutor().execute(task);
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class AsyncFuture {
+    void go() {
+      CompletableFuture.runAsync(() -> {});
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class RawSocket {
+    void go() throws IOException {
+      SocketChannel.open().close();
+    }
+  }
+
+  /** The negative control: takes time from the seam and touches nothing forbidden. */
+  @SuppressWarnings("unused")
+  static final class Wellbehaved {
+    long now(Clock clock) {
+      return clock.tick() + clock.nowNanos();
     }
   }
 
@@ -94,12 +198,16 @@ class NondeterminismGuardTest {
     return Path.of(anchor.getProtectionDomain().getCodeSource().getLocation().toURI());
   }
 
-  private static List<String> scan(Path root) throws IOException {
+  private static List<String> scanClass(Class<?> target) throws IOException, URISyntaxException {
+    Path file = classesRoot(target).resolve(target.getName().replace('.', '/') + ".class");
+    assertTrue(Files.exists(file), "expected a compiled sample at " + file);
     List<String> findings = new ArrayList<>();
-    if (Files.isRegularFile(root)) {
-      inspect(root, root.getFileName().toString(), findings);
-      return findings;
-    }
+    inspect(file, target.getSimpleName(), findings);
+    return findings;
+  }
+
+  private static List<String> scanTree(Path root) throws IOException {
+    List<String> findings = new ArrayList<>();
     try (Stream<Path> files = Files.walk(root)) {
       List<Path> classes =
           files

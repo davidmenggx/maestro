@@ -31,7 +31,7 @@ class ModeledNodeTest {
     // A node handed one fresh snapshot of the same world must agree with the one
     // that rebuilt from a snapshot plus a tick's worth of deltas at a time.
     int region = run.regions.indexOf(victim);
-    ModeledNode fresh = run.sim.addNode(NodeId.of(90), SimRun.NODE_CAPACITY);
+    ModeledNode fresh = run.sim.addNode(NodeId.of(90), 1);
     fresh.receive(
         Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeAssignment(run.regions, region)));
     fresh.receive(
@@ -46,7 +46,7 @@ class ModeledNodeTest {
     Simulation sim = new Simulation(3L, FaultPlan.reliable());
     ModeledNode node = sim.addNode(NodeId.of(0), 4);
     RegionMap regions = new RegionMap(16, 1, List.of(NodeId.of(0)));
-    SimWorld world = new SimWorld(16, 16, sim.rng().derive("terrain"));
+    SimWorld world = new SimWorld(16, sim.rng().derive("terrain"));
     world.loadChunk(0, 0);
 
     node.receive(Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeAssignment(regions, 0)));
@@ -60,7 +60,6 @@ class ModeledNodeTest {
     node.receive(Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeDelta(2, cells)));
     assertEquals(List.of(), node.violations());
 
-    // Sequence 3 is skipped, which is what a resumable stream must never do.
     node.receive(Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeDelta(4, cells)));
     assertFalse(node.violations().isEmpty(), "a skipped sequence went unreported");
   }

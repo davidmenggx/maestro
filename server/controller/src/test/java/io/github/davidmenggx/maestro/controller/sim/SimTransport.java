@@ -106,8 +106,8 @@ public final class SimTransport implements Transport {
   }
 
   /**
-   * Silent black hole. Ordered channels sit on TCP, so their frames are held and released in order
-   * once the partition lifts rather than lost; unordered frames are simply gone.
+   * Ordered channels sit on TCP, so their frames are held and released in order once the partition
+   * lifts rather than lost; unordered frames are simply gone.
    */
   public void partition(NodeId node, boolean on) {
     if (on) {

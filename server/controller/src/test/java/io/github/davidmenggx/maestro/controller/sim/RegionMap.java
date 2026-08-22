@@ -10,28 +10,36 @@ import java.util.List;
  */
 public record RegionMap(int regionSize, int regionsPerSide, List<NodeId> nodes) {
 
+  /** Chunk width. A region has to be chunk aligned, or residency cannot be decided per region. */
+  private static final int CHUNK_SIZE = 16;
+
   public RegionMap {
     nodes = List.copyOf(nodes);
+    if (regionSize <= 0 || regionSize % CHUNK_SIZE != 0) {
+      throw new IllegalArgumentException("region size must be a multiple of " + CHUNK_SIZE);
+    }
     if (nodes.size() != regionsPerSide * regionsPerSide) {
       throw new IllegalArgumentException("one node per region: " + nodes.size() + " nodes");
     }
+  }
+
+  /** Block extent of the whole grid along one axis. */
+  public int extent() {
+    return regionSize * regionsPerSide;
   }
 
   public int count() {
     return regionsPerSide * regionsPerSide;
   }
 
-  public int regionIndex(int x, int z) {
-    int rx = Math.floorDiv(x, regionSize);
-    int rz = Math.floorDiv(z, regionSize);
+  /** Region holding the position, or -1 when it falls outside the grid. */
+  public int regionIndex(Pos pos) {
+    int rx = Math.floorDiv(pos.x(), regionSize);
+    int rz = Math.floorDiv(pos.z(), regionSize);
     if (rx < 0 || rx >= regionsPerSide || rz < 0 || rz >= regionsPerSide) {
       return -1;
     }
     return rx * regionsPerSide + rz;
-  }
-
-  public int regionIndex(Pos pos) {
-    return regionIndex(pos.x(), pos.z());
   }
 
   public NodeId owner(int regionIndex) {

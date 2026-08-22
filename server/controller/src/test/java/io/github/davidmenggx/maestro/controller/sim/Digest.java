@@ -1,11 +1,6 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
-import java.nio.ByteBuffer;
-
-/**
- * Running FNV-1a hash of everything a run does. Two runs of one seed must end on the same value; a
- * mismatch means something outside the seams leaked in, usually an identity-ordered collection.
- */
+/** Running hash of everything a run does. Two runs of one seed must end on the same value. */
 public final class Digest {
 
   private static final long OFFSET = 0xcbf29ce484222325L;
@@ -30,13 +25,6 @@ public final class Digest {
   public Digest mix(byte[] bytes) {
     for (byte b : bytes) {
       value = (value ^ (b & 0xFF)) * PRIME;
-    }
-    return this;
-  }
-
-  public Digest mix(ByteBuffer buffer) {
-    for (int i = buffer.position(); i < buffer.limit(); i++) {
-      value = (value ^ (buffer.get(i) & 0xFF)) * PRIME;
     }
     return this;
   }

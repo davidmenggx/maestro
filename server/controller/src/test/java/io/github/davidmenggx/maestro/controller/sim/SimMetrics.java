@@ -8,8 +8,8 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * Records what the controller reports so invariants can assert on it. Backed by sorted maps, so a
- * dump reads the same way every run.
+ * Records what the controller reports so invariants can assert on it. Output order is consistent on
+ * repeated runs.
  */
 public final class SimMetrics implements Metrics {
 

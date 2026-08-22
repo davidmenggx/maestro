@@ -9,9 +9,6 @@ public interface Clock {
   /** Server tick currently being serviced. Advances by one per tick and never runs backwards. */
   long tick();
 
-  /**
-   * Monotonic nanoseconds. Only differences carry meaning: this is not a wall clock, and it does
-   * not survive a restart.
-   */
+  /** Monotonic nanoseconds (not wall clock) */
   long nowNanos();
 }

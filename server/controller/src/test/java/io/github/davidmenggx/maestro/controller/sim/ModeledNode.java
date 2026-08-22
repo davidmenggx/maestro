@@ -53,7 +53,12 @@ public final class ModeledNode {
   private final int capacityPerTick;
   private final Deque<Pending> queue = new ArrayDeque<>();
   private final Set<Long> queued = new LinkedHashSet<>();
+
+  /**
+   * Answers kept for retries. A real node would bound this by tick; a run is short enough not to.
+   */
   private final Map<Long, byte[]> answered = new LinkedHashMap<>();
+
   private final List<String> violations = new ArrayList<>();
 
   private boolean assigned;
@@ -73,13 +78,7 @@ public final class ModeledNode {
     this.capacityPerTick = capacityPerTick;
   }
 
-  public NodeId id() {
-    return id;
-  }
-
-  public int queueDepth() {
-    return queue.size();
-  }
+  // Assertion surface for the harness. Everything below this point is behaviour.
 
   public long lastSequence() {
     return lastSequence;
@@ -102,7 +101,6 @@ public final class ModeledNode {
     return new Digest().mix(minX).mix(minZ).mix(size).mix(baseY).mix(height).mix(cells).value();
   }
 
-  /** Process death. Everything in memory goes, which is what forces a resnapshot on recovery. */
   void kill() {
     assigned = false;
     cells = new byte[0];
@@ -205,7 +203,8 @@ public final class ModeledNode {
     int runIndex = 0;
     for (int column = 0; column < columns; column++) {
       int y = 0;
-      for (int r = 0; r < snapshot.runCounts(column); r++) {
+      int columnRuns = snapshot.runCounts(column);
+      for (int r = 0; r < columnRuns; r++) {
         snapshot.runs(run, runIndex++);
         for (int i = 0; i < run.length(); i++) {
           if (y >= height) {

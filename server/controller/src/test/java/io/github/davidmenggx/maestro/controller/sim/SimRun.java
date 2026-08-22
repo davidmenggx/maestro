@@ -1,8 +1,11 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.NodeId;
+import io.github.davidmenggx.maestro.controller.env.Rng;
+import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BiFunction;
 
 /**
  * One assembled run: world, fleet, controller and workload, all seeded from a single number. {@code
@@ -11,14 +14,28 @@ import java.util.List;
  */
 public final class SimRun {
 
+  /** Region geometry. `RegionMap` requires a chunk-aligned size, and the world is sized from it. */
   public static final int REGION_SIZE = 16;
+
   public static final int REGIONS_PER_SIDE = 2;
-  public static final int NODE_CAPACITY = 8;
-  public static final int MOB_COUNT = 12;
+
+  /**
+   * Trailing quiet ticks, so every in-flight request resolves before the invariants are checked.
+   */
   public static final long DRAIN_TICKS = 25;
 
-  /** p99 target from the SLO, in ticks. */
+  /** p99 target from the SLO, in ticks. Looser than the admission bound in `ProbeController`. */
   public static final double TICK_BUDGET = 3.0;
+
+  /** How much demand a run puts on the fleet. */
+  public record Scenario(int nodeCapacity, int mobCount, double requestChance) {
+
+    public static final Scenario DEFAULT =
+        new Scenario(8, 12, SyntheticWorkload.DEFAULT_REQUEST_CHANCE);
+
+    /** Far more demand than the fleet can serve, so pre-send rejection has to hold the line. */
+    public static final Scenario SATURATED = new Scenario(1, 40, 0.25);
+  }
 
   public final long seed;
   public final long ticks;
@@ -27,15 +44,14 @@ public final class SimRun {
   public final RegionMap regions;
   public final RecordingOutput out;
   public final ProbeController controller;
-  public final SyntheticWorkload workload;
+  public final Workload workload;
 
   private SimRun(
       long seed,
       FaultPlan faults,
       long ticks,
       int nodeCapacity,
-      int mobCount,
-      double requestChance) {
+      BiFunction<SimWorld, Rng, Workload> workloadFactory) {
     this.seed = seed;
     this.ticks = ticks;
     this.sim = new Simulation(seed, faults);
@@ -47,24 +63,36 @@ public final class SimRun {
       sim.addNode(id, nodeCapacity);
     }
 
-    int extent = REGION_SIZE * REGIONS_PER_SIDE;
     this.regions = new RegionMap(REGION_SIZE, REGIONS_PER_SIDE, nodes);
-    this.world = new SimWorld(extent, extent, sim.rng().derive("terrain"));
+    this.world = new SimWorld(regions.extent(), sim.rng().derive("terrain"));
     this.out = new RecordingOutput(sim);
     this.controller = new ProbeController(sim.env(), world, out, regions, nodeCapacity);
-    this.workload =
-        new SyntheticWorkload(
-            world, sim.rng().derive("workload"), mobCount, ticks - DRAIN_TICKS, requestChance);
+    this.workload = workloadFactory.apply(world, sim.rng().derive("workload"));
   }
 
   public static SimRun of(long seed, FaultPlan faults, long ticks) {
-    return new SimRun(
-        seed, faults, ticks, NODE_CAPACITY, MOB_COUNT, SyntheticWorkload.DEFAULT_REQUEST_CHANCE);
+    return of(seed, faults, ticks, Scenario.DEFAULT);
   }
 
-  /** Far more demand than the fleet can serve, so pre-send rejection has to hold the line. */
-  public static SimRun saturated(long seed, FaultPlan faults, long ticks) {
-    return new SimRun(seed, faults, ticks, 1, 40, 0.25);
+  public static SimRun of(long seed, FaultPlan faults, long ticks, Scenario scenario) {
+    return new SimRun(
+        seed,
+        faults,
+        ticks,
+        scenario.nodeCapacity(),
+        (world, rng) ->
+            new SyntheticWorkload(
+                world, rng, scenario.mobCount(), ticks - DRAIN_TICKS, scenario.requestChance()));
+  }
+
+  /** A run driven by a fixed event list rather than a generator, for focused tests. */
+  public static SimRun scripted(long seed, FaultPlan faults, long ticks, List<WorldEvent> events) {
+    return new SimRun(
+        seed,
+        faults,
+        ticks,
+        Scenario.DEFAULT.nodeCapacity(),
+        (world, rng) -> new ScriptedWorkload(world, events));
   }
 
   public SimRun go() {

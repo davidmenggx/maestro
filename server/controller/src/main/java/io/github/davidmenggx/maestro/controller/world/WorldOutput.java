@@ -4,7 +4,7 @@ import java.util.List;
 
 /**
  * What the controller hands back to the server, on the main thread. Exactly one call per request:
- * either a path or a drop, never both and never neither.
+ * either a path or a drop.
  */
 public interface WorldOutput {
 

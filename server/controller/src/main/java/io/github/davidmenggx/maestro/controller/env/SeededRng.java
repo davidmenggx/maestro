@@ -32,11 +32,6 @@ public final class SeededRng implements Rng {
     return new SeededRng(seed);
   }
 
-  /** Seed this stream was created from. Print it on failure: it is the whole replay input. */
-  public long seed() {
-    return seed;
-  }
-
   @Override
   public Rng derive(String name) {
     return new SeededRng(mix(seed, name));

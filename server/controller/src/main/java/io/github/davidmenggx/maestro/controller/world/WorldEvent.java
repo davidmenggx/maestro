@@ -1,9 +1,9 @@
 package io.github.davidmenggx.maestro.controller.world;
 
 /**
- * Everything the controller learns about the world, as data. Production emits these from mixins and
- * the simulator replays them from a trace or a generator, so both drive the controller down one
- * path. Events arrive on the server main thread, in tick order.
+ * Everything the controller learns about the world. Production emits these from mixins and the
+ * simulator replays them from a trace or generator. Events arrive on the server main thread in tick
+ * order.
  */
 public sealed interface WorldEvent {
 
