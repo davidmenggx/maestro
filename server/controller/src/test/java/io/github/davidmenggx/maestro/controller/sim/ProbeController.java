@@ -5,6 +5,7 @@ import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldInput;
@@ -19,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Supplier;
@@ -26,6 +28,7 @@ import maestro.fbs.CellDelta;
 import maestro.fbs.CellRun;
 import maestro.fbs.ControlFrame;
 import maestro.fbs.ControlMsg;
+import maestro.fbs.MobClassTable;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
 import maestro.fbs.PathResponse;
@@ -91,16 +94,21 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private final List<WorldEvent.BlockChanged> pendingCells = new ArrayList<>();
   private final Map<NodeId, List<Queued>> pendingRequests = new LinkedHashMap<>();
 
+  private final List<String> selfViolations = new ArrayList<>();
+
   private long nextRequestId = 1;
   private long pingSequence;
   private int requestsIssued;
 
   public ProbeController(
       ControllerEnv env, WorldSource world, WorldOutput out, RegionMap regions, int nodeCapacity) {
-    this.env = env;
-    this.world = world;
-    this.out = out;
-    this.regions = regions;
+    if (nodeCapacity < 1) {
+      throw new IllegalArgumentException("a node serves at least one request a tick");
+    }
+    this.env = Objects.requireNonNull(env, "env");
+    this.world = Objects.requireNonNull(world, "world");
+    this.out = Objects.requireNonNull(out, "out");
+    this.regions = Objects.requireNonNull(regions, "regions");
     this.nodeCapacity = nodeCapacity;
     env.transport().listen(this);
   }
@@ -115,6 +123,38 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     return outstanding.size();
   }
 
+  /**
+   * Internal bookkeeping that has to agree: one mob mapping per outstanding request, per-node
+   * in-flight counters that sum to the total, and an admission bound that was never exceeded.
+   */
+  public List<String> selfCheck() {
+    List<String> found = new ArrayList<>(selfViolations);
+    if (requestByMob.size() != outstanding.size()) {
+      found.add(
+          "mob index holds "
+              + requestByMob.size()
+              + " but "
+              + outstanding.size()
+              + " requests are outstanding");
+    }
+    for (Map.Entry<Integer, Long> entry : requestByMob.entrySet()) {
+      Outstanding request = outstanding.get(entry.getValue());
+      if (request == null || request.mobId() != entry.getKey()) {
+        found.add("mob " + entry.getKey() + " points at a request that is not outstanding");
+      }
+    }
+    int counted = inFlight.values().stream().mapToInt(Integer::intValue).sum();
+    if (counted != outstanding.size()) {
+      found.add("in-flight counters sum to " + counted + ", outstanding is " + outstanding.size());
+    }
+    for (Map.Entry<NodeId, Integer> entry : inFlight.entrySet()) {
+      if (entry.getValue() < 0) {
+        found.add(entry.getKey() + " has a negative in-flight count: " + entry.getValue());
+      }
+    }
+    return found;
+  }
+
   @Override
   public void accept(WorldEvent event) {
     switch (event) {
@@ -122,10 +162,11 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       case WorldEvent.TickEnded ignored -> onTickEnded();
       case WorldEvent.BlockChanged e -> pendingCells.add(e);
       case WorldEvent.ChunkLoaded e -> loadedChunks.add(chunkKey(e.chunkX(), e.chunkZ()));
-      case WorldEvent.ChunkUnloaded e -> loadedChunks.remove(chunkKey(e.chunkX(), e.chunkZ()));
+      case WorldEvent.ChunkUnloaded e -> onChunkUnloaded(e.chunkX(), e.chunkZ());
       case WorldEvent.MobSpawned e -> mobs.put(e.mobId(), e.classId());
       case WorldEvent.MobRemoved e -> onMobRemoved(e.mobId());
       case WorldEvent.PathRequested e -> onPathRequested(e);
+      case WorldEvent.PathCancelled e -> onPathCancelled(e.mobId());
       // Consumed once shedding and failover priorities exist; both order by
       // distance to the nearest player.
       case WorldEvent.PlayerMoved ignored -> {}
@@ -140,6 +181,9 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     // On the world channel, not the control one: the assignment has to reach the
     // node ahead of the snapshot it frames, and only one channel orders them.
     send(node, Channel.WORLD, encodeAssignment(regions, regions.indexOf(node)));
+    // Ordered channel, because a request naming a class the node has not been
+    // told about cannot be answered.
+    send(node, Channel.CONTROL, encodeMobClasses(world.mobClasses()));
   }
 
   @Override
@@ -203,6 +247,23 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     }
   }
 
+  /** The region's state is unknown until the chunk returns, so the stream stops and resnapshots. */
+  private void onChunkUnloaded(int chunkX, int chunkZ) {
+    loadedChunks.remove(chunkKey(chunkX, chunkZ));
+    for (int region = 0; region < regions.count(); region++) {
+      if (snapshotted.contains(region) && !regionLoaded(region)) {
+        snapshotted.remove(region);
+      }
+    }
+  }
+
+  private void onPathCancelled(int mobId) {
+    Long requestId = requestByMob.get(mobId);
+    if (requestId != null) {
+      drop(requestId, DropReason.CANCELLED);
+    }
+  }
+
   private void onMobRemoved(int mobId) {
     mobs.remove(mobId);
     Long requestId = requestByMob.get(mobId);
@@ -250,7 +311,15 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     long requestId = nextRequestId++;
     requestByMob.put(mobId, requestId);
     outstanding.put(requestId, new Outstanding(mobId, node, event.tick()));
-    inFlight.merge(node, 1, Integer::sum);
+    int nowInFlight = inFlight.merge(node, 1, Integer::sum);
+    if (nowInFlight > MAX_TICKS_LATE * nodeCapacity) {
+      selfViolations.add(
+          node
+              + " holds "
+              + nowInFlight
+              + " requests, past the admission bound of "
+              + (MAX_TICKS_LATE * nodeCapacity));
+    }
     pendingRequests
         .computeIfAbsent(node, k -> new ArrayList<>())
         .add(new Queued(requestId, mobId, classId, event.start(), event.target()));
@@ -570,6 +639,33 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     RegionAssignment.addResumeFromSequence(builder, 0);
     int assignment = RegionAssignment.endRegionAssignment(builder);
     builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.RegionAssignment, assignment));
+    return builder.sizedByteArray();
+  }
+
+  private static byte[] encodeMobClasses(List<MobClass> classes) {
+    FlatBufferBuilder builder = new FlatBufferBuilder(512);
+    int[] offsets = new int[classes.size()];
+    for (int i = 0; i < classes.size(); i++) {
+      MobClass profile = classes.get(i);
+      int malus = maestro.fbs.MobClass.createMalusVector(builder, profile.malus());
+      maestro.fbs.MobClass.startMobClass(builder);
+      maestro.fbs.MobClass.addClassId(builder, profile.classId());
+      maestro.fbs.MobClass.addWidth(builder, profile.width());
+      maestro.fbs.MobClass.addHeight(builder, profile.height());
+      maestro.fbs.MobClass.addMalus(builder, malus);
+      maestro.fbs.MobClass.addMaxUpStep(builder, profile.maxUpStep());
+      maestro.fbs.MobClass.addCanPassDoors(builder, profile.canPassDoors());
+      maestro.fbs.MobClass.addCanOpenDoors(builder, profile.canOpenDoors());
+      maestro.fbs.MobClass.addCanFloat(builder, profile.canFloat());
+      maestro.fbs.MobClass.addCanWalkOverFences(builder, profile.canWalkOverFences());
+      maestro.fbs.MobClass.addMaxFollowRange(builder, profile.maxFollowRange());
+      offsets[i] = maestro.fbs.MobClass.endMobClass(builder);
+    }
+    int vector = MobClassTable.createClassesVector(builder, offsets);
+    MobClassTable.startMobClassTable(builder);
+    MobClassTable.addClasses(builder, vector);
+    int table = MobClassTable.endMobClassTable(builder);
+    builder.finish(ControlFrame.createControlFrame(builder, ControlMsg.MobClassTable, table));
     return builder.sizedByteArray();
   }
 

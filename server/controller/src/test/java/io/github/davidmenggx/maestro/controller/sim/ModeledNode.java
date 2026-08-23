@@ -3,6 +3,7 @@ package io.github.davidmenggx.maestro.controller.sim;
 import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
@@ -17,6 +18,8 @@ import maestro.fbs.CellDelta;
 import maestro.fbs.CellRun;
 import maestro.fbs.ControlFrame;
 import maestro.fbs.ControlMsg;
+import maestro.fbs.MobClass;
+import maestro.fbs.MobClassTable;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
 import maestro.fbs.PathResponse;
@@ -59,6 +62,7 @@ public final class ModeledNode {
    */
   private final Map<Long, byte[]> answered = new LinkedHashMap<>();
 
+  private final Set<Short> knownClasses = new LinkedHashSet<>();
   private final List<String> violations = new ArrayList<>();
 
   private boolean assigned;
@@ -72,6 +76,9 @@ public final class ModeledNode {
   private long duplicateRequests;
 
   ModeledNode(Simulation sim, SimTransport transport, NodeId id, int capacityPerTick) {
+    if (capacityPerTick < 1) {
+      throw new IllegalArgumentException("a node serves at least one request a tick");
+    }
     this.sim = sim;
     this.transport = transport;
     this.id = id;
@@ -79,6 +86,15 @@ public final class ModeledNode {
   }
 
   // Assertion surface for the harness. Everything below this point is behaviour.
+
+  public NodeId id() {
+    return id;
+  }
+
+  /** Mob profiles this node has been told about. */
+  public int knownClassCount() {
+    return knownClasses.size();
+  }
 
   public long lastSequence() {
     return lastSequence;
@@ -108,6 +124,7 @@ public final class ModeledNode {
     queue.clear();
     queued.clear();
     answered.clear();
+    knownClasses.clear();
   }
 
   void receive(Channel channel, ByteBuffer frame) {
@@ -161,10 +178,22 @@ public final class ModeledNode {
     ControlFrame control = ControlFrame.getRootAsControlFrame(frame);
     switch (control.bodyType()) {
       case ControlMsg.Ping -> pong((Ping) control.body(new Ping()));
-      case ControlMsg.RegionAssignment ->
-          assign((RegionAssignment) control.body(new RegionAssignment()));
+      case ControlMsg.MobClassTable ->
+          registerClasses((MobClassTable) control.body(new MobClassTable()));
       case ControlMsg.Hello -> {}
       default -> violations.add(id + ": unknown control body " + control.bodyType());
+    }
+  }
+
+  private void registerClasses(MobClassTable table) {
+    MobClass scratch = new MobClass();
+    for (int i = 0; i < table.classesLength(); i++) {
+      table.classes(scratch, i);
+      if (scratch.malusLength() != PathTypes.count()) {
+        violations.add(
+            id + ": class " + scratch.classId() + " malus covers " + scratch.malusLength());
+      }
+      knownClasses.add((short) scratch.classId());
     }
   }
 
@@ -206,12 +235,17 @@ public final class ModeledNode {
       int columnRuns = snapshot.runCounts(column);
       for (int r = 0; r < columnRuns; r++) {
         snapshot.runs(run, runIndex++);
+        byte type = (byte) run.nodeType();
+        if (!PathTypes.isPerBlock(type)) {
+          violations.add(id + ": snapshot run carries derived type " + PathTypes.name(type));
+          return;
+        }
         for (int i = 0; i < run.length(); i++) {
           if (y >= height) {
             violations.add(id + ": column " + column + " overflows region height");
             return;
           }
-          cells[column * height + y++] = (byte) run.nodeType();
+          cells[column * height + y++] = type;
         }
       }
       if (y != height) {
@@ -236,16 +270,24 @@ public final class ModeledNode {
     CellDelta cell = new CellDelta();
     for (int i = 0; i < delta.cellsLength(); i++) {
       delta.cells(cell, i);
+      byte type = (byte) cell.nodeType();
+      if (!PathTypes.isPerBlock(type)) {
+        violations.add(id + ": delta cell carries derived type " + PathTypes.name(type));
+        continue;
+      }
       Vec3i pos = cell.pos();
       int index = index(pos.x(), pos.y(), pos.z());
       if (index >= 0) {
-        cells[index] = (byte) cell.nodeType();
+        cells[index] = type;
       }
     }
   }
 
   private void enqueue(PathRequest request) {
     long requestId = request.requestId();
+    if (!knownClasses.contains((short) request.classId())) {
+      violations.add(id + ": request " + requestId + " names unknown class " + request.classId());
+    }
     byte[] prior = answered.get(requestId);
     if (prior != null) {
       // At-least-once delivery: answer the retry with the byte-identical response.

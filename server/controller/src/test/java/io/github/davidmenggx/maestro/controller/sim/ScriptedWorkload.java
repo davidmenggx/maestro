@@ -19,7 +19,7 @@ public final class ScriptedWorkload implements Workload {
   private final SimWorld world;
 
   public ScriptedWorkload(SimWorld world, List<WorldEvent> events) {
-    this.world = world;
+    this.world = java.util.Objects.requireNonNull(world, "world");
     for (WorldEvent event : events) {
       byTick.computeIfAbsent(event.tick(), k -> new ArrayList<>()).add(event);
     }

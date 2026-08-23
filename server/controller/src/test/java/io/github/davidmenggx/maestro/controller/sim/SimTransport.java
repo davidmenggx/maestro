@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -45,11 +46,20 @@ public final class SimTransport implements Transport {
 
   @Override
   public void listen(Listener listener) {
-    this.listener = listener;
+    if (this.listener != null) {
+      throw new IllegalStateException("the transport already has a listener");
+    }
+    this.listener = Objects.requireNonNull(listener, "listener");
   }
 
   @Override
   public void connect(NodeId node, String endpoint) {
+    if (listener == null) {
+      throw new IllegalStateException("connect before listen");
+    }
+    if (!nodes.containsKey(node)) {
+      throw new IllegalArgumentException(node + " is not in the fleet");
+    }
     sim.metrics().count("transport.connect", 1, "node", node.toString());
     int attempt = bumpEpoch(node);
     sim.schedule(

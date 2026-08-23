@@ -13,6 +13,9 @@ table Hello {
 // server-assigned monotonic id. `resume_from_sequence`
 // is where the world stream resumes; 0 requests a full
 // snapshot.
+//
+// Travels on the world stream only, so it is ordered ahead
+// of the snapshot and deltas it frames.
 table RegionAssignment {
   region_id:uint;
   min_xz:Vec2i;
@@ -35,13 +38,16 @@ table Pong {
 union WorldMsg { WorldDelta, RegionAssignment, WorldSnapshot }
 table WorldFrame { body:WorldMsg; }
 
-union RequestMsg { PathRequest, PathRequestBatch, MobClassTable }
+union RequestMsg { PathRequest, PathRequestBatch }
 table RequestFrame { body:RequestMsg; }
 
 union ResponseMsg { PathResponse, PathResponseBatch, Pong }
 table ResponseFrame { body:ResponseMsg; }
 
-union ControlMsg { Hello, Ping, RegionAssignment }
+// `MobClassTable` is control plane: registered once and
+// required before any request naming a class, so it rides
+// an ordered channel rather than the lossy request stream.
+union ControlMsg { Hello, Ping, MobClassTable }
 table ControlFrame { body:ControlMsg; }
 
 // flatc allows one root_type. Other frames are read via GetRoot<T>() in code.

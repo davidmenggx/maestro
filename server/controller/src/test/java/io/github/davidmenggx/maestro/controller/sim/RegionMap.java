@@ -43,7 +43,7 @@ public record RegionMap(int regionSize, int regionsPerSide, List<NodeId> nodes) 
   }
 
   public NodeId owner(int regionIndex) {
-    return nodes.get(regionIndex);
+    return nodes.get(requireRegion(regionIndex));
   }
 
   public int indexOf(NodeId node) {
@@ -51,10 +51,17 @@ public record RegionMap(int regionSize, int regionsPerSide, List<NodeId> nodes) 
   }
 
   public int minX(int regionIndex) {
-    return (regionIndex / regionsPerSide) * regionSize;
+    return (requireRegion(regionIndex) / regionsPerSide) * regionSize;
   }
 
   public int minZ(int regionIndex) {
-    return (regionIndex % regionsPerSide) * regionSize;
+    return (requireRegion(regionIndex) % regionsPerSide) * regionSize;
+  }
+
+  private int requireRegion(int regionIndex) {
+    if (regionIndex < 0 || regionIndex >= count()) {
+      throw new IllegalArgumentException("no such region: " + regionIndex);
+    }
+    return regionIndex;
   }
 }

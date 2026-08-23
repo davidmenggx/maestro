@@ -12,12 +12,14 @@ public interface WorldOutput {
   enum DropReason {
     /** Rejected before sending: the owning node would answer past the tick budget. */
     QUEUE_DEPTH,
-    /** No node owns the region, usually mid-handoff. */
+    /** No node owns the region. */
     NO_NODE,
     /** The owner died before answering. */
     NODE_LOST,
     /** The mob was removed while the request was in flight. */
     MOB_GONE,
+    /** The mob withdrew the request before it was answered. */
+    CANCELLED,
     /** The mob asked again before this one was answered, so the older request was abandoned. */
     SUPERSEDED,
     /** Dropped to hold the latency SLO under a saturated fleet. */
@@ -30,6 +32,13 @@ public interface WorldOutput {
 
     public PathResult {
       nodes = List.copyOf(nodes);
+      if (computedTick < issuedTick) {
+        throw new IllegalArgumentException(
+            "a path cannot be computed before it was asked for: "
+                + computedTick
+                + " < "
+                + issuedTick);
+      }
     }
   }
 

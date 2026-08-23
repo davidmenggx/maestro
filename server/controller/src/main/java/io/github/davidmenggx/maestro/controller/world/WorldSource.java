@@ -1,5 +1,7 @@
 package io.github.davidmenggx.maestro.controller.world;
 
+import java.util.List;
+
 /**
  * Pull side of the world boundary, read on the main thread when a region snapshot is built.
  * Production reads loaded chunks; the simulator reads its own terrain model.
@@ -9,6 +11,12 @@ package io.github.davidmenggx.maestro.controller.world;
  * is no second answer to disagree with.
  */
 public interface WorldSource {
+
+  /**
+   * Every land-mob profile a request may name. Fixed after startup, so the controller reads it once
+   * per node and sends it before any request that references a class.
+   */
+  List<MobClass> mobClasses();
 
   /** Lowest block y in the dimension. */
   int minY();

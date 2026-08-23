@@ -100,6 +100,59 @@ class WorldBoundaryTest {
     }
   }
 
+  @Test
+  void aCancelledRequestIsDroppedRatherThanAnswered() {
+    List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
+    script.add(new WorldEvent.MobSpawned(0, MOB, MOB_CLASS, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE));
+    script.add(new WorldEvent.PathCancelled(3, MOB));
+    // A cancel for a mob with nothing outstanding changes nothing.
+    script.add(new WorldEvent.PathCancelled(8, MOB));
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, run.controller.requestsIssued(), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.CANCELLED), run.describe());
+    assertEquals(0, run.out.answered(), run.describe());
+  }
+
+  @Test
+  void anUnloadedChunkStopsItsRegionUntilTheChunkReturns() {
+    List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
+    script.add(new WorldEvent.MobSpawned(0, MOB, MOB_CLASS, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE));
+    script.add(new WorldEvent.ChunkUnloaded(6, HERE.x() / CHUNK_SIZE, HERE.z() / CHUNK_SIZE));
+    script.add(new WorldEvent.PathRequested(8, MOB, HERE, THERE));
+    script.add(new WorldEvent.ChunkLoaded(10, HERE.x() / CHUNK_SIZE, HERE.z() / CHUNK_SIZE));
+    script.add(new WorldEvent.PathRequested(14, MOB, HERE, THERE));
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(3, run.controller.requestsIssued(), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.NO_NODE), run.describe());
+    assertEquals(2, run.out.answered(), run.describe());
+    // The region is snapshotted again on return rather than resuming into a gap.
+    assertEquals(
+        run.regions.count() + 1,
+        run.sim.metrics().counter("offload.submitted", "job", "snapshot"),
+        run.describe());
+  }
+
+  @Test
+  void aRequestNamingAnUnregisteredClassIsCaughtByTheNode() {
+    List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
+    script.add(new WorldEvent.MobSpawned(0, MOB, (short) 99, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE));
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+
+    assertTrue(
+        run.violations().stream().anyMatch(v -> v.contains("unknown class")),
+        "the node accepted a request for a class it was never told about: " + run.violations());
+  }
+
   private static List<WorldEvent> chunkLoads(long tick) {
     int chunksPerSide = SimRun.REGION_SIZE * SimRun.REGIONS_PER_SIDE / CHUNK_SIZE;
     List<WorldEvent> events = new ArrayList<>();

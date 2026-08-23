@@ -103,9 +103,40 @@ class SimulationTest {
   }
 
   @Test
+  void everyNodeIsToldTheMobClassTableBeforeItIsAskedForAPath() {
+    SimRun run = SimRun.of(17L, FaultPlan.reliable(), TICKS).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    for (ModeledNode node : run.sim.nodes()) {
+      assertEquals(run.world.mobClasses().size(), node.knownClassCount(), run.describe());
+    }
+  }
+
+  @Test
+  void chunkChurnHoldsTheInvariantsAndStaysDeterministic() {
+    long resnapshots = 0;
+    long unreadable = 0;
+
+    for (int i = 0; i < SimRun.runCount(); i++) {
+      long seed = SimRun.baseSeed() + i;
+      SimRun run = SimRun.of(seed, FaultPlan.reliable(), TICKS, Scenario.CHURN).go();
+      assertEquals(List.of(), run.violations(), run.describe());
+      resnapshots += run.sim.metrics().counter("offload.submitted", "job", "snapshot");
+      unreadable += run.out.dropped(DropReason.NO_NODE);
+
+      // More event kinds in play must not cost determinism.
+      SimRun again = SimRun.of(seed, FaultPlan.reliable(), TICKS, Scenario.CHURN).go();
+      assertEquals(run.sim.digest().value(), again.sim.digest().value(), run.describe());
+    }
+
+    // Chunks really did leave and come back, so the assertions above meant something.
+    assertTrue(resnapshots > SimRun.runCount() * 4L, "expected regions to be snapshotted again");
+    assertTrue(unreadable > 0, "expected some requests to find their region unreadable");
+  }
+
+  @Test
   void saturationIsRejectedBeforeSendingRatherThanMissedLater() {
-    SimRun run =
-        SimRun.of(SimRun.baseSeed(), FaultPlan.reliable(), TICKS, SimRun.Scenario.SATURATED).go();
+    SimRun run = SimRun.of(SimRun.baseSeed(), FaultPlan.reliable(), TICKS, Scenario.SATURATED).go();
 
     assertTrue(run.out.dropped(DropReason.QUEUE_DEPTH) > 0, run.describe());
     assertTrue(run.out.answered() > 0, run.describe());

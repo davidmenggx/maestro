@@ -56,3 +56,5 @@ DO NOT EVER DIRECTLY COMMIT CODE, I WILL ALWAYS REVIEW IT FIRST!
 Access the Minecraft source at https://mcsrc.dev/1/26.1/net/minecraft/world/level/pathfinder/PathType
 
 Communicate in concise, plain, simplified technical english.
+
+Avoid needlessly appending to CLAUDE.md unless a breaking API or design decision is made.

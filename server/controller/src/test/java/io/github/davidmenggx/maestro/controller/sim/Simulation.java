@@ -11,6 +11,7 @@ import io.github.davidmenggx.maestro.controller.world.WorldInput;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.PriorityQueue;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -98,7 +99,9 @@ public final class Simulation {
 
   public ModeledNode addNode(NodeId id, int capacityPerTick) {
     ModeledNode node = new ModeledNode(this, transport, id, capacityPerTick);
-    nodes.put(id, node);
+    if (nodes.put(id, node) != null) {
+      throw new IllegalArgumentException(id + " is already in the fleet");
+    }
     return node;
   }
 
@@ -130,6 +133,11 @@ public final class Simulation {
    * every stage.
    */
   public void run(WorldInput controller, Workload workload, long ticks) {
+    if (ticks < 1) {
+      throw new IllegalArgumentException("a run needs at least one tick: " + ticks);
+    }
+    Objects.requireNonNull(controller, "controller");
+    Objects.requireNonNull(workload, "workload");
     for (long i = 0; i < ticks; i++) {
       tick++;
       now = tick * STEPS_PER_TICK;

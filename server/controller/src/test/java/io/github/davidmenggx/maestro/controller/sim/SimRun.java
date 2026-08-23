@@ -27,16 +27,6 @@ public final class SimRun {
   /** p99 target from the SLO, in ticks. Looser than the admission bound in `ProbeController`. */
   public static final double TICK_BUDGET = 3.0;
 
-  /** How much demand a run puts on the fleet. */
-  public record Scenario(int nodeCapacity, int mobCount, double requestChance) {
-
-    public static final Scenario DEFAULT =
-        new Scenario(8, 12, SyntheticWorkload.DEFAULT_REQUEST_CHANCE);
-
-    /** Far more demand than the fleet can serve, so pre-send rejection has to hold the line. */
-    public static final Scenario SATURATED = new Scenario(1, 40, 0.25);
-  }
-
   public final long seed;
   public final long ticks;
   public final Simulation sim;
@@ -80,9 +70,7 @@ public final class SimRun {
         faults,
         ticks,
         scenario.nodeCapacity(),
-        (world, rng) ->
-            new SyntheticWorkload(
-                world, rng, scenario.mobCount(), ticks - DRAIN_TICKS, scenario.requestChance()));
+        (world, rng) -> new SyntheticWorkload(world, rng, ticks - DRAIN_TICKS, scenario));
   }
 
   /** A run driven by a fixed event list rather than a generator, for focused tests. */

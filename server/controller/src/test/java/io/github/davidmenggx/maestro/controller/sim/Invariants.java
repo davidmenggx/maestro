@@ -1,5 +1,6 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
+import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -15,9 +16,40 @@ public final class Invariants {
       Simulation sim, ProbeController controller, RecordingOutput out, double tickBudget) {
     List<String> violations = new ArrayList<>();
 
-    // Per-region sequence monotonicity with no gaps, plus snapshot well-formedness.
+    // Per-region sequence monotonicity with no gaps, snapshot well-formedness, the
+    // per-block cell contract, and requests naming a registered mob class.
     for (ModeledNode node : sim.nodes()) {
       violations.addAll(node.violations());
+    }
+
+    // The controller's own bookkeeping, including the admission bound.
+    violations.addAll(controller.selfCheck());
+
+    // The modeled network never invents a frame. A duplicate is sent once and
+    // arrives twice, so that is the only way received may exceed sent.
+    for (ModeledNode node : sim.nodes()) {
+      String label = node.id().toString();
+      for (Channel channel : Channel.values()) {
+        long sent =
+            sim.metrics().counter("transport.sent", "node", label, "channel", channel.name());
+        long received =
+            sim.metrics().counter("transport.received", "node", label, "channel", channel.name());
+        long duplicated =
+            sim.metrics().counter("transport.duplicated", "node", label, "channel", channel.name());
+        if (received > sent + duplicated) {
+          violations.add(
+              label
+                  + " "
+                  + channel
+                  + " received "
+                  + received
+                  + " of "
+                  + sent
+                  + " sent plus "
+                  + duplicated
+                  + " duplicated");
+        }
+      }
     }
 
     // Every request is answered or explicitly dropped, exactly once.
