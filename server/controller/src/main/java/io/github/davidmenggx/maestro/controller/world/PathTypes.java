@@ -7,8 +7,7 @@ import maestro.fbs.PathType;
  * carry a type {@code getPathTypeFromState} can return: the rest are composed on the node, from the
  * cell below and the 24 surrounding cells, and cannot be known from one block state.
  *
- * <p>Sending a derived type would silently disagree with vanilla, so it is rejected at the boundary
- * rather than debugged later as path-cost drift.
+ * <p>Sending a derived type would silently disagree with vanilla, so it is rejected at the boundary.
  */
 public final class PathTypes {
 
