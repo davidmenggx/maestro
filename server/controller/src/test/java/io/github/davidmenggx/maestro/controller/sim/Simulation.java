@@ -18,28 +18,20 @@ import java.util.function.Supplier;
 
 /**
  * Tick-driven deterministic simulator. Time is a step counter: {@link #STEPS_PER_TICK} steps make
- * one tick, and every delay in the harness is expressed in steps, so a run has no wall-clock
- * dependency at all. Events at the same step run in insertion order, which is what keeps two runs
- * of one seed identical.
+ * one tick, and every delay in the harness is expressed in steps. Events at the same step run in
+ * insertion order, so two runs of one seed stay identical.
  */
 public final class Simulation {
 
-  /**
-   * Intra-tick resolution. One step is {@code NANOS_PER_TICK / STEPS_PER_TICK} = 50 microseconds.
-   */
+  /** Intra-tick resolution. One step is 50 microseconds. */
   public static final int STEPS_PER_TICK = 1000;
 
-  /**
-   * A Minecraft tick is 50ms. The two constants above and below must keep multiplying out to this.
-   */
+  /** A Minecraft tick is 50ms. {@code STEPS_PER_TICK * NANOS_PER_STEP} must equal this. */
   private static final long NANOS_PER_TICK = 50_000_000L;
 
   private static final long NANOS_PER_STEP = NANOS_PER_TICK / STEPS_PER_TICK;
 
-  /**
-   * Where in the tick the fleet works. Mid-tick rather than at the edge, so a response is not
-   * pushed into the following tick purely by where the loop puts it.
-   */
+  /** Where in the tick the fleet works. Mid-tick, so serving does not spill into the next tick. */
   private static final int SERVICE_STEP = STEPS_PER_TICK / 2;
 
   private record Scheduled(long time, long order, String name, Runnable action)
@@ -163,6 +155,7 @@ public final class Simulation {
       digest.mix(fault.toString());
       switch (fault) {
         case FaultPlan.NodeDied died -> transport.kill(died.node());
+        case FaultPlan.LinkReset reset -> transport.resetLink(reset.node());
         case FaultPlan.NodeRecovered recovered -> transport.revive(recovered.node());
         case FaultPlan.Partitioned partitioned ->
             transport.partition(partitioned.node(), partitioned.on());
@@ -200,8 +193,8 @@ public final class Simulation {
 
   /**
    * Work runs immediately, but its completion waits for the end of whichever tick it finishes in,
-   * because that is where production drains finished jobs. The controller therefore never observes
-   * a result inside the tick that submitted it.
+   * because that is where production drains finished jobs. A result is never visible to the
+   * controller inside the tick that submitted it.
    */
   private final class SimOffload implements Offload {
 

@@ -101,19 +101,19 @@ class WorldBoundaryTest {
   }
 
   @Test
-  void aCancelledRequestIsDroppedRatherThanAnswered() {
+  void aCanceledRequestIsDroppedRatherThanAnswered() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
     script.add(new WorldEvent.MobSpawned(0, MOB, MOB_CLASS, HERE));
     script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE));
-    script.add(new WorldEvent.PathCancelled(3, MOB));
+    script.add(new WorldEvent.PathCanceled(3, MOB));
     // A cancel for a mob with nothing outstanding changes nothing.
-    script.add(new WorldEvent.PathCancelled(8, MOB));
+    script.add(new WorldEvent.PathCanceled(8, MOB));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(1, run.controller.requestsIssued(), run.describe());
-    assertEquals(1, run.out.dropped(DropReason.CANCELLED), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.CANCELED), run.describe());
     assertEquals(0, run.out.answered(), run.describe());
   }
 

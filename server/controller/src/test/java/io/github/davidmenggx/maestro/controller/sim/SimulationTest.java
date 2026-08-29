@@ -17,8 +17,8 @@ class SimulationTest {
 
   @Test
   void sameSeedReplaysIdentically() {
-    // Run inside one JVM on purpose: identity hash codes differ between the two
-    // runs, so an identity-ordered collection anywhere shows up as a mismatch.
+    // Both runs share a JVM, so identity hash codes differ between them and an
+    // identity-ordered collection anywhere shows up as a digest mismatch.
     SimRun first = SimRun.of(7L, FaultPlan.reliable(), TICKS).go();
     SimRun second = SimRun.of(7L, FaultPlan.reliable(), TICKS).go();
 
@@ -79,7 +79,7 @@ class SimulationTest {
       assertEquals(List.of(), run.violations(), run.describe());
       duplicatesSeen += run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum();
       requestFramesDropped += counter(run, "transport.dropped", Channel.REQUEST);
-      // The ordered stream is TCP-shaped: nothing on it is silently lost.
+      // Nothing on the ordered stream is lost.
       assertEquals(
           counter(run, "transport.sent", Channel.WORLD),
           counter(run, "transport.received", Channel.WORLD),
@@ -124,14 +124,39 @@ class SimulationTest {
       resnapshots += run.sim.metrics().counter("offload.submitted", "job", "snapshot");
       unreadable += run.out.dropped(DropReason.NO_NODE);
 
-      // More event kinds in play must not cost determinism.
+      // Chunk churn adds event kinds and code paths; the run must still replay.
       SimRun again = SimRun.of(seed, FaultPlan.reliable(), TICKS, Scenario.CHURN).go();
       assertEquals(run.sim.digest().value(), again.sim.digest().value(), run.describe());
     }
 
-    // Chunks really did leave and come back, so the assertions above meant something.
+    // Confirms chunks did leave and come back, so the assertions above were not vacuous.
     assertTrue(resnapshots > SimRun.runCount() * 4L, "expected regions to be snapshotted again");
     assertTrue(unreadable > 0, "expected some requests to find their region unreadable");
+  }
+
+  @Test
+  void fuzzedLoadAndFaultsHoldTheInvariantsAndReplay() {
+    Set<Scenario> scenarios = new LinkedHashSet<>();
+    long answered = 0;
+
+    for (int i = 0; i < SimRun.runCount(); i++) {
+      long seed = SimRun.baseSeed() + i;
+      SimRun run = SimRun.fuzzed(seed, TICKS).go();
+      scenarios.add(run.scenario);
+      answered += run.out.answered();
+
+      // The fleet may be saturated at these settings, so the bound to check is
+      // the one admission control promises. The 3-tick SLO is only promised on a
+      // fleet with headroom.
+      assertEquals(List.of(), run.violations(ProbeController.MAX_TICKS_LATE), run.describe());
+      assertEquals(
+          run.sim.digest().value(),
+          SimRun.fuzzed(seed, TICKS).go().sim.digest().value(),
+          run.describe());
+    }
+
+    assertEquals(SimRun.runCount(), scenarios.size(), "two seeds drew the same scenario");
+    assertTrue(answered > 0, "no seed in the sweep produced a path");
   }
 
   @Test
@@ -141,8 +166,8 @@ class SimulationTest {
     assertTrue(run.out.dropped(DropReason.QUEUE_DEPTH) > 0, run.describe());
     assertTrue(run.out.answered() > 0, run.describe());
     // Whatever admission control let through was answered inside the bound it
-    // promised. The 3-tick SLO is a different, tighter statement and a saturated
-    // fleet does not hold it, which is what the shedding policy is for.
+    // promised. The 3-tick SLO is a tighter statement that a saturated fleet does
+    // not hold; that is what shedding is for.
     assertEquals(List.of(), run.violations(ProbeController.MAX_TICKS_LATE), run.describe());
   }
 
@@ -169,6 +194,56 @@ class SimulationTest {
   }
 
   @Test
+  void aLinkResetReplaysTheWorldStreamInsteadOfResnapshotting() {
+    NodeId victim = NodeId.of(2);
+    FaultPlan plan = FaultPlan.reliable().with(new FaultPlan.LinkReset(60, victim));
+
+    SimRun run = SimRun.of(23L, plan, TICKS).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(
+        1, run.sim.metrics().counter("world.resume", "node", victim.toString()), run.describe());
+    // The node kept its state across the reset, so no region was snapshotted twice.
+    assertEquals(
+        run.regions.count(),
+        run.sim.metrics().counter("offload.submitted", "job", "snapshot"),
+        run.describe());
+    assertEquals(
+        List.of(),
+        Invariants.checkAgainstFreshSnapshot(run.sim, run.sim.node(victim), run.world, run.regions),
+        run.describe());
+  }
+
+  @Test
+  void aNodeThatFallsPastTheRetentionWindowIsResnapshotted() {
+    NodeId victim = NodeId.of(2);
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(
+                new FaultPlan.LinkReset(40, victim),
+                new FaultPlan.Partitioned(40, victim, true),
+                new FaultPlan.Partitioned(200, victim, false));
+
+    SimRun run = SimRun.of(29L, plan, 250).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(
+        0, run.sim.metrics().counter("world.resume", "node", victim.toString()), run.describe());
+    // Once when it first joined holding nothing, once when it came back too far behind.
+    assertEquals(
+        2,
+        run.sim.metrics().counter("world.resnapshot", "node", victim.toString()),
+        run.describe());
+    assertTrue(
+        run.sim.metrics().counter("offload.submitted", "job", "snapshot") > run.regions.count(),
+        run.describe());
+    assertEquals(
+        List.of(),
+        Invariants.checkAgainstFreshSnapshot(run.sim, run.sim.node(victim), run.world, run.regions),
+        run.describe());
+  }
+
+  @Test
   void aPartitionedNodeIsSilentAndItsRequestsTimeOut() {
     NodeId victim = NodeId.of(1);
     FaultPlan plan =
@@ -180,8 +255,8 @@ class SimulationTest {
     SimRun run = SimRun.of(13L, plan, TICKS).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    // No reset, so nothing tells the controller the node is gone. Only the
-    // request timeout does, which is exactly the gap a failure detector fills.
+    // No reset, so nothing tells the controller the node is gone. Only the request
+    // timeout does, and that gap is what a failure detector fills.
     assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
     assertTrue(run.out.dropped(DropReason.SHED) > 0, run.describe());
     // Held rather than lost, so the stream has no gap once the partition lifts.

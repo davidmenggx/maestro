@@ -13,12 +13,12 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Modeled network. Ordered channels behave like TCP: frames keep their order and are never silently
- * lost, but the connection can break. Unordered channels may drop, duplicate and reorder, which is
- * the traffic the at-least-once request path has to survive.
+ * Modeled network. An ordered channel keeps frame order and loses nothing without also breaking the
+ * connection; an unordered one may drop, duplicate and reorder. The at-least-once request path has
+ * to survive that.
  *
- * <p>Process death resets the connection, so the controller hears about it. A partition is silent
- * by design: only the failure detector can notice one.
+ * <p>Process death resets the connection, so the controller sees it happen. A partition does not,
+ * so only a failure detector can find one.
  */
 public final class SimTransport implements Transport {
 
@@ -75,6 +75,7 @@ public final class SimTransport implements Transport {
           }
           connected.add(node);
           listener.onConnected(node);
+          nodes.get(node).linkUp();
         });
   }
 
@@ -110,15 +111,22 @@ public final class SimTransport implements Transport {
     }
   }
 
+  /** The connection breaks but the process lives, so the node keeps its state. */
+  public void resetLink(NodeId node) {
+    bumpEpoch(node);
+    backlog.keySet().removeIf(link -> link.node().equals(node));
+    if (connected.remove(node)) {
+      sim.metrics().count("transport.link.reset", 1, "node", node.toString());
+      sim.schedule(latency(), "link-reset:" + node, () -> listener.onDisconnected(node));
+    }
+  }
+
   public void revive(NodeId node) {
     dead.remove(node);
     bumpEpoch(node);
   }
 
-  /**
-   * Ordered channels sit on TCP, so their frames are held and released in order once the partition
-   * lifts rather than lost; unordered frames are simply gone.
-   */
+  /** Ordered frames are held and replayed when the partition lifts; unordered ones are lost. */
   public void partition(NodeId node, boolean on) {
     if (on) {
       partitioned.add(node);
@@ -205,7 +213,7 @@ public final class SimTransport implements Transport {
     }
   }
 
-  /** A partition is handled separately: it holds or discards frames instead of failing the link. */
+  /** A partition is not a link failure: it holds or discards frames while the link stays up. */
   private boolean linkUp(NodeId node) {
     return connected.contains(node) && !dead.contains(node);
   }

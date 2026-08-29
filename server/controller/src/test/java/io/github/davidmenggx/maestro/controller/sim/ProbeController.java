@@ -28,6 +28,9 @@ import maestro.fbs.CellDelta;
 import maestro.fbs.CellRun;
 import maestro.fbs.ControlFrame;
 import maestro.fbs.ControlMsg;
+import maestro.fbs.ControlReplyFrame;
+import maestro.fbs.ControlReplyMsg;
+import maestro.fbs.Hello;
 import maestro.fbs.MobClassTable;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
@@ -49,12 +52,10 @@ import maestro.fbs.WorldSnapshot;
 /**
  * Minimal controller used to prove the seams carry a real workload: it assigns regions, snapshots
  * them, streams deltas in sequence, batches requests per tick and applies responses. Sharding,
- * failover and the failure detector are deliberately absent, since those are the logic this harness
- * exists to test.
+ * failover and the failure detector are absent: those are the logic this harness exists to test.
  *
- * <p>The one non-obvious part is the outbox. Encoding is offloaded, completions come back in an
- * order the controller does not choose, and the world stream must still leave in sequence order, so
- * frames are parked by sequence and drained in order.
+ * <p>Encoding is offloaded and can finish out of order, but the world stream must still leave in
+ * sequence order, so finished frames wait in an outbox until the gap ahead of them is filled.
  */
 public final class ProbeController implements WorldInput, Transport.Listener {
 
@@ -64,6 +65,13 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   public static final int MAX_TICKS_LATE = 10;
 
   private static final int HEARTBEAT_TICKS = 20;
+
+  /**
+   * World frames kept per node so a reconnecting node can be replayed forward instead of
+   * resnapshotted. A node that fell further behind than this gets a fresh snapshot.
+   */
+  static final int RETENTION_FRAMES = 48;
+
   private static final int CHUNK_SIZE = 16;
 
   private record Outstanding(int mobId, NodeId node, long issuedTick) {}
@@ -79,6 +87,10 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private final Map<Integer, Short> mobs = new LinkedHashMap<>();
   private final Set<Long> loadedChunks = new LinkedHashSet<>();
   private final Set<NodeId> connected = new LinkedHashSet<>();
+
+  /** Connected and past the {@code Hello} handshake, so world frames may flow. */
+  private final Set<NodeId> greeted = new LinkedHashSet<>();
+
   private final Set<Integer> snapshotted = new LinkedHashSet<>();
 
   /** Insertion ordered, and request ids only grow, so this is also issue-tick order. */
@@ -89,7 +101,13 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private final Map<NodeId, Integer> queueDepth = new LinkedHashMap<>();
   private final Map<NodeId, Long> lastSequence = new LinkedHashMap<>();
   private final Map<NodeId, Long> nextToSend = new LinkedHashMap<>();
-  private final Map<NodeId, Integer> generation = new LinkedHashMap<>();
+
+  /** Sequence of the snapshot each node's retained frames continue from. */
+  private final Map<NodeId, Long> logBase = new LinkedHashMap<>();
+
+  /** Highest sequence dropped from a node's outbox, past which resume is impossible. */
+  private final Map<NodeId, Long> evicted = new LinkedHashMap<>();
+
   private final Map<NodeId, TreeMap<Long, byte[]>> outbox = new LinkedHashMap<>();
   private final List<WorldEvent.BlockChanged> pendingCells = new ArrayList<>();
   private final Map<NodeId, List<Queued>> pendingRequests = new LinkedHashMap<>();
@@ -113,7 +131,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     env.transport().listen(this);
   }
 
-  // Assertion surface for the harness. Everything below this point is behaviour.
+  // Assertion surface for the harness. Everything below this point is behavior.
 
   public int requestsIssued() {
     return requestsIssued;
@@ -129,6 +147,17 @@ public final class ProbeController implements WorldInput, Transport.Listener {
    */
   public List<String> selfCheck() {
     List<String> found = new ArrayList<>(selfViolations);
+    for (NodeId node : greeted) {
+      if (!connected.contains(node)) {
+        found.add(node + " is greeted but not connected");
+      }
+    }
+    for (Map.Entry<NodeId, TreeMap<Long, byte[]>> entry : outbox.entrySet()) {
+      long held = entry.getValue().size();
+      if (held > RETENTION_FRAMES) {
+        found.add(entry.getKey() + " retains " + held + " frames, past " + RETENTION_FRAMES);
+      }
+    }
     if (requestByMob.size() != outstanding.size()) {
       found.add(
           "mob index holds "
@@ -166,7 +195,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       case WorldEvent.MobSpawned e -> mobs.put(e.mobId(), e.classId());
       case WorldEvent.MobRemoved e -> onMobRemoved(e.mobId());
       case WorldEvent.PathRequested e -> onPathRequested(e);
-      case WorldEvent.PathCancelled e -> onPathCancelled(e.mobId());
+      case WorldEvent.PathCanceled e -> onPathCanceled(e.mobId());
       // Consumed once shedding and failover priorities exist; both order by
       // distance to the nearest player.
       case WorldEvent.PlayerMoved ignored -> {}
@@ -177,34 +206,92 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   @Override
   public void onConnected(NodeId node) {
     connected.add(node);
-    reset(node);
-    // On the world channel, not the control one: the assignment has to reach the
-    // node ahead of the snapshot it frames, and only one channel orders them.
-    send(node, Channel.WORLD, encodeAssignment(regions, regions.indexOf(node)));
-    // Ordered channel, because a request naming a class the node has not been
-    // told about cannot be answered.
-    send(node, Channel.CONTROL, encodeMobClasses(world.mobClasses()));
+    // Nothing is sent yet. Until the node says how far its world stream got,
+    // the controller cannot tell a replay from a resnapshot.
+    resetConnection(node);
   }
 
   @Override
   public void onDisconnected(NodeId node) {
     connected.remove(node);
-    reset(node);
+    greeted.remove(node);
+    resetConnection(node);
     dropWhere(node, DropReason.NODE_LOST);
   }
 
   @Override
   public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
+    switch (channel) {
+      case REQUEST -> onResponse(frame);
+      case CONTROL -> onControlReply(node, frame);
+      case WORLD -> selfViolations.add(node + " sent a frame on the world channel");
+    }
+  }
+
+  private void onResponse(ByteBuffer frame) {
     ResponseFrame response = ResponseFrame.getRootAsResponseFrame(frame);
     switch (response.bodyType()) {
       case ResponseMsg.PathResponse ->
           onPathResponse((PathResponse) response.body(new PathResponse()));
-      case ResponseMsg.Pong -> {
-        Pong pong = (Pong) response.body(new Pong());
-        queueDepth.put(node, (int) pong.queueDepth());
-      }
       default -> env.metrics().count("controller.unknown.response", 1);
     }
+  }
+
+  private void onControlReply(NodeId node, ByteBuffer frame) {
+    ControlReplyFrame reply = ControlReplyFrame.getRootAsControlReplyFrame(frame);
+    switch (reply.bodyType()) {
+      case ControlReplyMsg.Hello -> onHello(node, (Hello) reply.body(new Hello()));
+      case ControlReplyMsg.Pong -> {
+        Pong pong = (Pong) reply.body(new Pong());
+        queueDepth.put(node, (int) pong.queueDepth());
+      }
+      default -> env.metrics().count("controller.unknown.control.reply", 1);
+    }
+  }
+
+  /**
+   * Decides between replaying the world stream and starting it over. Replay needs the node to still
+   * hold the region it was assigned, at a sequence this controller has not yet dropped from the
+   * node's outbox and that sits at or after the snapshot the retained frames continue from.
+   */
+  private void onHello(NodeId node, Hello hello) {
+    int region = regions.indexOf(node);
+    long nodeSequence = hello.lastSequence();
+    long produced = lastSequence.getOrDefault(node, 0L);
+    boolean resume =
+        nodeSequence > 0
+            && region >= 0
+            && hello.regionId() == region
+            && snapshotted.contains(region)
+            && nodeSequence <= produced
+            && nodeSequence >= logBase.getOrDefault(node, Long.MAX_VALUE)
+            && nodeSequence >= evicted.getOrDefault(node, 0L);
+
+    if (resume) {
+      env.metrics().count("world.resume", 1, "node", node.toString());
+      nextToSend.put(node, nodeSequence + 1);
+    } else {
+      env.metrics().count("world.resnapshot", 1, "node", node.toString());
+      nodeSequence = 0;
+      outbox.remove(node);
+      evicted.remove(node);
+      logBase.remove(node);
+      nextToSend.put(node, produced + 1);
+      if (region >= 0) {
+        snapshotted.remove(region);
+      }
+    }
+
+    greeted.add(node);
+    if (region >= 0) {
+      // On the world channel, not the control one: the assignment has to reach the
+      // node ahead of the frames it frames, and only one channel orders them.
+      send(node, Channel.WORLD, encodeAssignment(regions, region, nodeSequence));
+    }
+    // Ordered channel, because a request naming a class the node has not been
+    // told about cannot be answered.
+    send(node, Channel.CONTROL, encodeMobClasses(world.mobClasses()));
+    drainOutbox(node);
   }
 
   private void onTickBegan(long tick) {
@@ -257,10 +344,10 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     }
   }
 
-  private void onPathCancelled(int mobId) {
+  private void onPathCanceled(int mobId) {
     Long requestId = requestByMob.get(mobId);
     if (requestId != null) {
-      drop(requestId, DropReason.CANCELLED);
+      drop(requestId, DropReason.CANCELED);
     }
   }
 
@@ -287,7 +374,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       return;
     }
     NodeId node = regions.owner(region);
-    if (!connected.contains(node)) {
+    if (!greeted.contains(node)) {
       out.pathDropped(mobId, DropReason.NO_NODE);
       return;
     }
@@ -384,7 +471,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private void snapshotReadyRegions() {
     for (int region = 0; region < regions.count(); region++) {
       NodeId node = regions.owner(region);
-      if (snapshotted.contains(region) || !connected.contains(node) || !regionLoaded(region)) {
+      if (snapshotted.contains(region) || !greeted.contains(node) || !regionLoaded(region)) {
         continue;
       }
       snapshotted.add(region);
@@ -394,6 +481,12 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       Runs runs = readRegionRuns(world, regions, region, runCounts);
       int baseY = world.minY();
       long sequence = lastSequence.merge(node, 1L, Long::sum);
+      // Frames before a snapshot describe a stream nobody can resume into now.
+      logBase.put(node, sequence);
+      TreeMap<Long, byte[]> pending = outbox.get(node);
+      if (pending != null) {
+        pending.headMap(sequence).clear();
+      }
       offload(node, sequence, "snapshot", () -> encodeSnapshot(sequence, baseY, runCounts, runs));
     }
   }
@@ -414,9 +507,8 @@ public final class ProbeController implements WorldInput, Transport.Listener {
 
     for (Map.Entry<NodeId, List<WorldEvent.BlockChanged>> entry : byNode.entrySet()) {
       NodeId node = entry.getKey();
-      if (!connected.contains(node)) {
-        continue;
-      }
+      // Produced even while the node is away: the stream belongs to the region, and
+      // a node that reconnects inside the retention window is replayed from here.
       List<WorldEvent.BlockChanged> cells = entry.getValue();
       long sequence = lastSequence.merge(node, 1L, Long::sum);
       offload(node, sequence, "delta", () -> encodeDelta(sequence, cells));
@@ -428,7 +520,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       NodeId node = entry.getKey();
       List<Queued> batch = List.copyOf(entry.getValue());
       entry.getValue().clear();
-      if (batch.isEmpty() || !connected.contains(node)) {
+      if (batch.isEmpty() || !greeted.contains(node)) {
         continue;
       }
       long sequence = lastSequence.getOrDefault(node, 0L);
@@ -441,45 +533,53 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   }
 
   /**
-   * Parks the encoded frame under its sequence and sends whatever prefix is now contiguous. Without
-   * this, two encodes finishing out of order would put a gap on an ordered stream.
+   * Stores the finished frame under its sequence number, then sends every frame from the lowest
+   * unsent sequence up to the first missing one. Encoding runs off the controller thread and can
+   * finish out of order, so sending each frame as it finishes would leave gaps in the sequence.
    */
   private void offload(NodeId node, long sequence, String job, Supplier<byte[]> work) {
-    int epoch = generation.getOrDefault(node, 0);
     env.offload()
         .submit(
             job,
             work,
             frame -> {
-              if (generation.getOrDefault(node, 0) != epoch) {
-                return;
-              }
               outbox.computeIfAbsent(node, k -> new TreeMap<>()).put(sequence, frame);
               drainOutbox(node);
             });
   }
 
+  /**
+   * Advances the send pointer over every frame now present, transmitting only once the node has
+   * been greeted. Frames stay behind the pointer as the replay window until they age out.
+   */
   private void drainOutbox(NodeId node) {
     TreeMap<Long, byte[]> pending = outbox.get(node);
+    if (pending == null) {
+      return;
+    }
+    boolean sending = greeted.contains(node);
     long next = nextToSend.getOrDefault(node, 1L);
-    while (pending != null && pending.containsKey(next)) {
-      send(node, Channel.WORLD, pending.remove(next));
+    while (pending.containsKey(next)) {
+      if (sending) {
+        send(node, Channel.WORLD, pending.get(next));
+      }
       next++;
     }
     nextToSend.put(node, next);
+
+    long lowest = next - RETENTION_FRAMES;
+    while (!pending.isEmpty() && pending.firstKey() < lowest) {
+      evicted.merge(node, pending.pollFirstEntry().getKey(), Math::max);
+    }
   }
 
-  private void reset(NodeId node) {
-    generation.merge(node, 1, Integer::sum);
-    lastSequence.put(node, 0L);
-    nextToSend.put(node, 1L);
-    outbox.remove(node);
+  /**
+   * Clears what belonged to the connection. The world stream and its replay window belong to the
+   * region, so both outlive a reconnect and the {@code Hello} handshake decides their fate.
+   */
+  private void resetConnection(NodeId node) {
     queueDepth.remove(node);
     pendingRequests.remove(node);
-    int region = regions.indexOf(node);
-    if (region >= 0) {
-      snapshotted.remove(region);
-    }
   }
 
   private boolean regionLoaded(int region) {
@@ -625,7 +725,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     return builder.sizedByteArray();
   }
 
-  static byte[] encodeAssignment(RegionMap regions, int region) {
+  static byte[] encodeAssignment(RegionMap regions, int region, long resumeFrom) {
     FlatBufferBuilder builder = new FlatBufferBuilder(128);
     int size = regions.regionSize();
     RegionAssignment.startRegionAssignment(builder);
@@ -636,7 +736,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
         builder,
         Vec2i.createVec2i(
             builder, regions.minX(region) + size - 1, regions.minZ(region) + size - 1));
-    RegionAssignment.addResumeFromSequence(builder, 0);
+    RegionAssignment.addResumeFromSequence(builder, resumeFrom);
     int assignment = RegionAssignment.endRegionAssignment(builder);
     builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.RegionAssignment, assignment));
     return builder.sizedByteArray();

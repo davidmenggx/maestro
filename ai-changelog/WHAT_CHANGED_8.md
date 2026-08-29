@@ -24,7 +24,7 @@ cell. Previously the rule lived only in a schema comment, so shipping a `WALKABL
 surfaced much later as unexplained path-cost drift. `PathTypes.count()` is read from the generated
 enum, so the malus-array length check in `MobClass` cannot drift from the schema either.
 
-`WorldEvent` gained `PathCancelled` and `DropReason` gained `CANCELLED`. A mob that stops hunting had
+`WorldEvent` gained `PathCanceled` and `DropReason` gained `CANCELED`. A mob that stops hunting had
 no way to withdraw a request, so the fleet kept spending capacity on an answer nobody would read,
 and the shedding policy in `CLAUDE.md` refers to mobs "not actively hunting", which the controller can
 only know if told. Adding the event to the sealed interface broke the controller's switch at compile

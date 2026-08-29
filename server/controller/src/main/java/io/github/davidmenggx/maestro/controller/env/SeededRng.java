@@ -5,8 +5,7 @@ import java.util.random.RandomGeneratorFactory;
 
 /**
  * The only {@link Rng} implementation. Production seeds it once at startup and the simulator seeds
- * it per run; both then produce the same sequence for the same seed, which is what makes a failing
- * run replayable.
+ * it per run; both produce the same sequence for the same seed, so a failing run replays.
  */
 public final class SeededRng implements Rng {
 

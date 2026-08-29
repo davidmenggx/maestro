@@ -13,8 +13,8 @@ import maestro.fbs.PathType;
  * fuzz-test world shape. Held as flat arrays because it is dense and small, so every read is O(1)
  * and no iteration order can leak into a run.
  *
- * <p>Deliberately shorter than a real overworld column. Height changes what a snapshot costs, not
- * what the controller does with one.
+ * <p>Shorter than a real overworld column. Height changes what a snapshot costs, not what the
+ * controller does with one.
  */
 public final class SimWorld implements WorldSource {
 

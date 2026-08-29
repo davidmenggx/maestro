@@ -14,8 +14,8 @@ import maestro.fbs.PathType;
 /**
  * Generated stand-in for a recorded server trace, and the fuzzer of the suite: every event the
  * boundary defines is reachable from here, and the seed sweep explores their orderings. {@code
- * quietAfter} stops all world activity so the tail of a run can drain, which is what makes "every
- * request was answered or dropped" a checkable statement.
+ * quietAfter} stops all world activity so the tail of a run drains, so by the end every request has
+ * been answered or dropped and the invariants can require it.
  */
 public final class SyntheticWorkload implements Workload {
 
@@ -135,12 +135,12 @@ public final class SyntheticWorkload implements Workload {
     }
   }
 
-  /** Cancels for a mob with nothing outstanding are a no-op, which is itself worth exercising. */
+  /** The chosen mob may have nothing outstanding, in which case the cancel must do nothing. */
   private void cancelPath(long tick, WorldInput input) {
     if (mobs.isEmpty() || rng.nextDouble() >= CANCEL_CHANCE) {
       return;
     }
-    input.accept(new WorldEvent.PathCancelled(tick, nth(rng.nextInt(mobs.size()))));
+    input.accept(new WorldEvent.PathCanceled(tick, nth(rng.nextInt(mobs.size()))));
   }
 
   private void movePlayer(long tick, WorldInput input) {

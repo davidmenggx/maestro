@@ -90,8 +90,8 @@ public sealed interface WorldEvent {
    * The mob stopped wanting a path, having lost its target or stopped hunting. Frees fleet capacity
    * that would otherwise be spent on an answer nobody reads.
    */
-  record PathCancelled(long tick, int mobId) implements WorldEvent {
-    public PathCancelled {
+  record PathCanceled(long tick, int mobId) implements WorldEvent {
+    public PathCanceled {
       requireTick(tick);
     }
   }

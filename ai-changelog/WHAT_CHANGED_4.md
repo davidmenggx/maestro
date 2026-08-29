@@ -41,8 +41,8 @@ making our declaration inconsistent with the code we compile.
 - **`EnderEyeItem.useOn` returns `PASS`, not `FAIL`.** Only seating an eye in a frame is blocked;
   throwing eyes to locate a stronghold still works. `FAIL` would have suppressed the interaction
   more aggressively than the policy requires.
-- **The dimension filter redirects `Registry.entrySet()` rather than cancelling `createLevels`.**
-  Cancelling the whole method would also skip the overworld, which `createLevels` builds directly
+- **The dimension filter redirects `Registry.entrySet()` rather than canceling `createLevels`.**
+  Canceling the whole method would also skip the overworld, which `createLevels` builds directly
   before the loop. A datapack was considered and rejected: datapacks can override a dimension entry
   but cannot remove one, so the levels would still exist and tick.
 - **Non-overworld guards rely on vanilla's own null handling.** `NetherPortalBlock` and

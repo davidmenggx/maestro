@@ -2,6 +2,7 @@ package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Rng;
+import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import java.util.ArrayList;
 import java.util.List;
@@ -19,6 +20,9 @@ public final class SimRun {
 
   public static final int REGIONS_PER_SIDE = 2;
 
+  /** One node per region, since resharding is not modeled. */
+  public static final int NODE_COUNT = REGIONS_PER_SIDE * REGIONS_PER_SIDE;
+
   /**
    * Trailing quiet ticks, so every in-flight request resolves before the invariants are checked.
    */
@@ -29,6 +33,7 @@ public final class SimRun {
 
   public final long seed;
   public final long ticks;
+  public final Scenario scenario;
   public final Simulation sim;
   public final SimWorld world;
   public final RegionMap regions;
@@ -40,23 +45,24 @@ public final class SimRun {
       long seed,
       FaultPlan faults,
       long ticks,
-      int nodeCapacity,
+      Scenario scenario,
       BiFunction<SimWorld, Rng, Workload> workloadFactory) {
     this.seed = seed;
     this.ticks = ticks;
+    this.scenario = scenario;
     this.sim = new Simulation(seed, faults);
 
     List<NodeId> nodes = new ArrayList<>();
-    for (int i = 0; i < REGIONS_PER_SIDE * REGIONS_PER_SIDE; i++) {
+    for (int i = 0; i < NODE_COUNT; i++) {
       NodeId id = NodeId.of(i);
       nodes.add(id);
-      sim.addNode(id, nodeCapacity);
+      sim.addNode(id, scenario.nodeCapacity());
     }
 
     this.regions = new RegionMap(REGION_SIZE, REGIONS_PER_SIDE, nodes);
     this.world = new SimWorld(regions.extent(), sim.rng().derive("terrain"));
     this.out = new RecordingOutput(sim);
-    this.controller = new ProbeController(sim.env(), world, out, regions, nodeCapacity);
+    this.controller = new ProbeController(sim.env(), world, out, regions, scenario.nodeCapacity());
     this.workload = workloadFactory.apply(world, sim.rng().derive("workload"));
   }
 
@@ -69,18 +75,25 @@ public final class SimRun {
         seed,
         faults,
         ticks,
-        scenario.nodeCapacity(),
+        scenario,
         (world, rng) -> new SyntheticWorkload(world, rng, ticks - DRAIN_TICKS, scenario));
+  }
+
+  /**
+   * A run whose load and faults are drawn from the seed as well as its event ordering, so a sweep
+   * covers the ranges in {@link Scenario} and {@link FaultPlan} rather than one fixed setting.
+   */
+  public static SimRun fuzzed(long seed, long ticks) {
+    Rng rng = SeededRng.of(seed).derive("fuzz");
+    Scenario scenario = Scenario.sample(rng);
+    FaultPlan faults = FaultPlan.sample(rng, NODE_COUNT, ticks - DRAIN_TICKS);
+    return of(seed, faults, ticks, scenario);
   }
 
   /** A run driven by a fixed event list rather than a generator, for focused tests. */
   public static SimRun scripted(long seed, FaultPlan faults, long ticks, List<WorldEvent> events) {
     return new SimRun(
-        seed,
-        faults,
-        ticks,
-        Scenario.DEFAULT.nodeCapacity(),
-        (world, rng) -> new ScriptedWorkload(world, events));
+        seed, faults, ticks, Scenario.DEFAULT, (world, rng) -> new ScriptedWorkload(world, events));
   }
 
   public SimRun go() {
@@ -108,6 +121,8 @@ public final class SimRun {
         + out.answered()
         + " drops="
         + out.drops()
+        + " scenario="
+        + scenario
         + " digest="
         + Long.toHexString(sim.digest().value());
   }

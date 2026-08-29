@@ -6,7 +6,7 @@ Reworked the FlatBuffers wire contract in `schema/` for correctness with Minecra
 - Split the old `WorldDelta` into `WorldSnapshot` (carries `columns`, node replaces state) and `WorldDelta` (carries `cells`, node merges). The message type now encodes snapshot-vs-delta.
 - `PathResponse`: replaced the `PathStatus` enum with a `reached:bool` (mirrors `Path.reached`); empty `nodes` means no path. Renamed `waypoints` to `nodes` to match Minecraft's `Path`/`Node` terminology.
 - Removed `Hello.protocol_version` (controlled fleet, per instruction).
-- Documented on `CellDelta` that a block change can alter neighbouring cells' `PathNodeType`, so the producer emits every affected cell.
+- Documented on `CellDelta` that a block change can alter neighboring cells' `PathNodeType`, so the producer emits every affected cell.
 - Trimmed comments across all schema files per the CLAUDE.md conventions (no file-level description headers, no prompt-referencing prose).
 - `make schema-cpp`/`schema-java` now clear their output dirs first, so bindings for removed types (e.g. the old `PathStatus`) don't linger.
 

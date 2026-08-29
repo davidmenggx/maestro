@@ -18,6 +18,9 @@ import maestro.fbs.CellDelta;
 import maestro.fbs.CellRun;
 import maestro.fbs.ControlFrame;
 import maestro.fbs.ControlMsg;
+import maestro.fbs.ControlReplyFrame;
+import maestro.fbs.ControlReplyMsg;
+import maestro.fbs.Hello;
 import maestro.fbs.MobClass;
 import maestro.fbs.MobClassTable;
 import maestro.fbs.PathRequest;
@@ -66,6 +69,7 @@ public final class ModeledNode {
   private final List<String> violations = new ArrayList<>();
 
   private boolean assigned;
+  private int regionId;
   private int minX;
   private int minZ;
   private int size;
@@ -85,7 +89,7 @@ public final class ModeledNode {
     this.capacityPerTick = capacityPerTick;
   }
 
-  // Assertion surface for the harness. Everything below this point is behaviour.
+  // Assertion surface for the harness. Everything below this point is behavior.
 
   public NodeId id() {
     return id;
@@ -119,12 +123,27 @@ public final class ModeledNode {
 
   void kill() {
     assigned = false;
+    regionId = 0;
     cells = new byte[0];
     lastSequence = 0;
     queue.clear();
     queued.clear();
     answered.clear();
     knownClasses.clear();
+  }
+
+  /**
+   * Opens a new connection by saying what this node still holds. A restarted process reports
+   * sequence 0 and gets a snapshot; one that only lost its socket reports where it got to and the
+   * controller replays from there.
+   */
+  void linkUp() {
+    FlatBufferBuilder builder = new FlatBufferBuilder(64);
+    int hello =
+        Hello.createHello(builder, hasState() ? regionId : 0, hasState() ? lastSequence : 0);
+    builder.finish(
+        ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Hello, hello));
+    transport.toController(id, Channel.CONTROL, ByteBuffer.wrap(builder.sizedByteArray()));
   }
 
   void receive(Channel channel, ByteBuffer frame) {
@@ -180,7 +199,6 @@ public final class ModeledNode {
       case ControlMsg.Ping -> pong((Ping) control.body(new Ping()));
       case ControlMsg.MobClassTable ->
           registerClasses((MobClassTable) control.body(new MobClassTable()));
-      case ControlMsg.Hello -> {}
       default -> violations.add(id + ": unknown control body " + control.bodyType());
     }
   }
@@ -198,10 +216,22 @@ public final class ModeledNode {
   }
 
   private void assign(RegionAssignment assignment) {
+    long resumeFrom = assignment.resumeFromSequence();
+    if (resumeFrom != 0 && (!hasState() || resumeFrom != lastSequence)) {
+      violations.add(
+          id + ": told to resume from " + resumeFrom + " but holds through " + lastSequence);
+      return;
+    }
     minX = assignment.minXz().x();
     minZ = assignment.minXz().z();
     size = assignment.maxXz().x() - minX + 1;
+    regionId = (int) assignment.regionId();
     assigned = true;
+    if (resumeFrom == 0) {
+      // The controller dropped this node's stream, so a snapshot is on its way.
+      cells = new byte[0];
+      lastSequence = 0;
+    }
   }
 
   private void applySnapshot(WorldSnapshot snapshot) {
@@ -311,7 +341,7 @@ public final class ModeledNode {
   private void pong(Ping ping) {
     FlatBufferBuilder builder = new FlatBufferBuilder(64);
     int pong = Pong.createPong(builder, ping.sequence(), ping.sendMicros(), queue.size());
-    builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.Pong, pong));
+    builder.finish(ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Pong, pong));
     transport.toController(id, Channel.CONTROL, ByteBuffer.wrap(builder.sizedByteArray()));
   }
 
