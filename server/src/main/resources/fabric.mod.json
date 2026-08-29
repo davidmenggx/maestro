@@ -14,7 +14,7 @@
   "environment": "server",
   "entrypoints": {
     "server": [
-      "com.smpler.maestro.MaestroServer"
+      "io.github.davidmenggx.maestro.MaestroServer"
     ]
   },
   "mixins": [

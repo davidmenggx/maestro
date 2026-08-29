@@ -33,23 +33,28 @@ p99 latency < 3 ticks. Framed as latency, but the real target is throughput unde
 
 TESTING
 Fuzz testing compares Maestro vs vanilla Minecraft pathfinding by malus-weighted A* path cost across randomly generated regions. Test worlds are superflat with mild hills and obstacles but no overhangs or caves, so world state is a single vertical band per column. Some margin of error allowed since vanilla pathfinding isn't always optimal and Maestro uses optimizations like flow fields; this testing is for statistics/observability, not strict correctness.
-Live trials run on single-AZ AWS compute nodes. No Kubernetes, to allow direct fault injection. ChaosMonkey and tc used to test failover under network/node faults. A reproducible load generator is needed for live experiments.
+Deterministic simulation testing (DST) is the primary correctness mechanism for the Java controller's distributed logic: stream sequencing, resume-from-N, resharding, phi accrual, node loss and handoff, at-least-once duplicate delivery, last-write-wins, and queue-depth rejection. Scope is the controller only. Minecraft is an input source, not a participant: the simulation consumes tick boundaries, block changes, and mob requests through the world boundary interface, fed by a trace instead of by mixins. Compute nodes are modeled, not run; the real C++ node is covered by unit tests plus wire-level fixtures shared with the Java side. Simulated time is tick-driven with a deterministic intra-tick event queue. Runs are seeded and any failure replays from its seed. The simulator controls message delivery order, latency, drops, duplicates, and node death. Invariants asserted: per-region sequence monotonicity with no gaps, state after failover equal to a fresh full recomputation, every request answered or explicitly dropped, duplicate delivery idempotent, and p99 within the tick budget.
+Live trials run on single-AZ AWS compute nodes. ChaosMonkey and tc used to test failover under network/node faults. A reproducible load generator is needed for live experiments.
 Add thorough unit tests.
 
 OBSERVABILITY
 OpenTelemetry used throughout. Metrics/traces needed: end-to-end request tracing, per-node consumer lag (Kafka-style), RED metrics per-request, USE metrics per-server, distribution of ticks-late per pathfind response (for SLO visualization), node topology visualization (resharding events, phi values over time), and per-node work queue depth.
 
 CONVENTIONS
-Add comments when needed, but not excessively. Keep comments very concise, and wrap identifiers and variable names in backticks. Do not place comments describing a file's functionality at the top of the file. Never use emojis or other unusual text symbols. Keep the comments clearly related to code and the system itself, i.e. do not overly reference prompt specific details/wording or one-off user requests or arbitrary project "milestones"/"phases". Only update the `README.md` when specifically prompted, and never bring overly session-specific details into the `README.md`. If in doubt, follow the existing codebase convention.
+Add comments when needed, but not excessively. Keep comments very concise, and wrap identifiers and variable names in backticks. Do not place comments describing a file's functionality at the top of the file. Do not make obvious comments. Comments on interfaces/functions/classes should not overly reference the implementation. Never use emojis or other unusual text symbols. Keep the comments clearly related to code and the system itself, i.e. do not overly reference prompt specific details/wording or one-off user requests or arbitrary project "milestones"/"phases". Only update the `README.md` when specifically prompted, and never bring overly session-specific details into the `README.md`. If in doubt, follow the existing codebase convention.
 
-After each long task completion, produce a `WHAT_CHANGED_X.md` file in the `ai-changelog/` directory, where X is a counter that is incremented from the last file in the folder (only do this if the change is actually major like an updated schema or new functionality, not just a small bugfix or documentation update). This file should include a high level paragraph summary of what changed in the task completion. If there were any critical design decisions made without my explicit instruction, always mention them and explain why the decision was made, and the alternatives. All sections should be worded concisely and in straightforward terms, but make sure to reference the code when needed (filenames, function names, and variables are good to include). Do not amend previous changelog entries, create a new entry to overwrite.
+After each long task completion, produce a `WHAT_CHANGED_X.md` file in the `ai-changelog/` directory, where X is a counter that is incremented from the last file in the folder (only do this if the change is actually major like an updated schema or new functionality, not just a small bugfix or documentation update). This file should include a high level paragraph summary of what changed in the task completion. If there were any critical design decisions made without my explicit instruction, always mention them and explain why the decision was made, and the alternatives. Do not amend previous changelog entries, create a new entry to overwrite. This must be written in concise, plain, simplified technical English.
 
 Follow C++20 best practices and LLVM code style.
 
 When implementing features, prefer a minimalistic implementation, but always ask clarifying questions.
 
+Controller code must take all nondeterminism from injected interfaces, never from globals (wall clock and tick source, randomness, task scheduling, and transport). Collections on the controller path must have deterministic iteration order.
+
 DO NOT EVER DIRECTLY COMMIT CODE, I WILL ALWAYS REVIEW IT FIRST!
 
 Access the Minecraft source at https://mcsrc.dev/1/26.1/net/minecraft/world/level/pathfinder/PathType
 
-Communicate in simplified technical english.
+Communicate in concise, plain, simplified technical english.
+
+Avoid needlessly appending to CLAUDE.md unless a breaking API or design decision is made.

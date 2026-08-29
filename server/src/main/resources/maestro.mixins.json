@@ -1,7 +1,7 @@
 {
   "required": true,
   "minVersion": "0.8.7",
-  "package": "com.smpler.maestro.mixin",
+  "package": "io.github.davidmenggx.maestro.mixin",
   "compatibilityLevel": "JAVA_25",
   "server": [
     "EnderEyeItemMixin",

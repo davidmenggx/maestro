@@ -7,7 +7,7 @@
 
 # Generated FlatBuffers bindings (produced by `make schema`)
 /node/generated/
-/server/src/generated/
+/server/controller/src/generated/
 
 # ---- C++ / CMake ----
 compile_commands.json
@@ -18,6 +18,9 @@ compile_commands.json
 /server/.gradle/
 /server/build/
 /server/run/
+# Minecraft's log4j binding writes here when a unit test logs.
+/server/logs/
+/server/controller/build/
 !gradle-wrapper.jar
 
 # ---- Editor / OS ----

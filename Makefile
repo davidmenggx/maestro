@@ -21,7 +21,7 @@ SCHEMA_DIR := $(ROOT)/schema
 FBS        := $(wildcard $(SCHEMA_DIR)/*.fbs)
 
 GEN_CPP  := $(ROOT)/node/generated
-GEN_JAVA := $(ROOT)/server/src/generated/java
+GEN_JAVA := $(ROOT)/server/controller/src/generated/java
 
 FLATC := $(BUILD)/tools/bin/flatc
 
@@ -34,7 +34,7 @@ MAESTRO_WITH_OTEL ?= ON
 
 .PHONY: all help flatc schema schema-cpp schema-java \
         node node-configure node-test \
-        server server-test test test-boot run-node run-server clean distclean
+        server server-test dst test test-boot run-node run-server clean distclean
 
 all: node server ## Build the C++ node and the Java mod
 
@@ -86,8 +86,12 @@ run-node: node ## Print the node binary's usage
 server: schema-java ## Build the Fabric server mod jar
 	cd server && $(GRADLE) build
 
-server-test: schema-java ## Run the Java unit tests
-	cd server && $(GRADLE) test
+server-test: schema-java ## Run the Java unit tests (mod and controller)
+	cd server && $(GRADLE) test :controller:test
+
+dst: schema-java ## Run the controller's deterministic simulation tests only
+	cd server && $(GRADLE) :controller:test $(if $(SEED),-Dmaestro.dst.seed=$(SEED)) \
+		$(if $(RUNS),-Dmaestro.dst.runs=$(RUNS))
 
 run-server: schema-java ## Boot a dev server (WORLD=<name> loads worlds/<name>)
 	cd server && $(GRADLE) runServer $(if $(WORLD),-Pworld=$(WORLD)) $(if $(KEEP_WORLD),-PkeepWorld)
