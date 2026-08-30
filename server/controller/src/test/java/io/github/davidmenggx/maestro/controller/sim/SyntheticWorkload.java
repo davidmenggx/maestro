@@ -2,14 +2,16 @@ package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
+import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldInput;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import maestro.fbs.PathType;
+import java.util.Set;
 
 /**
  * Generated stand-in for a recorded server trace, and the fuzzer of the suite: every event the
@@ -22,12 +24,13 @@ public final class SyntheticWorkload implements Workload {
   /** A mob repaths every 15 ticks or so, which is roughly what vanilla does. */
   public static final double DEFAULT_REQUEST_CHANCE = 0.07;
 
-  private static final int PLAYER_ID = 1;
-  private static final int MAX_BLOCK_CHANGES_PER_TICK = 3;
   private static final int PLAYER_MOVE_INTERVAL_TICKS = 5;
-  private static final double CHURN_CHANCE = 0.05;
-  private static final double CANCEL_CHANCE = 0.02;
-  private static final double PLAYER_LEAVE_CHANCE = 0.01;
+
+  /** Vertical spread of block changes around the surface, in blocks either way. */
+  private static final int BLOCK_CHANGE_SPREAD = 2;
+
+  /** How far outside the region grid a stray request starts. */
+  private static final int MAX_STRAY_DISTANCE = 8;
 
   private final SimWorld world;
   private final Rng rng;
@@ -35,6 +38,7 @@ public final class SyntheticWorkload implements Workload {
   private final Scenario scenario;
   private final List<MobClass> classes;
   private final Map<Integer, Pos> mobs = new LinkedHashMap<>();
+  private final Set<Integer> players = new LinkedHashSet<>();
 
   private int nextMobId = 1;
 
@@ -61,9 +65,10 @@ public final class SyntheticWorkload implements Workload {
     churnChunks(tick, input);
     changeBlocks(tick, input);
     churnMobs(tick, input);
+    moveMobs();
     requestPaths(tick, input);
     cancelPath(tick, input);
-    movePlayer(tick, input);
+    movePlayers(tick, input);
   }
 
   private void start(WorldInput input) {
@@ -71,7 +76,10 @@ public final class SyntheticWorkload implements Workload {
     for (int i = 0; i < scenario.mobCount(); i++) {
       spawn(0, input);
     }
-    input.accept(new WorldEvent.PlayerMoved(0, PLAYER_ID, randomStanding()));
+    for (int player = 1; player <= scenario.playerCount(); player++) {
+      players.add(player);
+      input.accept(new WorldEvent.PlayerMoved(0, player, randomStanding()));
+    }
   }
 
   private void reloadEverything(long tick, WorldInput input) {
@@ -101,8 +109,12 @@ public final class SyntheticWorkload implements Workload {
     }
   }
 
+  /**
+   * Changes are drawn from every type a cell may carry and from a band around the surface, so a
+   * column run-length encodes into more than the two runs flat terrain would give.
+   */
   private void changeBlocks(long tick, WorldInput input) {
-    int changes = 1 + rng.nextInt(MAX_BLOCK_CHANGES_PER_TICK);
+    int changes = rng.nextInt(scenario.maxBlockChangesPerTick() + 1);
     for (int i = 0; i < changes; i++) {
       int x = rng.nextInt(world.size());
       int z = rng.nextInt(world.size());
@@ -110,46 +122,77 @@ public final class SyntheticWorkload implements Workload {
         // Minecraft cannot change a block it is not holding.
         continue;
       }
-      int y = world.groundAt(x, z) + 1;
-      byte type = rng.nextBoolean() ? (byte) PathType.BLOCKED : (byte) PathType.WATER;
+      int y =
+          Math.clamp(
+              world.groundAt(x, z) + rng.nextInt(2 * BLOCK_CHANGE_SPREAD + 1) - BLOCK_CHANGE_SPREAD,
+              world.minY(),
+              world.minY() + world.height() - 1);
+      byte type = PathTypes.perBlock(rng.nextInt(PathTypes.perBlockCount()));
       world.set(x, y, z, type);
       input.accept(new WorldEvent.BlockChanged(tick, new Pos(x, y, z), type));
     }
   }
 
   private void churnMobs(long tick, WorldInput input) {
-    if (mobs.isEmpty() || rng.nextDouble() >= CHURN_CHANCE) {
+    if (mobs.isEmpty() || rng.nextDouble() >= scenario.mobChurnChance()) {
       return;
     }
     input.accept(new WorldEvent.MobRemoved(tick, removeNth(rng.nextInt(mobs.size()))));
     spawn(tick, input);
   }
 
+  /**
+   * Mobs wander, so successive requests for one mob can fall in different regions and the owner of
+   * a mob is not fixed for the life of the run.
+   */
+  private void moveMobs() {
+    for (Map.Entry<Integer, Pos> mob : mobs.entrySet()) {
+      int x = Math.clamp(mob.getValue().x() + rng.nextInt(3) - 1, 0, world.size() - 1);
+      int z = Math.clamp(mob.getValue().z() + rng.nextInt(3) - 1, 0, world.size() - 1);
+      mob.setValue(new Pos(x, world.groundAt(x, z) + 1, z));
+    }
+  }
+
   private void requestPaths(long tick, WorldInput input) {
     // Safe to iterate directly: emitting an event never calls back into the workload.
     for (Map.Entry<Integer, Pos> mob : mobs.entrySet()) {
-      if (rng.nextDouble() < scenario.requestChance()) {
-        input.accept(
-            new WorldEvent.PathRequested(tick, mob.getKey(), mob.getValue(), randomStanding()));
+      if (rng.nextDouble() >= scenario.requestChance()) {
+        continue;
       }
+      // A stray start is outside every region, which no node owns and no snapshot covers.
+      Pos start =
+          rng.nextDouble() < scenario.strayRequestChance() ? outsideTheGrid() : mob.getValue();
+      input.accept(new WorldEvent.PathRequested(tick, mob.getKey(), start, randomStanding()));
     }
   }
 
   /** The chosen mob may have nothing outstanding, in which case the cancel must do nothing. */
   private void cancelPath(long tick, WorldInput input) {
-    if (mobs.isEmpty() || rng.nextDouble() >= CANCEL_CHANCE) {
+    if (mobs.isEmpty() || rng.nextDouble() >= scenario.cancelChance()) {
       return;
     }
     input.accept(new WorldEvent.PathCanceled(tick, nth(rng.nextInt(mobs.size()))));
   }
 
-  private void movePlayer(long tick, WorldInput input) {
-    if (rng.nextDouble() < PLAYER_LEAVE_CHANCE) {
-      input.accept(new WorldEvent.PlayerLeft(tick, PLAYER_ID));
+  /**
+   * Players leave and come back, and a move is what announces one, so the set the shedding priority
+   * will read is never fixed for a whole run.
+   */
+  private void movePlayers(long tick, WorldInput input) {
+    if (scenario.playerCount() > 0 && rng.nextDouble() < scenario.playerChurnChance()) {
+      int player = 1 + rng.nextInt(scenario.playerCount());
+      if (players.remove(player)) {
+        input.accept(new WorldEvent.PlayerLeft(tick, player));
+      } else {
+        players.add(player);
+        input.accept(new WorldEvent.PlayerMoved(tick, player, randomStanding()));
+      }
+    }
+    if (tick % PLAYER_MOVE_INTERVAL_TICKS != 0) {
       return;
     }
-    if (tick % PLAYER_MOVE_INTERVAL_TICKS == 0) {
-      input.accept(new WorldEvent.PlayerMoved(tick, PLAYER_ID, randomStanding()));
+    for (int player : players) {
+      input.accept(new WorldEvent.PlayerMoved(tick, player, randomStanding()));
     }
   }
 
@@ -184,5 +227,12 @@ public final class SyntheticWorkload implements Workload {
     int x = rng.nextInt(world.size());
     int z = rng.nextInt(world.size());
     return new Pos(x, world.groundAt(x, z) + 1, z);
+  }
+
+  private Pos outsideTheGrid() {
+    int y = world.minY() + world.height() / 2;
+    return rng.nextBoolean()
+        ? new Pos(-1 - rng.nextInt(MAX_STRAY_DISTANCE), y, rng.nextInt(world.size()))
+        : new Pos(rng.nextInt(world.size()), y, world.size() + rng.nextInt(MAX_STRAY_DISTANCE));
   }
 }

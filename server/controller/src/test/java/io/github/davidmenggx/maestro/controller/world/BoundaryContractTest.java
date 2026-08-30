@@ -5,7 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import maestro.fbs.PathType;
 import org.junit.jupiter.api.Test;
 
@@ -21,6 +23,19 @@ class BoundaryContractTest {
     assertTrue(PathTypes.isPerBlock((byte) PathType.BLOCKED));
     assertTrue(PathTypes.isPerBlock((byte) PathType.WATER));
     assertTrue(PathTypes.isPerBlock((byte) PathType.DOOR_IRON_CLOSED));
+  }
+
+  @Test
+  void theEnumerationAndThePredicateAgree() {
+    // The fuzzer draws a cell type by index, so the two views of the same set
+    // have to name the same ordinals.
+    Set<Byte> enumerated = new LinkedHashSet<>();
+    for (int i = 0; i < PathTypes.perBlockCount(); i++) {
+      byte ordinal = PathTypes.perBlock(i);
+      assertTrue(PathTypes.isPerBlock(ordinal), PathTypes.name(ordinal));
+      assertTrue(enumerated.add(ordinal), "listed twice: " + PathTypes.name(ordinal));
+    }
+    assertEquals(countPerBlock(), enumerated.size());
   }
 
   @Test

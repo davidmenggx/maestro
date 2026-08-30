@@ -15,43 +15,113 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The harness has to be trustworthy before the runs it produces are. These cover the machinery the
- * assertions themselves lean on, and the guards that turn a harness misuse into a message.
+ * assertions themselves lean on, the samplers that decide what a sweep explores, and the guards
+ * that turn a harness misuse into a message.
  */
 class HarnessGuardsTest {
 
+  /** Enough draws that a range which is genuinely reachable is reached. */
+  private static final int DRAWS = 300;
+
   @Test
   void sampledScenariosSpanTheirRangeAndStayValid() {
-    int lowestCapacity = Integer.MAX_VALUE;
-    int highestCapacity = 0;
-    boolean sawChurn = false;
-    for (int seed = 0; seed < 200; seed++) {
+    Span capacity = new Span();
+    Span slowNodes = new Span();
+    Span mobs = new Span();
+    Span classes = new Span();
+    Span blockChanges = new Span();
+    Span players = new Span();
+    Span requests = new Span();
+    Span stray = new Span();
+
+    for (int seed = 0; seed < DRAWS; seed++) {
       Scenario scenario = Scenario.sample(SeededRng.of(seed).derive("fuzz"));
-      lowestCapacity = Math.min(lowestCapacity, scenario.nodeCapacity());
-      highestCapacity = Math.max(highestCapacity, scenario.nodeCapacity());
-      sawChurn |= scenario.chunkChurnChance() > 0;
+      capacity.see(scenario.nodeCapacity());
+      slowNodes.see(scenario.slowNodes());
+      mobs.see(scenario.mobCount());
+      classes.see(scenario.mobClassCount());
+      blockChanges.see(scenario.maxBlockChangesPerTick());
+      players.see(scenario.playerCount());
+      requests.see(scenario.requestChance());
+      stray.see(scenario.strayRequestChance());
     }
 
-    // A sample stuck at one setting would not fuzz anything.
-    assertEquals(1, lowestCapacity);
-    assertTrue(highestCapacity >= 10, "capacity never reached the top of its range");
-    assertTrue(sawChurn);
+    // A sample stuck at one setting would not fuzz anything, and every knob has a
+    // degenerate end the controller has to sit in without producing anything.
+    capacity.assertSpans(1, 10);
+    slowNodes.assertSpans(0, 2);
+    mobs.assertSpans(0, 40);
+    classes.assertSpans(1, 4);
+    blockChanges.assertSpans(0, 6);
+    players.assertSpans(0, 3);
+    requests.assertSpans(0.01, 0.28);
+    stray.assertSpans(0.005, 0.09);
+  }
+
+  @Test
+  void sampledTopologiesSpanTheirRangeAndStayChunkAligned() {
+    Set<Integer> regionSizes = new LinkedHashSet<>();
+    Set<Integer> gridWidths = new LinkedHashSet<>();
+    Set<Integer> floors = new LinkedHashSet<>();
+    Span height = new Span();
+    Span relief = new Span();
+
+    for (int seed = 0; seed < DRAWS; seed++) {
+      Topology topology = Topology.sample(SeededRng.of(seed).derive("fuzz"));
+      regionSizes.add(topology.regionSize());
+      gridWidths.add(topology.regionsPerSide());
+      floors.add(topology.minY());
+      height.see(topology.height());
+      relief.see(topology.relief());
+      assertEquals(0, topology.extent() % Topology.CHUNK_SIZE, topology.toString());
+      assertEquals(topology.regionsPerSide() * topology.regionsPerSide(), topology.nodeCount());
+    }
+
+    assertEquals(Set.of(16, 32), regionSizes);
+    assertEquals(Set.of(1, 2, 3), gridWidths);
+    // A negative floor is what the overworld has, and every region index is
+    // computed against it on both sides of the wire.
+    assertEquals(Set.of(0, -16, -64), floors);
+    height.assertSpans(34, 94);
+    relief.assertSpans(0, 8);
   }
 
   @Test
   void sampledFleetFaultsCoverEveryKindAndStayInsideTheActiveWindow() {
     long active = 100;
     Set<String> kinds = new LinkedHashSet<>();
-    for (int seed = 0; seed < 200; seed++) {
+    Span faultCount = new Span();
+    Span minLatency = new Span();
+    Span maxLatency = new Span();
+    boolean sawPermanentLoss = false;
+
+    for (int seed = 0; seed < DRAWS; seed++) {
       FaultPlan plan = FaultPlan.sample(SeededRng.of(seed).derive("fuzz"), 4, active);
+      faultCount.see(plan.faults().size());
+      minLatency.see(plan.minLatencySteps());
+      maxLatency.see(plan.maxLatencySteps());
+      assertTrue(plan.maxLatencySteps() >= plan.minLatencySteps(), plan.toString());
+
+      int died = 0;
+      int recovered = 0;
       for (FaultPlan.Fault fault : plan.faults()) {
         kinds.add(fault.getClass().getSimpleName());
         assertTrue(fault.tick() >= 1 && fault.tick() < active, "fault at tick " + fault.tick());
+        died += fault instanceof FaultPlan.NodeDied ? 1 : 0;
+        recovered += fault instanceof FaultPlan.NodeRecovered ? 1 : 0;
       }
+      sawPermanentLoss |= died > recovered;
     }
 
     // Process death, a silent partition and a link reset are three different
     // recoveries, so the sweep has to reach all of them.
     assertEquals(Set.of("NodeDied", "NodeRecovered", "Partitioned", "LinkReset"), kinds);
+    // Faults have to be able to overlap, or a second failure during a recovery is
+    // a case the sweep can never reach.
+    faultCount.assertSpans(0, 2);
+    minLatency.assertSpans(2, 19);
+    maxLatency.assertSpans(20, 380);
+    assertTrue(sawPermanentLoss, "no node was ever lost for the rest of the run");
     assertEquals(List.of(), FaultPlan.sample(SeededRng.of(1).derive("fuzz"), 0, active).faults());
   }
 
@@ -87,10 +157,14 @@ class HarnessGuardsTest {
     SimMetrics metrics = new SimMetrics();
     metrics.count("frames", 2, "node", "node-0");
     metrics.count("frames", 5, "node", "node-1");
+    metrics.count("frames-held", 9, "node", "node-0");
 
     assertEquals(2, metrics.counter("frames", "node", "node-0"));
     assertEquals(5, metrics.counter("frames", "node", "node-1"));
     assertEquals(0, metrics.counter("frames"));
+    // A total covers every label of one counter and stops at the name boundary.
+    assertEquals(7, metrics.total("frames"));
+    assertEquals(9, metrics.total("frames-held"));
     assertThrows(IllegalArgumentException.class, () -> metrics.count("frames", 1, "unpaired"));
   }
 
@@ -104,10 +178,65 @@ class HarnessGuardsTest {
 
   @Test
   void aScenarioRejectsImpossibleSettings() {
-    assertThrows(IllegalArgumentException.class, () -> new Scenario(0, 1, 0.1, 0.0));
-    assertThrows(IllegalArgumentException.class, () -> new Scenario(1, -1, 0.1, 0.0));
-    assertThrows(IllegalArgumentException.class, () -> new Scenario(1, 1, 1.5, 0.0));
-    assertThrows(IllegalArgumentException.class, () -> new Scenario(1, 1, 0.1, -0.1));
+    assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.withNodeCapacity(0));
+    assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.withMobCount(-1));
+    assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.withRequestChance(1.5));
+    assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.withChunkChurnChance(-0.1));
+  }
+
+  @Test
+  void aSlowNodeIsTheOnlyOneServedAtAReducedRate() {
+    Scenario scenario = Scenario.DEFAULT.withNodeCapacity(8);
+
+    assertEquals(8, scenario.capacityOf(0));
+    assertEquals(2, new Scenario(8, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0).capacityOf(0));
+    assertEquals(8, new Scenario(8, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0).capacityOf(1));
+    // A capacity that would round to zero still serves one request a tick.
+    assertEquals(1, new Scenario(2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0).capacityOf(0));
+  }
+
+  @Test
+  void geometryMustBeChunkAligned() {
+    assertThrows(IllegalArgumentException.class, () -> new RegionMap(20, 1, List.of(NodeId.of(0))));
+    assertThrows(IllegalArgumentException.class, () -> new RegionMap(16, 2, List.of(NodeId.of(0))));
+    assertThrows(IllegalArgumentException.class, () -> new Topology(20, 1, 0, 64, 2));
+    assertThrows(IllegalArgumentException.class, () -> new Topology(16, 0, 0, 64, 2));
+    // A column too short, or a hill that would leave a mob nowhere to stand.
+    assertThrows(IllegalArgumentException.class, () -> new Topology(16, 1, 0, 16, 2));
+    assertThrows(IllegalArgumentException.class, () -> new Topology(16, 1, 0, 64, 32));
+
+    RegionMap regions = new RegionMap(16, 2, nodes(4));
+    assertEquals(32, regions.extent());
+    assertThrows(IllegalArgumentException.class, () -> regions.minX(4));
+    assertThrows(IllegalArgumentException.class, () -> regions.owner(-1));
+  }
+
+  @Test
+  void theWorldRefusesBlocksItDoesNotHold() {
+    Topology topology = new Topology(16, 1, -64, 64, 2);
+    SimWorld world = new SimWorld(topology, 2, SeededRng.of(1L));
+
+    assertEquals(-64, world.minY());
+    assertThrows(IllegalArgumentException.class, () -> world.set(-1, -60, 0, (byte) 0));
+    assertThrows(IllegalArgumentException.class, () -> world.set(0, 0, 0, (byte) 0));
+    assertThrows(IllegalArgumentException.class, () -> world.set(0, -65, 0, (byte) 0));
+    assertThrows(IllegalArgumentException.class, () -> world.chunkLoaded(9, 9));
+    assertThrows(IllegalArgumentException.class, () -> new SimWorld(topology, 0, SeededRng.of(1L)));
+    // Derived types cannot be a block's own type.
+    assertThrows(IllegalArgumentException.class, () -> world.set(0, -60, 0, (byte) 2));
+  }
+
+  @Test
+  void everySampledMobProfileIsCarriedOnTheWire() {
+    // Profiles are drawn per run, so the encoder meets values that differ between
+    // runs rather than one pair of constants.
+    Set<String> shapes = new LinkedHashSet<>();
+    for (int seed = 0; seed < DRAWS; seed++) {
+      SimWorld world = new SimWorld(Topology.DEFAULT, 3, SeededRng.of(seed).derive("terrain"));
+      assertEquals(3, world.mobClasses().size());
+      world.mobClasses().forEach(profile -> shapes.add(profile.width() + "x" + profile.height()));
+    }
+    assertTrue(shapes.size() > DRAWS, "mob profiles did not vary across seeds");
   }
 
   @Test
@@ -135,31 +264,25 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> transport.connect(NodeId.of(7), "sim://7"));
   }
 
-  @Test
-  void geometryMustBeChunkAligned() {
-    assertThrows(IllegalArgumentException.class, () -> new RegionMap(20, 1, List.of(NodeId.of(0))));
-    assertThrows(IllegalArgumentException.class, () -> new RegionMap(16, 2, List.of(NodeId.of(0))));
-    assertThrows(IllegalArgumentException.class, () -> new SimWorld(20, SeededRng.of(1L)));
-
-    RegionMap regions = new RegionMap(16, 2, nodes(4));
-    assertEquals(32, regions.extent());
-    assertThrows(IllegalArgumentException.class, () -> regions.minX(4));
-    assertThrows(IllegalArgumentException.class, () -> regions.owner(-1));
-  }
-
-  @Test
-  void theWorldRefusesBlocksItDoesNotHold() {
-    SimWorld world = new SimWorld(16, SeededRng.of(1L));
-
-    assertThrows(IllegalArgumentException.class, () -> world.set(-1, 1, 0, (byte) 0));
-    assertThrows(IllegalArgumentException.class, () -> world.set(0, SimWorld.HEIGHT, 0, (byte) 0));
-    assertThrows(IllegalArgumentException.class, () -> world.chunkLoaded(9, 9));
-    // Derived types cannot be a block's own type.
-    assertThrows(IllegalArgumentException.class, () -> world.set(0, 1, 0, (byte) 2));
-  }
-
   private static List<NodeId> nodes(int count) {
     return java.util.stream.IntStream.range(0, count).mapToObj(NodeId::of).toList();
+  }
+
+  /** Lowest and highest value a sampler produced, so a range can be asserted in one place. */
+  private static final class Span {
+
+    private double low = Double.POSITIVE_INFINITY;
+    private double high = Double.NEGATIVE_INFINITY;
+
+    void see(double value) {
+      low = Math.min(low, value);
+      high = Math.max(high, value);
+    }
+
+    void assertSpans(double atMost, double atLeast) {
+      assertTrue(low <= atMost, "lowest draw was " + low + ", expected at most " + atMost);
+      assertTrue(high >= atLeast, "highest draw was " + high + ", expected at least " + atLeast);
+    }
   }
 
   private static final class NoopListener

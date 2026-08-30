@@ -32,21 +32,50 @@ tasks.withType(JavaCompile).configureEach {
   options.release = 25
 }
 
-test {
-  useJUnitPlatform()
+// Sweep size the `fuzz` task uses when nothing overrides it. Long enough to be
+// worth a CI job of its own, short enough to run before a commit.
+def defaultFuzzRuns = "2000"
 
-  // Forwarded to the forked test JVM, which does not inherit the Gradle JVM's
-  // properties. `make dst SEED=n` replays a seed reported by a failing run.
+// Forwarded to the forked test JVM, which does not inherit the Gradle JVM's
+// properties. `make fuzz SEED=n` replays a seed reported by a failing run.
+def forwardSweepProperties = { Test task, String defaultRuns ->
   ["maestro.dst.seed", "maestro.dst.runs"].each { key ->
     def value = System.getProperty(key)
     if (value != null) {
-      systemProperty key, value
+      task.systemProperty key, value
     }
+  }
+  if (defaultRuns != null && System.getProperty("maestro.dst.runs") == null) {
+    task.systemProperty "maestro.dst.runs", defaultRuns
   }
 
   // A seed printed on failure is the whole replay story, so keep test output.
-  testLogging {
+  task.testLogging {
     showStandardStreams = true
     exceptionFormat = 'full'
   }
+}
+
+// The seed sweeps are tagged out of here and run as their own task, so the unit
+// suite stays fast enough to sit in front of every build.
+test {
+  useJUnitPlatform {
+    excludeTags 'fuzz'
+  }
+  forwardSweepProperties(delegate, null)
+}
+
+tasks.register('fuzz', Test) {
+  group = 'verification'
+  description = 'Runs the deterministic simulation seed sweeps.'
+  testClassesDirs = sourceSets.test.output.classesDirs
+  classpath = sourceSets.test.runtimeClasspath
+  useJUnitPlatform {
+    includeTags 'fuzz'
+  }
+  forwardSweepProperties(delegate, defaultFuzzRuns)
+
+  // The sweep size is the input that matters and it is not a file, so let the
+  // task run whenever it is asked for rather than reporting itself up to date.
+  outputs.upToDateWhen { false }
 }

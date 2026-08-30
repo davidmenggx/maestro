@@ -121,9 +121,14 @@ public final class SimTransport implements Transport {
     }
   }
 
+  /**
+   * Only a node that died recovers. Bumping the epoch of a live connection would discard the frames
+   * already in flight on it, which is a loss the ordered channel is not allowed to have.
+   */
   public void revive(NodeId node) {
-    dead.remove(node);
-    bumpEpoch(node);
+    if (dead.remove(node)) {
+      bumpEpoch(node);
+    }
   }
 
   /** Ordered frames are held and replayed when the partition lifts; unordered ones are lost. */

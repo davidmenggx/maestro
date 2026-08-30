@@ -6,11 +6,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Fixed-seed runs, each aimed at one behavior. The seed sweeps that explore the ranges these
+ * settings are drawn from live in {@link FuzzTest} and run as their own task.
+ */
 class SimulationTest {
 
   private static final long TICKS = 150;
@@ -28,27 +30,13 @@ class SimulationTest {
   }
 
   @Test
-  void everySeedProducesItsOwnRun() {
-    // Guards against the seed being ignored somewhere in the wiring. Two runs
-    // colliding by chance needs an FNV-1a collision across 64 bits, so for a
-    // sweep this size the false failure rate is far below one in a billion.
-    Set<Long> digests = new LinkedHashSet<>();
-    for (int i = 0; i < SimRun.runCount(); i++) {
-      digests.add(
-          SimRun.of(SimRun.baseSeed() + i, FaultPlan.reliable(), TICKS).go().sim.digest().value());
-    }
-    assertEquals(SimRun.runCount(), digests.size(), "two seeds produced the same run");
-  }
-
-  @Test
   void invariantsHoldOnAReliableNetwork() {
-    for (int i = 0; i < SimRun.runCount(); i++) {
-      SimRun run = SimRun.of(SimRun.baseSeed() + i, FaultPlan.reliable(), TICKS).go();
-      assertEquals(List.of(), run.violations(), run.describe());
-      assertTrue(run.out.answered() > 0, run.describe());
-      assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
-      assertEquals(0, run.out.dropped(DropReason.SHED), run.describe());
-    }
+    SimRun run = SimRun.of(2L, FaultPlan.reliable(), TICKS).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(run.out.answered() > 0, run.describe());
+    assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
+    assertEquals(0, run.out.dropped(DropReason.SHED), run.describe());
   }
 
   @Test
@@ -69,29 +57,6 @@ class SimulationTest {
   }
 
   @Test
-  void lossHitsTheRequestStreamAndNeverTheWorldStream() {
-    FaultPlan lossy = FaultPlan.reliable().withLoss(0.05, 0.05);
-    long duplicatesSeen = 0;
-    long requestFramesDropped = 0;
-
-    for (int i = 0; i < SimRun.runCount(); i++) {
-      SimRun run = SimRun.of(SimRun.baseSeed() + i, lossy, TICKS).go();
-      assertEquals(List.of(), run.violations(), run.describe());
-      duplicatesSeen += run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum();
-      requestFramesDropped += counter(run, "transport.dropped", Channel.REQUEST);
-      // Nothing on the ordered stream is lost.
-      assertEquals(
-          counter(run, "transport.sent", Channel.WORLD),
-          counter(run, "transport.received", Channel.WORLD),
-          run.describe());
-      assertEquals(0, counter(run, "transport.dropped", Channel.WORLD), run.describe());
-    }
-
-    assertTrue(duplicatesSeen > 0, "expected the request stream to duplicate at least once");
-    assertTrue(requestFramesDropped > 0, "expected the request stream to drop at least once");
-  }
-
-  @Test
   void aDuplicatedRequestIsAnsweredOnceByTheController() {
     SimRun run = SimRun.of(5L, FaultPlan.reliable().withLoss(0.0, 0.4), TICKS).go();
 
@@ -100,6 +65,20 @@ class SimulationTest {
     assertTrue(run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum() > 0);
     assertTrue(run.sim.metrics().counter("path.response.stale") > 0, run.describe());
     assertEquals(List.of(), run.violations(), run.describe());
+  }
+
+  @Test
+  void lossHitsTheRequestStreamAndNeverTheWorldStream() {
+    SimRun run = SimRun.of(19L, FaultPlan.reliable().withLoss(0.05, 0.05), TICKS).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(counter(run, "transport.dropped", Channel.REQUEST) > 0, run.describe());
+    // Nothing on the ordered stream is lost.
+    assertEquals(
+        counter(run, "transport.sent", Channel.WORLD),
+        counter(run, "transport.received", Channel.WORLD),
+        run.describe());
+    assertEquals(0, counter(run, "transport.dropped", Channel.WORLD), run.describe());
   }
 
   @Test
@@ -113,50 +92,14 @@ class SimulationTest {
   }
 
   @Test
-  void chunkChurnHoldsTheInvariantsAndStaysDeterministic() {
-    long resnapshots = 0;
-    long unreadable = 0;
+  void chunkChurnResnapshotsTheRegionAndLeavesRequestsUnservable() {
+    SimRun run = SimRun.of(31L, FaultPlan.reliable(), TICKS, Scenario.CHURN).go();
 
-    for (int i = 0; i < SimRun.runCount(); i++) {
-      long seed = SimRun.baseSeed() + i;
-      SimRun run = SimRun.of(seed, FaultPlan.reliable(), TICKS, Scenario.CHURN).go();
-      assertEquals(List.of(), run.violations(), run.describe());
-      resnapshots += run.sim.metrics().counter("offload.submitted", "job", "snapshot");
-      unreadable += run.out.dropped(DropReason.NO_NODE);
-
-      // Chunk churn adds event kinds and code paths; the run must still replay.
-      SimRun again = SimRun.of(seed, FaultPlan.reliable(), TICKS, Scenario.CHURN).go();
-      assertEquals(run.sim.digest().value(), again.sim.digest().value(), run.describe());
-    }
-
-    // Confirms chunks did leave and come back, so the assertions above were not vacuous.
-    assertTrue(resnapshots > SimRun.runCount() * 4L, "expected regions to be snapshotted again");
-    assertTrue(unreadable > 0, "expected some requests to find their region unreadable");
-  }
-
-  @Test
-  void fuzzedLoadAndFaultsHoldTheInvariantsAndReplay() {
-    Set<Scenario> scenarios = new LinkedHashSet<>();
-    long answered = 0;
-
-    for (int i = 0; i < SimRun.runCount(); i++) {
-      long seed = SimRun.baseSeed() + i;
-      SimRun run = SimRun.fuzzed(seed, TICKS).go();
-      scenarios.add(run.scenario);
-      answered += run.out.answered();
-
-      // The fleet may be saturated at these settings, so the bound to check is
-      // the one admission control promises. The 3-tick SLO is only promised on a
-      // fleet with headroom.
-      assertEquals(List.of(), run.violations(ProbeController.MAX_TICKS_LATE), run.describe());
-      assertEquals(
-          run.sim.digest().value(),
-          SimRun.fuzzed(seed, TICKS).go().sim.digest().value(),
-          run.describe());
-    }
-
-    assertEquals(SimRun.runCount(), scenarios.size(), "two seeds drew the same scenario");
-    assertTrue(answered > 0, "no seed in the sweep produced a path");
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(
+        run.sim.metrics().counter("offload.submitted", "job", "snapshot") > run.regions.count(),
+        run.describe());
+    assertTrue(run.out.dropped(DropReason.NO_NODE) > 0, run.describe());
   }
 
   @Test
@@ -224,7 +167,9 @@ class SimulationTest {
                 new FaultPlan.Partitioned(40, victim, true),
                 new FaultPlan.Partitioned(200, victim, false));
 
-    SimRun run = SimRun.of(29L, plan, 250).go();
+    // Enough block changes that the region's stream rolls past the retention
+    // window while the node is away, which is what forces the resnapshot.
+    SimRun run = SimRun.of(29L, plan, 250, Scenario.DEFAULT.withMaxBlockChangesPerTick(8)).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(

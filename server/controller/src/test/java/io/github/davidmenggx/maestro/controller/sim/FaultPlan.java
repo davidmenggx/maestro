@@ -49,8 +49,17 @@ public record FaultPlan(
   }
 
   private static final double MAX_SAMPLED_RATE = 0.1;
-  private static final double FLEET_FAULT_CHANCE = 0.5;
+  private static final int MAX_FAULTS = 3;
   private static final int MAX_FAULT_SPAN_TICKS = 15;
+
+  /** A node that dies this often is never brought back, so a run ends a node short. */
+  private static final double PERMANENT_LOSS_CHANCE = 0.15;
+
+  /** Floor of the sampled latency range, in steps. Twenty steps is one millisecond. */
+  private static final int MAX_MIN_LATENCY_STEPS = 20;
+
+  /** Widest sampled range. At {@link Simulation#STEPS_PER_TICK} steps a tick, 400 is 20ms. */
+  private static final int MAX_LATENCY_SPAN_STEPS = 400;
 
   /** Nothing goes wrong; latency is a few hundred microseconds. */
   public static FaultPlan reliable() {
@@ -58,26 +67,40 @@ public record FaultPlan(
   }
 
   /**
-   * One draw from the full range of loss and duplication, plus at most one fleet fault. The fault
-   * both starts and ends inside {@code activeTicks}, leaving the quiet tail of the run to settle.
+   * One draw from the full range of latency, loss and duplication, plus up to {@link #MAX_FAULTS}
+   * fleet faults that may overlap on one node or hit several at once. Each fault starts inside
+   * {@code activeTicks} and, unless the node is permanently lost, ends there too, leaving the quiet
+   * tail of the run to settle.
    */
   public static FaultPlan sample(Rng rng, int nodeCount, long activeTicks) {
+    int minLatency = 1 + rng.nextInt(MAX_MIN_LATENCY_STEPS);
     FaultPlan plan =
-        reliable()
-            .withLoss(rng.nextDouble() * MAX_SAMPLED_RATE, rng.nextDouble() * MAX_SAMPLED_RATE);
-    if (nodeCount < 1
-        || activeTicks <= MAX_FAULT_SPAN_TICKS
-        || rng.nextDouble() >= FLEET_FAULT_CHANCE) {
+        new FaultPlan(
+            minLatency,
+            minLatency + rng.nextInt(MAX_LATENCY_SPAN_STEPS),
+            rng.nextDouble() * MAX_SAMPLED_RATE,
+            rng.nextDouble() * MAX_SAMPLED_RATE,
+            List.of());
+    if (nodeCount < 1 || activeTicks <= MAX_FAULT_SPAN_TICKS) {
       return plan;
     }
-    NodeId node = NodeId.of(rng.nextInt(nodeCount));
-    long start = 1 + rng.nextLong(activeTicks - MAX_FAULT_SPAN_TICKS);
-    long end = start + 1 + rng.nextInt(MAX_FAULT_SPAN_TICKS - 1);
-    return switch (rng.nextInt(3)) {
-      case 0 -> plan.with(new NodeDied(start, node), new NodeRecovered(end, node));
-      case 1 -> plan.with(new Partitioned(start, node, true), new Partitioned(end, node, false));
-      default -> plan.with(new LinkReset(start, node));
-    };
+    int count = rng.nextInt(MAX_FAULTS + 1);
+    for (int i = 0; i < count; i++) {
+      NodeId node = NodeId.of(rng.nextInt(nodeCount));
+      long start = 1 + rng.nextLong(activeTicks - MAX_FAULT_SPAN_TICKS);
+      long end = start + 1 + rng.nextInt(MAX_FAULT_SPAN_TICKS - 1);
+      plan =
+          switch (rng.nextInt(3)) {
+            case 0 ->
+                rng.nextDouble() < PERMANENT_LOSS_CHANCE
+                    ? plan.with(new NodeDied(start, node))
+                    : plan.with(new NodeDied(start, node), new NodeRecovered(end, node));
+            case 1 ->
+                plan.with(new Partitioned(start, node, true), new Partitioned(end, node, false));
+            default -> plan.with(new LinkReset(start, node));
+          };
+    }
+    return plan;
   }
 
   public FaultPlan withLoss(double drop, double duplicate) {

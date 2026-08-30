@@ -4,6 +4,7 @@ import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.WorldSource;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import maestro.fbs.PathType;
@@ -13,47 +14,64 @@ import maestro.fbs.PathType;
  * fuzz-test world shape. Held as flat arrays because it is dense and small, so every read is O(1)
  * and no iteration order can leak into a run.
  *
- * <p>Shorter than a real overworld column. Height changes what a snapshot costs, not what the
- * controller does with one.
+ * <p>Vertical extent, floor and hill relief all come from the {@link Topology}, so a sweep covers
+ * negative floors and columns that run-length encode into more than a couple of runs.
  */
 public final class SimWorld implements WorldSource {
 
-  public static final int MIN_Y = 0;
-  public static final int HEIGHT = 64;
-
-  public static final int CHUNK_SIZE = 16;
-
-  /** Two profiles, so a node has something to reject a request against. */
-  private static final List<MobClass> MOB_CLASSES =
-      List.of(profile((short) 1, 0.6f, 1.95f, 16), profile((short) 2, 0.9f, 1.4f, 32));
+  public static final int CHUNK_SIZE = Topology.CHUNK_SIZE;
 
   /** Marks a cell whose type still comes from the terrain rule rather than a block change. */
   private static final byte NO_OVERRIDE = -1;
 
+  private static final float MIN_WIDTH = 0.3f;
+  private static final float MAX_EXTRA_WIDTH = 1.2f;
+  private static final float MIN_MOB_HEIGHT = 0.5f;
+  private static final float MAX_EXTRA_MOB_HEIGHT = 2.5f;
+  private static final float MIN_UP_STEP = 0.5f;
+  private static final float MAX_EXTRA_UP_STEP = 1.0f;
+  private static final int MIN_FOLLOW_RANGE = 8;
+  private static final int MAX_EXTRA_FOLLOW_RANGE = 40;
+  private static final float MAX_MALUS = 16.0f;
+
+  /** Fraction of ordinals a profile refuses outright, which vanilla spells as a negative malus. */
+  private static final double IMPASSABLE_CHANCE = 0.15;
+
+  private final Topology topology;
   private final int size;
   private final int chunksPerSide;
   private final int[] ground;
   private final byte[] overrides;
   private final boolean[] loadedChunks;
+  private final List<MobClass> mobClasses;
 
-  public SimWorld(int size, Rng rng) {
-    if (size <= 0 || size % CHUNK_SIZE != 0) {
-      throw new IllegalArgumentException("world size must be a multiple of " + CHUNK_SIZE);
+  public SimWorld(Topology topology, int mobClassCount, Rng rng) {
+    if (mobClassCount < 1) {
+      throw new IllegalArgumentException("a world has at least one mob profile: " + mobClassCount);
     }
-    this.size = size;
-    this.chunksPerSide = size / CHUNK_SIZE;
+    this.topology = topology;
+    this.size = topology.extent();
+    this.chunksPerSide = topology.chunksPerSide();
     this.ground = new int[size * size];
-    this.overrides = new byte[size * size * HEIGHT];
+    this.overrides = new byte[size * size * topology.height()];
     this.loadedChunks = new boolean[chunksPerSide * chunksPerSide];
     Arrays.fill(overrides, NO_OVERRIDE);
+
+    int base = topology.minY() + topology.height() / 2;
     for (int i = 0; i < ground.length; i++) {
-      ground[i] = HEIGHT / 2 + rng.nextInt(3);
+      ground[i] = base + rng.nextInt(topology.relief() + 1);
     }
+
+    List<MobClass> profiles = new ArrayList<>(mobClassCount);
+    for (int i = 0; i < mobClassCount; i++) {
+      profiles.add(profile((short) (i + 1), rng));
+    }
+    this.mobClasses = List.copyOf(profiles);
   }
 
   @Override
   public List<MobClass> mobClasses() {
-    return MOB_CLASSES;
+    return mobClasses;
   }
 
   /** Block extent along both axes. */
@@ -84,7 +102,7 @@ public final class SimWorld implements WorldSource {
 
   /** Applies a block change. The workload emits the matching event. */
   public void set(int x, int y, int z, byte pathType) {
-    if (x < 0 || x >= size || z < 0 || z >= size || y < MIN_Y || y >= MIN_Y + HEIGHT) {
+    if (!inside(x, y, z)) {
       throw new IllegalArgumentException("block outside the world: " + x + "," + y + "," + z);
     }
     if (!PathTypes.isPerBlock(pathType)) {
@@ -95,17 +113,17 @@ public final class SimWorld implements WorldSource {
 
   @Override
   public int minY() {
-    return MIN_Y;
+    return topology.minY();
   }
 
   @Override
   public int height() {
-    return HEIGHT;
+    return topology.height();
   }
 
   @Override
   public byte pathTypeAt(int x, int y, int z) {
-    if (x < 0 || x >= size || z < 0 || z >= size || y < MIN_Y || y >= MIN_Y + HEIGHT) {
+    if (!inside(x, y, z)) {
       return (byte) PathType.BLOCKED;
     }
     if (!loadedChunks[chunkIndex(x / CHUNK_SIZE, z / CHUNK_SIZE)]) {
@@ -118,13 +136,37 @@ public final class SimWorld implements WorldSource {
     return y <= ground[x * size + z] ? (byte) PathType.BLOCKED : (byte) PathType.OPEN;
   }
 
-  private static MobClass profile(short classId, float width, float height, int followRange) {
+  /**
+   * One drawn {@code WalkNodeEvaluator} profile. Every field the wire carries is drawn, so the mob
+   * class table is encoded and decoded with values that differ between runs rather than one pair of
+   * constants.
+   */
+  private static MobClass profile(short classId, Rng rng) {
     float[] malus = new float[PathTypes.count()];
-    malus[PathType.WATER] = 8.0f;
-    malus[PathType.LAVA] = -1.0f;
-    malus[PathType.DAMAGE_CAUTIOUS] = 8.0f;
+    for (int ordinal = 0; ordinal < malus.length; ordinal++) {
+      malus[ordinal] =
+          rng.nextDouble() < IMPASSABLE_CHANCE ? -1.0f : (float) (rng.nextDouble() * MAX_MALUS);
+    }
     return new MobClass(
-        classId, width, height, malus, 0.5f, true, false, false, false, followRange);
+        classId,
+        MIN_WIDTH + (float) rng.nextDouble() * MAX_EXTRA_WIDTH,
+        MIN_MOB_HEIGHT + (float) rng.nextDouble() * MAX_EXTRA_MOB_HEIGHT,
+        malus,
+        MIN_UP_STEP + (float) rng.nextDouble() * MAX_EXTRA_UP_STEP,
+        rng.nextBoolean(),
+        rng.nextBoolean(),
+        rng.nextBoolean(),
+        rng.nextBoolean(),
+        MIN_FOLLOW_RANGE + rng.nextInt(MAX_EXTRA_FOLLOW_RANGE + 1));
+  }
+
+  private boolean inside(int x, int y, int z) {
+    return x >= 0
+        && x < size
+        && z >= 0
+        && z < size
+        && y >= topology.minY()
+        && y < topology.minY() + topology.height();
   }
 
   private int chunkIndex(int chunkX, int chunkZ) {
@@ -135,6 +177,6 @@ public final class SimWorld implements WorldSource {
   }
 
   private int index(int x, int y, int z) {
-    return (x * size + z) * HEIGHT + (y - MIN_Y);
+    return (x * size + z) * topology.height() + (y - topology.minY());
   }
 }

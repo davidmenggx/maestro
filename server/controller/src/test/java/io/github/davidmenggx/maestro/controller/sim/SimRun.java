@@ -11,17 +11,9 @@ import java.util.function.BiFunction;
 /**
  * One assembled run: world, fleet, controller and workload, all seeded from a single number. {@code
  * -Dmaestro.dst.seed} and {@code -Dmaestro.dst.runs} move the sweep, so a failing seed from CI
- * replays with `make dst SEED=...`.
+ * replays with `make fuzz SEED=...`.
  */
 public final class SimRun {
-
-  /** Region geometry. `RegionMap` requires a chunk-aligned size, and the world is sized from it. */
-  public static final int REGION_SIZE = 16;
-
-  public static final int REGIONS_PER_SIDE = 2;
-
-  /** One node per region, since resharding is not modeled. */
-  public static final int NODE_COUNT = REGIONS_PER_SIDE * REGIONS_PER_SIDE;
 
   /**
    * Trailing quiet ticks, so every in-flight request resolves before the invariants are checked.
@@ -31,8 +23,17 @@ public final class SimRun {
   /** p99 target from the SLO, in ticks. Looser than the admission bound in `ProbeController`. */
   public static final double TICK_BUDGET = 3.0;
 
+  /** Sweep size when nothing overrides it. The fuzz task raises it; unit tests keep it small. */
+  private static final int DEFAULT_RUNS = 8;
+
+  /** Length of a fuzzed run. The long end outlives the outbox retention window several times. */
+  private static final long MIN_FUZZED_TICKS = 60;
+
+  private static final long MAX_FUZZED_TICKS = 320;
+
   public final long seed;
   public final long ticks;
+  public final Topology topology;
   public final Scenario scenario;
   public final Simulation sim;
   public final SimWorld world;
@@ -45,22 +46,24 @@ public final class SimRun {
       long seed,
       FaultPlan faults,
       long ticks,
+      Topology topology,
       Scenario scenario,
       BiFunction<SimWorld, Rng, Workload> workloadFactory) {
     this.seed = seed;
     this.ticks = ticks;
+    this.topology = topology;
     this.scenario = scenario;
     this.sim = new Simulation(seed, faults);
 
     List<NodeId> nodes = new ArrayList<>();
-    for (int i = 0; i < NODE_COUNT; i++) {
+    for (int i = 0; i < topology.nodeCount(); i++) {
       NodeId id = NodeId.of(i);
       nodes.add(id);
-      sim.addNode(id, scenario.nodeCapacity());
+      sim.addNode(id, scenario.capacityOf(i));
     }
 
-    this.regions = new RegionMap(REGION_SIZE, REGIONS_PER_SIDE, nodes);
-    this.world = new SimWorld(regions.extent(), sim.rng().derive("terrain"));
+    this.regions = new RegionMap(topology.regionSize(), topology.regionsPerSide(), nodes);
+    this.world = new SimWorld(topology, scenario.mobClassCount(), sim.rng().derive("terrain"));
     this.out = new RecordingOutput(sim);
     this.controller = new ProbeController(sim.env(), world, out, regions, scenario.nodeCapacity());
     this.workload = workloadFactory.apply(world, sim.rng().derive("workload"));
@@ -71,29 +74,43 @@ public final class SimRun {
   }
 
   public static SimRun of(long seed, FaultPlan faults, long ticks, Scenario scenario) {
+    return of(seed, faults, ticks, Topology.DEFAULT, scenario);
+  }
+
+  public static SimRun of(
+      long seed, FaultPlan faults, long ticks, Topology topology, Scenario scenario) {
     return new SimRun(
         seed,
         faults,
         ticks,
+        topology,
         scenario,
         (world, rng) -> new SyntheticWorkload(world, rng, ticks - DRAIN_TICKS, scenario));
   }
 
   /**
-   * A run whose load and faults are drawn from the seed as well as its event ordering, so a sweep
-   * covers the ranges in {@link Scenario} and {@link FaultPlan} rather than one fixed setting.
+   * A run whose geometry, load, length and faults are all drawn from the seed alongside its event
+   * ordering, so a sweep covers the ranges in {@link Topology}, {@link Scenario} and {@link
+   * FaultPlan} rather than one fixed setting.
    */
-  public static SimRun fuzzed(long seed, long ticks) {
+  public static SimRun fuzzed(long seed) {
     Rng rng = SeededRng.of(seed).derive("fuzz");
+    long ticks = MIN_FUZZED_TICKS + rng.nextLong(MAX_FUZZED_TICKS - MIN_FUZZED_TICKS + 1);
+    Topology topology = Topology.sample(rng);
     Scenario scenario = Scenario.sample(rng);
-    FaultPlan faults = FaultPlan.sample(rng, NODE_COUNT, ticks - DRAIN_TICKS);
-    return of(seed, faults, ticks, scenario);
+    FaultPlan faults = FaultPlan.sample(rng, topology.nodeCount(), ticks - DRAIN_TICKS);
+    return of(seed, faults, ticks, topology, scenario);
   }
 
   /** A run driven by a fixed event list rather than a generator, for focused tests. */
   public static SimRun scripted(long seed, FaultPlan faults, long ticks, List<WorldEvent> events) {
     return new SimRun(
-        seed, faults, ticks, Scenario.DEFAULT, (world, rng) -> new ScriptedWorkload(world, events));
+        seed,
+        faults,
+        ticks,
+        Topology.DEFAULT,
+        Scenario.DEFAULT,
+        (world, rng) -> new ScriptedWorkload(world, events));
   }
 
   public SimRun go() {
@@ -106,7 +123,7 @@ public final class SimRun {
   }
 
   public List<String> violations(double tickBudget) {
-    return Invariants.check(sim, controller, out, tickBudget);
+    return Invariants.check(sim, controller, out, world, regions, tickBudget);
   }
 
   /** Seed and outcome, for a failure message that is enough to reproduce the run. */
@@ -121,6 +138,8 @@ public final class SimRun {
         + out.answered()
         + " drops="
         + out.drops()
+        + " topology="
+        + topology
         + " scenario="
         + scenario
         + " digest="
@@ -132,6 +151,6 @@ public final class SimRun {
   }
 
   public static int runCount() {
-    return Integer.getInteger("maestro.dst.runs", 8);
+    return Integer.getInteger("maestro.dst.runs", DEFAULT_RUNS);
   }
 }

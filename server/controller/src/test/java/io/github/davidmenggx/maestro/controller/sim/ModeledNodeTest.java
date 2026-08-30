@@ -30,15 +30,10 @@ class ModeledNodeTest {
 
     // A node handed one fresh snapshot of the same world must agree with the one
     // that rebuilt from a snapshot plus a tick's worth of deltas at a time.
-    int region = run.regions.indexOf(victim);
-    ModeledNode fresh = run.sim.addNode(NodeId.of(90), 1);
-    fresh.receive(
-        Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeAssignment(run.regions, region, 0)));
-    fresh.receive(
-        Channel.WORLD,
-        ByteBuffer.wrap(ProbeController.snapshotFrame(run.world, run.regions, region, 1)));
-
-    assertEquals(List.of(), Invariants.checkStateEquality(resumed, fresh), run.describe());
+    assertEquals(
+        List.of(),
+        Invariants.checkAgainstFreshSnapshot(run.sim, resumed, run.world, run.regions),
+        run.describe());
   }
 
   @Test
@@ -46,7 +41,7 @@ class ModeledNodeTest {
     Simulation sim = new Simulation(3L, FaultPlan.reliable());
     ModeledNode node = sim.addNode(NodeId.of(0), 4);
     RegionMap regions = new RegionMap(16, 1, List.of(NodeId.of(0)));
-    SimWorld world = new SimWorld(16, sim.rng().derive("terrain"));
+    SimWorld world = new SimWorld(new Topology(16, 1, 0, 64, 2), 2, sim.rng().derive("terrain"));
     world.loadChunk(0, 0);
 
     node.receive(Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeAssignment(regions, 0, 0)));
