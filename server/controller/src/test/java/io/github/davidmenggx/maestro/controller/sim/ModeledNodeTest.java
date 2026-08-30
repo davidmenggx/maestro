@@ -33,7 +33,7 @@ class ModeledNodeTest {
     int region = run.regions.indexOf(victim);
     ModeledNode fresh = run.sim.addNode(NodeId.of(90), 1);
     fresh.receive(
-        Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeAssignment(run.regions, region)));
+        Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeAssignment(run.regions, region, 0)));
     fresh.receive(
         Channel.WORLD,
         ByteBuffer.wrap(ProbeController.snapshotFrame(run.world, run.regions, region, 1)));
@@ -49,7 +49,7 @@ class ModeledNodeTest {
     SimWorld world = new SimWorld(16, sim.rng().derive("terrain"));
     world.loadChunk(0, 0);
 
-    node.receive(Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeAssignment(regions, 0)));
+    node.receive(Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeAssignment(regions, 0, 0)));
     node.receive(
         Channel.WORLD, ByteBuffer.wrap(ProbeController.snapshotFrame(world, regions, 0, 1)));
     assertEquals(List.of(), node.violations());

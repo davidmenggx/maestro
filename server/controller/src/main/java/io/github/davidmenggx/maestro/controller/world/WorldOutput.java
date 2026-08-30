@@ -19,7 +19,7 @@ public interface WorldOutput {
     /** The mob was removed while the request was in flight. */
     MOB_GONE,
     /** The mob withdrew the request before it was answered. */
-    CANCELLED,
+    CANCELED,
     /** The mob asked again before this one was answered, so the older request was abandoned. */
     SUPERSEDED,
     /** Dropped to hold the latency SLO under a saturated fleet. */

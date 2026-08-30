@@ -8,7 +8,9 @@ import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import java.nio.ByteBuffer;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -16,6 +18,55 @@ import org.junit.jupiter.api.Test;
  * assertions themselves lean on, and the guards that turn a harness misuse into a message.
  */
 class HarnessGuardsTest {
+
+  @Test
+  void sampledScenariosSpanTheirRangeAndStayValid() {
+    int lowestCapacity = Integer.MAX_VALUE;
+    int highestCapacity = 0;
+    boolean sawChurn = false;
+    for (int seed = 0; seed < 200; seed++) {
+      Scenario scenario = Scenario.sample(SeededRng.of(seed).derive("fuzz"));
+      lowestCapacity = Math.min(lowestCapacity, scenario.nodeCapacity());
+      highestCapacity = Math.max(highestCapacity, scenario.nodeCapacity());
+      sawChurn |= scenario.chunkChurnChance() > 0;
+    }
+
+    // A sample stuck at one setting would not fuzz anything.
+    assertEquals(1, lowestCapacity);
+    assertTrue(highestCapacity >= 10, "capacity never reached the top of its range");
+    assertTrue(sawChurn);
+  }
+
+  @Test
+  void sampledFleetFaultsCoverEveryKindAndStayInsideTheActiveWindow() {
+    long active = 100;
+    Set<String> kinds = new LinkedHashSet<>();
+    for (int seed = 0; seed < 200; seed++) {
+      FaultPlan plan = FaultPlan.sample(SeededRng.of(seed).derive("fuzz"), 4, active);
+      for (FaultPlan.Fault fault : plan.faults()) {
+        kinds.add(fault.getClass().getSimpleName());
+        assertTrue(fault.tick() >= 1 && fault.tick() < active, "fault at tick " + fault.tick());
+      }
+    }
+
+    // Process death, a silent partition and a link reset are three different
+    // recoveries, so the sweep has to reach all of them.
+    assertEquals(Set.of("NodeDied", "NodeRecovered", "Partitioned", "LinkReset"), kinds);
+    assertEquals(List.of(), FaultPlan.sample(SeededRng.of(1).derive("fuzz"), 0, active).faults());
+  }
+
+  @Test
+  void aNodeToldToResumeFromAStreamItLostSaysSo() {
+    Simulation sim = new Simulation(5L, FaultPlan.reliable());
+    ModeledNode node = sim.addNode(NodeId.of(0), 4);
+    RegionMap regions = new RegionMap(16, 1, List.of(NodeId.of(0)));
+
+    // The node holds nothing, so a resume point is a claim it cannot honor.
+    node.receive(Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeAssignment(regions, 0, 7)));
+
+    assertEquals(1, node.violations().size(), node.violations().toString());
+    assertTrue(node.violations().get(0).contains("resume from 7"), node.violations().toString());
+  }
 
   @Test
   void thePercentileTheSloLeansOnIsRight() {

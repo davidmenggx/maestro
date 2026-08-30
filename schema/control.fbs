@@ -5,14 +5,11 @@ include "pathfinding.fbs";
 
 namespace maestro.fbs;
 
-table Hello {
-  node_id:string;
-}
-
 // Assigns a square, full-height region. `region_id` is a
-// server-assigned monotonic id. `resume_from_sequence`
-// is where the world stream resumes; 0 requests a full
-// snapshot.
+// server-assigned monotonic id. `resume_from_sequence` is
+// the sequence the node last applied, so deltas continue
+// from the next one; 0 means the node's state was dropped
+// and a full snapshot follows.
 table RegionAssignment {
   region_id:uint;
   min_xz:Vec2i;
@@ -20,9 +17,18 @@ table RegionAssignment {
   resume_from_sequence:ulong;
 }
 
+// A node's opening frame on a new connection: which region it still holds and
+// how far its world stream got. `last_sequence` is 0 when the node holds no
+// state, which is what a restarted process reports. The controller replies with
+// a `RegionAssignment` whose `resume_from_sequence` says which way it went.
+table Hello {
+  region_id:uint;
+  last_sequence:ulong;
+}
+
 table Ping {
   sequence:ulong;
-  send_micros:ulong; // For phi-accural.
+  send_micros:ulong; // For phi accrual.
 }
 
 table Pong {
@@ -31,18 +37,22 @@ table Pong {
   queue_depth:uint; // For load management.
 }
 
-// One union per stream so the reader dispatches on a single root type.
+// One union per channel per direction, so a reader dispatches on a single
+// root type once it knows which channel a frame arrived on.
 union WorldMsg { WorldDelta, RegionAssignment, WorldSnapshot }
 table WorldFrame { body:WorldMsg; }
 
 union RequestMsg { PathRequest, PathRequestBatch }
 table RequestFrame { body:RequestMsg; }
 
-union ResponseMsg { PathResponse, PathResponseBatch, Pong }
+union ResponseMsg { PathResponse, PathResponseBatch }
 table ResponseFrame { body:ResponseMsg; }
 
-union ControlMsg { Hello, Ping, MobClassTable }
+union ControlMsg { Ping, MobClassTable }
 table ControlFrame { body:ControlMsg; }
+
+union ControlReplyMsg { Hello, Pong }
+table ControlReplyFrame { body:ControlReplyMsg; }
 
 // flatc allows one root_type. Other frames are read via GetRoot<T>() in code.
 root_type WorldFrame;

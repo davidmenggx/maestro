@@ -1,6 +1,8 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
+import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -9,6 +11,9 @@ import java.util.List;
  * than failing on the first, so one seed reports everything it broke.
  */
 public final class Invariants {
+
+  /** Id for the throwaway node a fresh recomputation is loaded into. Outside any region grid. */
+  private static final int FRESH_NODE = 90;
 
   private Invariants() {}
 
@@ -83,6 +88,20 @@ public final class Invariants {
    * State after a failover must equal a fresh full recomputation: a node that rebuilt from a
    * snapshot plus deltas holds what a node handed a fresh snapshot of the same world holds.
    */
+  public static List<String> checkAgainstFreshSnapshot(
+      Simulation sim, ModeledNode node, SimWorld world, RegionMap regions) {
+    int region = regions.indexOf(node.id());
+    if (region < 0) {
+      return List.of(node.id() + " owns no region to compare");
+    }
+    ModeledNode fresh = sim.addNode(NodeId.of(FRESH_NODE), 1);
+    fresh.receive(
+        Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeAssignment(regions, region, 0)));
+    fresh.receive(
+        Channel.WORLD, ByteBuffer.wrap(ProbeController.snapshotFrame(world, regions, region, 1)));
+    return checkStateEquality(node, fresh);
+  }
+
   public static List<String> checkStateEquality(ModeledNode resumed, ModeledNode fresh) {
     List<String> violations = new ArrayList<>();
     if (!resumed.hasState() || !fresh.hasState()) {

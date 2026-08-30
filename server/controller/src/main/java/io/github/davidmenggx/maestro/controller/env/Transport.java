@@ -10,8 +10,8 @@ public interface Transport {
 
   /**
    * Independent streams to one node. Ordering holds within a channel, never across them. {@link
-   * #ordered} says whether the channel may lose or reorder a frame without also breaking the
-   * connection: an ordered channel is TCP-shaped, so a loss shows up as a disconnect instead.
+   * #ordered} says whether a frame can be lost or reordered without the connection breaking. On an
+   * ordered channel it cannot, so a loss reaches the controller as a disconnect.
    */
   enum Channel {
     /** World deltas and snapshots: strictly ordered, sequence numbered, resumable. */
