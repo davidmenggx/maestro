@@ -10,7 +10,8 @@ import io.github.davidmenggx.maestro.controller.env.Rng;
  * <p>{@link #sample} draws one from the ranges below, so a seed sweep covers the settings and not
  * only the event ordering. Every range includes the degenerate end (no mobs, no players, no block
  * changes), because an empty server is a state the controller has to sit in without producing
- * anything. The named constants are for tests that need one specific pressure.
+ * anything. The named constants are for tests that need one specific pressure, and {@link
+ * #toBuilder} changes one setting of an existing scenario without restating the rest.
  */
 public record Scenario(
     int nodeCapacity,
@@ -52,23 +53,23 @@ public record Scenario(
 
   /** Far more demand than the fleet can serve, so pre-send rejection has to hold the line. */
   public static final Scenario SATURATED =
-      DEFAULT.withNodeCapacity(1).withMobCount(40).withRequestChance(0.25);
+      DEFAULT.toBuilder().nodeCapacity(1).mobCount(40).requestChance(0.25).build();
 
   /** Chunks come and go under the controller, so regions keep losing and regaining readability. */
-  public static final Scenario CHURN = DEFAULT.withChunkChurnChance(0.08);
+  public static final Scenario CHURN = DEFAULT.toBuilder().chunkChurnChance(0.08).build();
 
-  private static final int MAX_NODE_CAPACITY = 12;
-  private static final int MAX_SLOW_NODES = 2;
-  private static final int MAX_MOB_COUNT = 48;
-  private static final int MAX_MOB_CLASSES = 4;
-  private static final int MAX_BLOCK_CHANGES_PER_TICK = 6;
-  private static final int MAX_PLAYERS = 3;
-  private static final double MAX_REQUEST_CHANCE = 0.3;
-  private static final double MAX_CANCEL_CHANCE = 0.1;
-  private static final double MAX_MOB_CHURN_CHANCE = 0.15;
-  private static final double MAX_CHUNK_CHURN_CHANCE = 0.12;
-  private static final double MAX_PLAYER_CHURN_CHANCE = 0.1;
-  private static final double MAX_STRAY_REQUEST_CHANCE = 0.1;
+  static final int MAX_NODE_CAPACITY = 12;
+  static final int MAX_SLOW_NODES = 2;
+  static final int MAX_MOB_COUNT = 48;
+  static final int MAX_MOB_CLASSES = 4;
+  static final int MAX_BLOCK_CHANGES_PER_TICK = 6;
+  static final int MAX_PLAYERS = 3;
+  static final double MAX_REQUEST_CHANCE = 0.3;
+  static final double MAX_CANCEL_CHANCE = 0.1;
+  static final double MAX_MOB_CHURN_CHANCE = 0.15;
+  static final double MAX_CHUNK_CHURN_CHANCE = 0.12;
+  static final double MAX_PLAYER_CHURN_CHANCE = 0.1;
+  static final double MAX_STRAY_REQUEST_CHANCE = 0.1;
 
   /** One draw from the full range of each setting, including ones the fleet cannot serve. */
   public static Scenario sample(Rng rng) {
@@ -95,84 +96,116 @@ public record Scenario(
     return nodeIndex < slowNodes ? Math.max(1, nodeCapacity / 4) : nodeCapacity;
   }
 
-  public Scenario withNodeCapacity(int capacity) {
-    return new Scenario(
-        capacity,
-        slowNodes,
-        mobCount,
-        mobClassCount,
-        maxBlockChangesPerTick,
-        playerCount,
-        requestChance,
-        cancelChance,
-        mobChurnChance,
-        chunkChurnChance,
-        playerChurnChance,
-        strayRequestChance);
+  public Builder toBuilder() {
+    return new Builder(this);
   }
 
-  public Scenario withMobCount(int count) {
-    return new Scenario(
-        nodeCapacity,
-        slowNodes,
-        count,
-        mobClassCount,
-        maxBlockChangesPerTick,
-        playerCount,
-        requestChance,
-        cancelChance,
-        mobChurnChance,
-        chunkChurnChance,
-        playerChurnChance,
-        strayRequestChance);
-  }
+  /** Copy of a {@link Scenario} with one setting moved, so a test states only what it changes. */
+  public static final class Builder {
 
-  public Scenario withRequestChance(double chance) {
-    return new Scenario(
-        nodeCapacity,
-        slowNodes,
-        mobCount,
-        mobClassCount,
-        maxBlockChangesPerTick,
-        playerCount,
-        chance,
-        cancelChance,
-        mobChurnChance,
-        chunkChurnChance,
-        playerChurnChance,
-        strayRequestChance);
-  }
+    private int nodeCapacity;
+    private int slowNodes;
+    private int mobCount;
+    private int mobClassCount;
+    private int maxBlockChangesPerTick;
+    private int playerCount;
+    private double requestChance;
+    private double cancelChance;
+    private double mobChurnChance;
+    private double chunkChurnChance;
+    private double playerChurnChance;
+    private double strayRequestChance;
 
-  public Scenario withMaxBlockChangesPerTick(int changes) {
-    return new Scenario(
-        nodeCapacity,
-        slowNodes,
-        mobCount,
-        mobClassCount,
-        changes,
-        playerCount,
-        requestChance,
-        cancelChance,
-        mobChurnChance,
-        chunkChurnChance,
-        playerChurnChance,
-        strayRequestChance);
-  }
+    private Builder(Scenario from) {
+      nodeCapacity = from.nodeCapacity;
+      slowNodes = from.slowNodes;
+      mobCount = from.mobCount;
+      mobClassCount = from.mobClassCount;
+      maxBlockChangesPerTick = from.maxBlockChangesPerTick;
+      playerCount = from.playerCount;
+      requestChance = from.requestChance;
+      cancelChance = from.cancelChance;
+      mobChurnChance = from.mobChurnChance;
+      chunkChurnChance = from.chunkChurnChance;
+      playerChurnChance = from.playerChurnChance;
+      strayRequestChance = from.strayRequestChance;
+    }
 
-  public Scenario withChunkChurnChance(double chance) {
-    return new Scenario(
-        nodeCapacity,
-        slowNodes,
-        mobCount,
-        mobClassCount,
-        maxBlockChangesPerTick,
-        playerCount,
-        requestChance,
-        cancelChance,
-        mobChurnChance,
-        chance,
-        playerChurnChance,
-        strayRequestChance);
+    public Builder nodeCapacity(int value) {
+      nodeCapacity = value;
+      return this;
+    }
+
+    public Builder slowNodes(int value) {
+      slowNodes = value;
+      return this;
+    }
+
+    public Builder mobCount(int value) {
+      mobCount = value;
+      return this;
+    }
+
+    public Builder mobClassCount(int value) {
+      mobClassCount = value;
+      return this;
+    }
+
+    public Builder maxBlockChangesPerTick(int value) {
+      maxBlockChangesPerTick = value;
+      return this;
+    }
+
+    public Builder playerCount(int value) {
+      playerCount = value;
+      return this;
+    }
+
+    public Builder requestChance(double value) {
+      requestChance = value;
+      return this;
+    }
+
+    public Builder cancelChance(double value) {
+      cancelChance = value;
+      return this;
+    }
+
+    public Builder mobChurnChance(double value) {
+      mobChurnChance = value;
+      return this;
+    }
+
+    public Builder chunkChurnChance(double value) {
+      chunkChurnChance = value;
+      return this;
+    }
+
+    public Builder playerChurnChance(double value) {
+      playerChurnChance = value;
+      return this;
+    }
+
+    public Builder strayRequestChance(double value) {
+      strayRequestChance = value;
+      return this;
+    }
+
+    public Scenario build() {
+      return new Scenario(
+          nodeCapacity,
+          slowNodes,
+          mobCount,
+          mobClassCount,
+          maxBlockChangesPerTick,
+          playerCount,
+          requestChance,
+          cancelChance,
+          mobChurnChance,
+          chunkChurnChance,
+          playerChurnChance,
+          strayRequestChance);
+    }
   }
 
   private static void requireCount(int count, String name) {

@@ -10,12 +10,31 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Fixed-seed runs, each aimed at one behavior. The seed sweeps that explore the ranges these
- * settings are drawn from live in {@link FuzzTest} and run as their own task.
+ * Fixed-seed runs, each pinning one behavior to an exact count that a sweep cannot state: which
+ * recovery a fault takes, how many snapshots it costs, and which drop reason a request gets. The
+ * sweeps in {@link FuzzTest} cover the same code over the ranges these settings are drawn from, so
+ * anything they already assert as an aggregate is not repeated here.
  */
 class SimulationTest {
 
   private static final long TICKS = 150;
+
+  /** Tick the node the retention test picks on loses its connection. */
+  private static final long CUT_TICK = 40;
+
+  /**
+   * How long that node stays away. Its region emits at most one world frame a tick, and only on a
+   * tick that changes a block inside it, so the partition has to outlast the replay window by
+   * several times its length before the stream rolls past the resume point. A margin that stopped
+   * being enough shows up as the resume count below going non-zero, not as a quiet pass.
+   */
+  private static final long AWAY_TICKS = 4L * ProbeController.RETENTION_FRAMES;
+
+  /** Quiet ticks after the partition lifts, for the resnapshot to land and the run to settle. */
+  private static final long TAIL_TICKS = 50;
+
+  /** Changes a tick, enough that every region sees one most ticks rather than only some of them. */
+  private static final int CHANGES_PER_TICK = 2 * Topology.DEFAULT.nodeCount();
 
   @Test
   void sameSeedReplaysIdentically() {
@@ -27,16 +46,6 @@ class SimulationTest {
     assertEquals(first.sim.digest().value(), second.sim.digest().value(), first.describe());
     assertEquals(first.out.results(), second.out.results());
     assertEquals(first.sim.metrics().counters(), second.sim.metrics().counters());
-  }
-
-  @Test
-  void invariantsHoldOnAReliableNetwork() {
-    SimRun run = SimRun.of(2L, FaultPlan.reliable(), TICKS).go();
-
-    assertEquals(List.of(), run.violations(), run.describe());
-    assertTrue(run.out.answered() > 0, run.describe());
-    assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
-    assertEquals(0, run.out.dropped(DropReason.SHED), run.describe());
   }
 
   @Test
@@ -68,20 +77,6 @@ class SimulationTest {
   }
 
   @Test
-  void lossHitsTheRequestStreamAndNeverTheWorldStream() {
-    SimRun run = SimRun.of(19L, FaultPlan.reliable().withLoss(0.05, 0.05), TICKS).go();
-
-    assertEquals(List.of(), run.violations(), run.describe());
-    assertTrue(counter(run, "transport.dropped", Channel.REQUEST) > 0, run.describe());
-    // Nothing on the ordered stream is lost.
-    assertEquals(
-        counter(run, "transport.sent", Channel.WORLD),
-        counter(run, "transport.received", Channel.WORLD),
-        run.describe());
-    assertEquals(0, counter(run, "transport.dropped", Channel.WORLD), run.describe());
-  }
-
-  @Test
   void everyNodeIsToldTheMobClassTableBeforeItIsAskedForAPath() {
     SimRun run = SimRun.of(17L, FaultPlan.reliable(), TICKS).go();
 
@@ -89,17 +84,6 @@ class SimulationTest {
     for (ModeledNode node : run.sim.nodes()) {
       assertEquals(run.world.mobClasses().size(), node.knownClassCount(), run.describe());
     }
-  }
-
-  @Test
-  void chunkChurnResnapshotsTheRegionAndLeavesRequestsUnservable() {
-    SimRun run = SimRun.of(31L, FaultPlan.reliable(), TICKS, Scenario.CHURN).go();
-
-    assertEquals(List.of(), run.violations(), run.describe());
-    assertTrue(
-        run.sim.metrics().counter("offload.submitted", "job", "snapshot") > run.regions.count(),
-        run.describe());
-    assertTrue(run.out.dropped(DropReason.NO_NODE) > 0, run.describe());
   }
 
   @Test
@@ -163,13 +147,17 @@ class SimulationTest {
     FaultPlan plan =
         FaultPlan.reliable()
             .with(
-                new FaultPlan.LinkReset(40, victim),
-                new FaultPlan.Partitioned(40, victim, true),
-                new FaultPlan.Partitioned(200, victim, false));
+                new FaultPlan.LinkReset(CUT_TICK, victim),
+                new FaultPlan.Partitioned(CUT_TICK, victim, true),
+                new FaultPlan.Partitioned(CUT_TICK + AWAY_TICKS, victim, false));
 
-    // Enough block changes that the region's stream rolls past the retention
-    // window while the node is away, which is what forces the resnapshot.
-    SimRun run = SimRun.of(29L, plan, 250, Scenario.DEFAULT.withMaxBlockChangesPerTick(8)).go();
+    SimRun run =
+        SimRun.of(
+                29L,
+                plan,
+                CUT_TICK + AWAY_TICKS + TAIL_TICKS,
+                Scenario.DEFAULT.toBuilder().maxBlockChangesPerTick(CHANGES_PER_TICK).build())
+            .go();
 
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(

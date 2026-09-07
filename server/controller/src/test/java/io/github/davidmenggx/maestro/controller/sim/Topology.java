@@ -1,6 +1,7 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.Rng;
+import java.util.List;
 
 /**
  * The coordinate space a run happens in and how it is divided among nodes: a square grid of square,
@@ -12,17 +13,31 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
   /** Chunk width. Regions are chunk aligned, or residency cannot be decided per region. */
   public static final int CHUNK_SIZE = 16;
 
-  private static final int MIN_HEIGHT = 32;
+  static final int MIN_HEIGHT = 32;
+  static final int MAX_HEIGHT = 96;
+  static final int MAX_REGIONS_PER_SIDE = 3;
 
-  private static final int MAX_HEIGHT = 96;
-  private static final int MAX_REGIONS_PER_SIDE = 3;
-  private static final int MAX_RELIEF = MIN_HEIGHT / 4;
-
-  private static final int[] FLOORS = {0, -16, -64};
-
-  private static final int[] REGION_SIZES = {CHUNK_SIZE, 2 * CHUNK_SIZE};
+  /** Capped against the shortest column the sampler can draw, so every draw clears the check. */
+  static final int MAX_RELIEF = MIN_HEIGHT / 4;
 
   public static final Topology DEFAULT = new Topology(CHUNK_SIZE, 2, 0, 64, 2);
+
+  /** Floors a sampled world may sit on. The overworld's is negative, so the sampler covers that. */
+  static List<Integer> floors() {
+    return List.of(0, -16, -64);
+  }
+
+  static List<Integer> regionSizes() {
+    return List.of(CHUNK_SIZE, 2 * CHUNK_SIZE);
+  }
+
+  /**
+   * Nodes in the widest grid {@link #sample} can draw, and so one past the highest node id any run
+   * can assign. Ids at or above it are free for fixtures built outside a fleet.
+   */
+  static int maxNodeCount() {
+    return MAX_REGIONS_PER_SIDE * MAX_REGIONS_PER_SIDE;
+  }
 
   public Topology {
     if (regionSize <= 0 || regionSize % CHUNK_SIZE != 0) {
@@ -54,10 +69,12 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
   }
 
   public static Topology sample(Rng rng) {
+    List<Integer> sizes = regionSizes();
+    List<Integer> floors = floors();
     return new Topology(
-        REGION_SIZES[rng.nextInt(REGION_SIZES.length)],
+        sizes.get(rng.nextInt(sizes.size())),
         1 + rng.nextInt(MAX_REGIONS_PER_SIDE),
-        FLOORS[rng.nextInt(FLOORS.length)],
+        floors.get(rng.nextInt(floors.size())),
         MIN_HEIGHT + rng.nextInt(MAX_HEIGHT - MIN_HEIGHT + 1),
         rng.nextInt(MAX_RELIEF + 1));
   }

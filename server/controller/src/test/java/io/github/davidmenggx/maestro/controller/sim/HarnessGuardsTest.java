@@ -11,6 +11,8 @@ import java.nio.ByteBuffer;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -31,6 +33,10 @@ class HarnessGuardsTest {
     Span blockChanges = new Span();
     Span players = new Span();
     Span requests = new Span();
+    Span cancels = new Span();
+    Span mobChurn = new Span();
+    Span chunkChurn = new Span();
+    Span playerChurn = new Span();
     Span stray = new Span();
 
     for (int seed = 0; seed < DRAWS; seed++) {
@@ -42,19 +48,27 @@ class HarnessGuardsTest {
       blockChanges.see(scenario.maxBlockChangesPerTick());
       players.see(scenario.playerCount());
       requests.see(scenario.requestChance());
+      cancels.see(scenario.cancelChance());
+      mobChurn.see(scenario.mobChurnChance());
+      chunkChurn.see(scenario.chunkChurnChance());
+      playerChurn.see(scenario.playerChurnChance());
       stray.see(scenario.strayRequestChance());
     }
 
-    // A sample stuck at one setting would not fuzz anything, and every knob has a
-    // degenerate end the controller has to sit in without producing anything.
-    capacity.assertSpans(1, 10);
-    slowNodes.assertSpans(0, 2);
-    mobs.assertSpans(0, 40);
-    classes.assertSpans(1, 4);
-    blockChanges.assertSpans(0, 6);
-    players.assertSpans(0, 3);
-    requests.assertSpans(0.01, 0.28);
-    stray.assertSpans(0.005, 0.09);
+    // A sample stuck at one setting would not fuzz anything. The bounds come from
+    // the sampler itself, so widening a range cannot quietly leave this behind.
+    capacity.assertCovers(1, Scenario.MAX_NODE_CAPACITY);
+    slowNodes.assertCovers(0, Scenario.MAX_SLOW_NODES);
+    mobs.assertCovers(0, Scenario.MAX_MOB_COUNT);
+    classes.assertCovers(1, Scenario.MAX_MOB_CLASSES);
+    blockChanges.assertCovers(0, Scenario.MAX_BLOCK_CHANGES_PER_TICK);
+    players.assertCovers(0, Scenario.MAX_PLAYERS);
+    requests.assertCovers(0, Scenario.MAX_REQUEST_CHANCE);
+    cancels.assertCovers(0, Scenario.MAX_CANCEL_CHANCE);
+    mobChurn.assertCovers(0, Scenario.MAX_MOB_CHURN_CHANCE);
+    chunkChurn.assertCovers(0, Scenario.MAX_CHUNK_CHURN_CHANCE);
+    playerChurn.assertCovers(0, Scenario.MAX_PLAYER_CHURN_CHANCE);
+    stray.assertCovers(0, Scenario.MAX_STRAY_REQUEST_CHANCE);
   }
 
   @Test
@@ -74,14 +88,14 @@ class HarnessGuardsTest {
       relief.see(topology.relief());
       assertEquals(0, topology.extent() % Topology.CHUNK_SIZE, topology.toString());
       assertEquals(topology.regionsPerSide() * topology.regionsPerSide(), topology.nodeCount());
+      assertTrue(topology.nodeCount() <= Topology.maxNodeCount(), topology.toString());
     }
 
-    assertEquals(Set.of(16, 32), regionSizes);
-    assertEquals(Set.of(1, 2, 3), gridWidths);
-    // The overworld has a negative floor.
-    assertEquals(Set.of(0, -16, -64), floors);
-    height.assertSpans(34, 94);
-    relief.assertSpans(0, 8);
+    assertEquals(Set.copyOf(Topology.regionSizes()), regionSizes);
+    assertEquals(Set.copyOf(Topology.floors()), floors);
+    assertEquals(widths(Topology.MAX_REGIONS_PER_SIDE), gridWidths);
+    height.assertCovers(Topology.MIN_HEIGHT, Topology.MAX_HEIGHT);
+    relief.assertCovers(0, Topology.MAX_RELIEF);
   }
 
   @Test
@@ -114,13 +128,49 @@ class HarnessGuardsTest {
     // Process death, a silent partition and a link reset are three different
     // recoveries, so the sweep has to reach all of them.
     assertEquals(Set.of("NodeDied", "NodeRecovered", "Partitioned", "LinkReset"), kinds);
-    // Faults have to be able to overlap, or a second failure during a recovery is
-    // a case the sweep can never reach.
-    faultCount.assertSpans(0, 2);
-    minLatency.assertSpans(2, 19);
-    maxLatency.assertSpans(20, 380);
+    // Faults have to be able to pile up on one node, or a second failure during a
+    // recovery is a case the sweep can never reach. A paired fault contributes two
+    // entries, so the count only has to clear the number of faults drawn.
+    faultCount.assertCovers(0, FaultPlan.MAX_FAULTS);
+    minLatency.assertCovers(1, FaultPlan.MAX_MIN_LATENCY_STEPS);
+    maxLatency.assertCovers(
+        1, FaultPlan.MAX_MIN_LATENCY_STEPS + FaultPlan.MAX_LATENCY_SPAN_STEPS - 1);
     assertTrue(sawPermanentLoss, "no node was ever lost for the rest of the run");
     assertEquals(List.of(), FaultPlan.sample(SeededRng.of(1).derive("fuzz"), 0, active).faults());
+  }
+
+  /**
+   * Some harness constants are only correct relative to another one. Left to drift apart they fail
+   * silently: the sweep still passes, having quietly stopped reaching the case it was sized for.
+   */
+  @Test
+  void theHarnessConstantsAgreeWithWhatTheyAreSizedAgainst() {
+    // Worst-case latency a draw can reach, kept well inside a tick. Any wider and a
+    // response is late whatever the controller does, so the latency invariant would
+    // be measuring the sampler instead of the code under test.
+    assertTrue(
+        FaultPlan.MAX_MIN_LATENCY_STEPS + FaultPlan.MAX_LATENCY_SPAN_STEPS
+            <= Simulation.STEPS_PER_TICK / 2,
+        "sampled latency can reach half a tick");
+
+    // A fault starts inside the active window and, unless the node is lost for good,
+    // ends there too. The shortest run has to hold both.
+    assertTrue(
+        SimRun.MIN_FUZZED_TICKS - SimRun.DRAIN_TICKS > FaultPlan.MAX_FAULT_SPAN_TICKS,
+        "the shortest fuzzed run has no room for a fault");
+    assertTrue(SimRun.MAX_FUZZED_TICKS >= SimRun.MIN_FUZZED_TICKS, "run length range is inverted");
+
+    // Relief is capped against the shortest column, so no draw can fail the check
+    // the constructor makes against its own height.
+    assertTrue(Topology.MAX_HEIGHT >= Topology.MIN_HEIGHT, "height range is inverted");
+    assertTrue(
+        Topology.MAX_RELIEF <= Topology.MIN_HEIGHT / 4, "a sampled hill can outgrow its column");
+
+    // Comparison nodes are built outside the fleet at `FRESH_NODE + region`, so the
+    // block they sit in has to start above every id a sampled grid hands out.
+    assertTrue(
+        Invariants.FRESH_NODE >= Topology.maxNodeCount(),
+        "a comparison node can collide with a real one");
   }
 
   @Test
@@ -176,21 +226,24 @@ class HarnessGuardsTest {
 
   @Test
   void aScenarioRejectsImpossibleSettings() {
-    assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.withNodeCapacity(0));
-    assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.withMobCount(-1));
-    assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.withRequestChance(1.5));
-    assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.withChunkChurnChance(-0.1));
+    assertThrows(IllegalArgumentException.class, () -> scenario(0, 0));
+    assertThrows(
+        IllegalArgumentException.class, () -> Scenario.DEFAULT.toBuilder().mobCount(-1).build());
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> Scenario.DEFAULT.toBuilder().requestChance(1.5).build());
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> Scenario.DEFAULT.toBuilder().chunkChurnChance(-0.1).build());
   }
 
   @Test
   void aSlowNodeIsTheOnlyOneServedAtAReducedRate() {
-    Scenario scenario = Scenario.DEFAULT.withNodeCapacity(8);
-
-    assertEquals(8, scenario.capacityOf(0));
-    assertEquals(2, new Scenario(8, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0).capacityOf(0));
-    assertEquals(8, new Scenario(8, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0).capacityOf(1));
+    assertEquals(8, scenario(8, 0).capacityOf(0));
+    assertEquals(2, scenario(8, 1).capacityOf(0));
+    assertEquals(8, scenario(8, 1).capacityOf(1));
     // A capacity that would round to zero still serves one request a tick.
-    assertEquals(1, new Scenario(2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0).capacityOf(0));
+    assertEquals(1, scenario(2, 1).capacityOf(0));
   }
 
   @Test
@@ -262,12 +315,23 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> transport.connect(NodeId.of(7), "sim://7"));
   }
 
+  private static Scenario scenario(int capacity, int slowNodes) {
+    return Scenario.DEFAULT.toBuilder().nodeCapacity(capacity).slowNodes(slowNodes).build();
+  }
+
   private static List<NodeId> nodes(int count) {
-    return java.util.stream.IntStream.range(0, count).mapToObj(NodeId::of).toList();
+    return IntStream.range(0, count).mapToObj(NodeId::of).toList();
+  }
+
+  private static Set<Integer> widths(int max) {
+    return IntStream.rangeClosed(1, max).boxed().collect(Collectors.toSet());
   }
 
   /** Lowest and highest value a sampler produced, so a range can be asserted in one place. */
   private static final class Span {
+
+    /** Share of a range each end may be missed by, so the check is not a test of luck. */
+    private static final double EDGE_MARGIN = 0.1;
 
     private double low = Double.POSITIVE_INFINITY;
     private double high = Double.NEGATIVE_INFINITY;
@@ -277,9 +341,16 @@ class HarnessGuardsTest {
       high = Math.max(high, value);
     }
 
-    void assertSpans(double atMost, double atLeast) {
-      assertTrue(low <= atMost, "lowest draw was " + low + ", expected at most " + atMost);
-      assertTrue(high >= atLeast, "highest draw was " + high + ", expected at least " + atLeast);
+    /**
+     * Asserts the draws reached both ends of {@code [low, high]}, give or take a margin. The margin
+     * is what keeps a sweep this size off a knife edge on a wide range, where landing on the exact
+     * endpoint is a coin toss rather than a property of the sampler.
+     */
+    void assertCovers(double low, double high) {
+      double margin = (high - low) * EDGE_MARGIN;
+      assertTrue(this.low <= low + margin, "lowest draw was " + this.low + ", floor is " + low);
+      assertTrue(
+          this.high >= high - margin, "highest draw was " + this.high + ", ceiling is " + high);
     }
   }
 

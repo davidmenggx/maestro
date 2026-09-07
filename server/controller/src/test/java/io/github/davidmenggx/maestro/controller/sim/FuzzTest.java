@@ -14,18 +14,43 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
- * Seed sweeps. Every run here draws its own geometry, load, length and faults, so the suite grows
- * with {@code -Dmaestro.dst.runs} rather than by adding cases, and a failing seed replays with
- * `make fuzz SEED=...`.
+ * Seed sweeps. The suite grows with {@code -Dmaestro.dst.runs} rather than by adding cases, and a
+ * failing seed replays with `make fuzz SEED=...`.
+ *
+ * <p>Each sweep carries a tier alongside the {@code fuzz} tag, and a tier runs as its own task and
+ * its own CI job. What a seed costs varies by more than an order of magnitude across these, so one
+ * seed budget for all of them would be set by the most expensive sweep and waste the cheap ones.
+ * Splitting also means a red build names what broke before anyone opens a log.
  */
 @Tag("fuzz")
 class FuzzTest {
 
+  /**
+   * One run a seed, every setting pinned: the seed moves the event ordering and what the network
+   * does, nothing else. Cheapest per seed, so this tier sweeps the most of them.
+   */
+  static final String SHALLOW = "shallow";
+
+  /**
+   * Several runs a seed, or a run whose whole configuration is drawn from the seed. Costs a
+   * multiple of a shallow seed, so it sweeps proportionally fewer.
+   */
+  static final String DEEP = "deep";
+
+  /**
+   * A claim about what the sampler reaches rather than about any one run, so its size is fixed and
+   * neither shards nor grows with the run count.
+   */
+  static final String COVERAGE = "coverage";
+
   private static final long TICKS = 150;
 
-  private static final int COVERAGE_SEEDS = 300;
+  private static final int MIN_COVERAGE_SEEDS = 300;
+
+  private static final int MAX_COVERAGE_SEEDS = 2000;
 
   @Test
+  @Tag(SHALLOW)
   void everySeedProducesItsOwnRun() {
     // Guards against the seed being ignored somewhere in the wiring. Two runs
     // colliding by chance needs an FNV-1a collision across 64 bits, so for a
@@ -39,6 +64,7 @@ class FuzzTest {
   }
 
   @Test
+  @Tag(SHALLOW)
   void invariantsHoldOnAReliableNetwork() {
     for (int i = 0; i < SimRun.runCount(); i++) {
       SimRun run = SimRun.of(SimRun.baseSeed() + i, FaultPlan.reliable(), TICKS).go();
@@ -50,6 +76,7 @@ class FuzzTest {
   }
 
   @Test
+  @Tag(SHALLOW)
   void lossHitsTheRequestStreamAndNeverTheWorldStream() {
     FaultPlan lossy = FaultPlan.reliable().withLoss(0.05, 0.05);
     long duplicatesSeen = 0;
@@ -72,6 +99,7 @@ class FuzzTest {
   }
 
   @Test
+  @Tag(DEEP)
   void chunkChurnHoldsTheInvariantsAndStaysDeterministic() {
     long resnapshots = 0;
     long unreadable = 0;
@@ -94,6 +122,7 @@ class FuzzTest {
   }
 
   @Test
+  @Tag(DEEP)
   void fuzzedRunsHoldTheInvariantsAndReplay() {
     Set<Scenario> scenarios = new LinkedHashSet<>();
     long answered = 0;
@@ -116,10 +145,9 @@ class FuzzTest {
     assertTrue(answered > 0, "no seed in the sweep produced a path");
   }
 
-  /**
-   * Asserts the sweep actually produces every outcome the invariants are written against.
-   */
+  /** Asserts the sweep actually produces every outcome the invariants are written against. */
   @Test
+  @Tag(COVERAGE)
   void theSweepReachesEveryOutcomeItClaimsTo() {
     Set<DropReason> drops = EnumSet.noneOf(DropReason.class);
     Set<Integer> regionSizes = new LinkedHashSet<>();
@@ -134,7 +162,7 @@ class FuzzTest {
     long slowFleets = 0;
     long emptyServers = 0;
 
-    for (int i = 0; i < COVERAGE_SEEDS; i++) {
+    for (int i = 0; i < coverageSeeds(); i++) {
       SimRun run = SimRun.fuzzed(SimRun.baseSeed() + i).go();
       assertEquals(List.of(), run.violations(ProbeController.MAX_TICKS_LATE), run.describe());
 
@@ -166,6 +194,15 @@ class FuzzTest {
     assertTrue(held > 0, "no world frame was ever held behind a partition");
     assertTrue(linkResets > 0, "no connection was ever reset with the process alive");
     assertTrue(compared > 0, "no node ever caught up far enough to compare its state");
+  }
+
+  /**
+   * Seeds the coverage sweep runs. It claims something about what the sampler reaches rather than
+   * about any one run, so it takes a size of its own whatever {@code maestro.dst.runs} says: a
+   * handful of seeds cannot reach every outcome, and a very large one only repeats the answer.
+   */
+  private static int coverageSeeds() {
+    return Math.clamp(SimRun.runCount(), MIN_COVERAGE_SEEDS, MAX_COVERAGE_SEEDS);
   }
 
   /** Counters are per node and per channel, so a whole-fleet total has to be summed. */

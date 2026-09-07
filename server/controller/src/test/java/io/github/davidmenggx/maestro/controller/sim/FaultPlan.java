@@ -49,17 +49,29 @@ public record FaultPlan(
   }
 
   private static final double MAX_SAMPLED_RATE = 0.1;
-  private static final int MAX_FAULTS = 3;
-  private static final int MAX_FAULT_SPAN_TICKS = 15;
+
+  /**
+   * Faults drawn per run. Several may land on one node, so a failure during a recovery is a case
+   * the sweep reaches. Raising it makes the average run rougher rather than the space wider, so it
+   * trades runs that get far enough to answer anything for runs that spend their length recovering.
+   */
+  static final int MAX_FAULTS = 5;
+
+  static final int MAX_FAULT_SPAN_TICKS = 15;
 
   /** A node that dies this often is never brought back, so a run ends a node short. */
   private static final double PERMANENT_LOSS_CHANCE = 0.15;
 
   /** Floor of the sampled latency range, in steps. Twenty steps is one millisecond. */
-  private static final int MAX_MIN_LATENCY_STEPS = 20;
+  static final int MAX_MIN_LATENCY_STEPS = 20;
 
-  /** Widest sampled range. At {@link Simulation#STEPS_PER_TICK} steps a tick, 400 is 20ms. */
-  private static final int MAX_LATENCY_SPAN_STEPS = 400;
+  /**
+   * Widest sampled range. The worst case a draw can reach, {@code MAX_MIN_LATENCY_STEPS +
+   * MAX_LATENCY_SPAN_STEPS}, has to stay well inside {@link Simulation#STEPS_PER_TICK}, or a
+   * request is late by construction and the latency invariant stops saying anything about the
+   * controller. At 1000 steps a tick, 400 is 20ms.
+   */
+  static final int MAX_LATENCY_SPAN_STEPS = 400;
 
   /** Nothing goes wrong; latency is a few hundred microseconds. */
   public static FaultPlan reliable() {

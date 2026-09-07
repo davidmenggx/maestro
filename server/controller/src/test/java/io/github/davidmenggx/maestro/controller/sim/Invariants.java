@@ -12,8 +12,13 @@ import java.util.List;
  */
 public final class Invariants {
 
-  /** Id for the throwaway node a fresh recomputation is loaded into. Outside any region grid. */
-  private static final int FRESH_NODE = 900;
+  /**
+   * First id for the throwaway nodes a fresh recomputation is loaded into. One is made per region,
+   * at {@code FRESH_NODE + region}, so the block it occupies has to clear every id a fleet can
+   * assign: a run gives its nodes {@code 0 .. nodeCount - 1}, and no sampled grid holds more than
+   * {@link Topology#maxNodeCount()} regions.
+   */
+  static final int FRESH_NODE = Topology.maxNodeCount();
 
   private Invariants() {}
 

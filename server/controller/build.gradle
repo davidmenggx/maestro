@@ -32,8 +32,10 @@ tasks.withType(JavaCompile).configureEach {
   options.release = 25
 }
 
-// Sweep size the `fuzz` task uses when nothing overrides it.
-def defaultFuzzRuns = "2000"
+// Seeds each sweep tier runs when nothing overrides it. A deep seed costs several
+// times a shallow one, so a single budget would be set by the slowest tier and
+// waste the rest. CI shards these across seed ranges rather than raising them.
+def fuzzTiers = [shallow: "20000", deep: "6000", coverage: "2000"]
 
 // Forwarded to the forked test JVM, which does not inherit the Gradle JVM's
 // properties. `make fuzz SEED=n` replays a seed reported by a failing run.
@@ -64,15 +66,25 @@ test {
   forwardSweepProperties(delegate, null)
 }
 
-tasks.register('fuzz', Test) {
-  group = 'verification'
-  description = 'Runs the deterministic simulation seed sweeps.'
-  testClassesDirs = sourceSets.test.output.classesDirs
-  classpath = sourceSets.test.runtimeClasspath
-  useJUnitPlatform {
-    includeTags 'fuzz'
-  }
-  forwardSweepProperties(delegate, defaultFuzzRuns)
+// One task per tier, so a tier is a thing you can run rather than only a way CI
+// happens to be sliced. Each keeps its own report, which is what a CI job uploads.
+fuzzTiers.each { tier, defaultRuns ->
+  tasks.register("fuzz-${tier}", Test) {
+    group = 'verification'
+    description = "Runs the ${tier} deterministic simulation seed sweeps."
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform {
+      includeTags "fuzz & ${tier}"
+    }
+    forwardSweepProperties(delegate, defaultRuns)
 
-  outputs.upToDateWhen { false }
+    outputs.upToDateWhen { false }
+  }
+}
+
+tasks.register('fuzz') {
+  group = 'verification'
+  description = 'Runs every tier of the deterministic simulation seed sweeps.'
+  dependsOn fuzzTiers.keySet().collect { "fuzz-${it}" }
 }

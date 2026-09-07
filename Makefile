@@ -10,6 +10,7 @@
 #   make server     build the Fabric mod jar
 #   make test       run both unit test suites
 #   make fuzz       run the controller's deterministic simulation seed sweeps
+#                   (TIER=shallow|deep|coverage narrows it to one tier)
 #   make test-boot  boot a dev server and assert the mixins applied
 #   make clean      remove build outputs (keeps fetched deps)
 #   make help       list targets
@@ -90,8 +91,9 @@ server: schema-java ## Build the Fabric server mod jar
 server-test: schema-java ## Run the Java unit tests (mod and controller), fuzz excluded
 	cd server && $(GRADLE) test :controller:test
 
-fuzz: schema-java ## Run the DST seed sweeps (SEED=n RUNS=n to move the sweep)
-	cd server && $(GRADLE) :controller:fuzz $(if $(SEED),-Dmaestro.dst.seed=$(SEED)) \
+fuzz: schema-java ## Run the DST seed sweeps (TIER=shallow|deep|coverage SEED=n RUNS=n)
+	cd server && $(GRADLE) :controller:$(if $(TIER),fuzz-$(TIER),fuzz) \
+		$(if $(SEED),-Dmaestro.dst.seed=$(SEED)) \
 		$(if $(RUNS),-Dmaestro.dst.runs=$(RUNS))
 
 run-server: schema-java ## Boot a dev server (WORLD=<name> loads worlds/<name>)

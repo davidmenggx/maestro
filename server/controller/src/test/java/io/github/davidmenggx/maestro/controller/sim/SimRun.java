@@ -23,12 +23,16 @@ public final class SimRun {
   /** p99 target from the SLO, in ticks. Looser than the admission bound in `ProbeController`. */
   public static final double TICK_BUDGET = 3.0;
 
-  private static final int DEFAULT_RUNS = 8;
+  /** Sweep size when nothing sets {@code maestro.dst.runs}, as when a sweep is run from an IDE. */
+  private static final int DEFAULT_RUNS = 100;
 
-  /** Length of a fuzzed run. */
-  private static final long MIN_FUZZED_TICKS = 60;
+  /**
+   * Length of a fuzzed run. The active part, everything before {@link #DRAIN_TICKS}, has to leave
+   * room for a fault to start and finish, or the shortest runs draw no faults at all.
+   */
+  static final long MIN_FUZZED_TICKS = 60;
 
-  private static final long MAX_FUZZED_TICKS = 320;
+  static final long MAX_FUZZED_TICKS = 320;
 
   public final long seed;
   public final long ticks;
