@@ -30,12 +30,12 @@ void init(std::string_view ServiceName, std::string_view OtlpEndpoint) {
   auto Processor =
       trace_sdk::SimpleSpanProcessorFactory::Create(std::move(Exporter));
 
-  auto Attrs = resource::Resource::Create({
+  auto ServiceResource = resource::Resource::Create({
       {"service.name", std::string(ServiceName)},
   });
 
-  GlobalProvider =
-      trace_sdk::TracerProviderFactory::Create(std::move(Processor), Attrs);
+  GlobalProvider = trace_sdk::TracerProviderFactory::Create(
+      std::move(Processor), ServiceResource);
   trace_api::Provider::SetTracerProvider(GlobalProvider);
 }
 

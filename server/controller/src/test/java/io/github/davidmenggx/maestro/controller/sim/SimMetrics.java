@@ -36,6 +36,11 @@ public final class SimMetrics implements Metrics {
     return counters.getOrDefault(key(name, labels), 0L);
   }
 
+  /** Last value reported for a gauge, or 0 if it was never set. */
+  public long gauge(String name, String... labels) {
+    return gauges.getOrDefault(key(name, labels), 0L);
+  }
+
   /** Every labeled series of one counter, summed. */
   public long total(String name) {
     long sum = 0;
@@ -48,14 +53,14 @@ public final class SimMetrics implements Metrics {
   }
 
   /** Nearest-rank percentile. Returns {@code NaN} when nothing was recorded. */
-  public double percentile(String name, double p, String... labels) {
+  public double percentile(String name, double quantile, String... labels) {
     List<Double> values = distributions.get(key(name, labels));
     if (values == null || values.isEmpty()) {
       return Double.NaN;
     }
     List<Double> sorted = new ArrayList<>(values);
     Collections.sort(sorted);
-    int rank = (int) Math.ceil(p * sorted.size());
+    int rank = (int) Math.ceil(quantile * sorted.size());
     return sorted.get(Math.clamp(rank - 1, 0, sorted.size() - 1));
   }
 

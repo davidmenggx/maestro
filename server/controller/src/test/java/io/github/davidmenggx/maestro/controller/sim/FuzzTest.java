@@ -3,8 +3,8 @@ package io.github.davidmenggx.maestro.controller.sim;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.util.EnumSet;
 import java.util.LinkedHashSet;
@@ -51,8 +51,7 @@ class FuzzTest {
   @Tag(SHALLOW)
   void everySeedProducesItsOwnRun() {
     // Guards against the seed being ignored somewhere in the wiring. Two runs
-    // colliding by chance needs an FNV-1a collision across 64 bits, so for a
-    // sweep this size the false failure rate is far below one in a billion.
+    // colliding by chance would take a 64-bit digest collision.
     Set<Long> digests = new LinkedHashSet<>();
     for (int i = 0; i < SimRun.runCount(); i++) {
       digests.add(
@@ -76,7 +75,7 @@ class FuzzTest {
   @Test
   @Tag(SHALLOW)
   void lossHitsTheRequestStreamAndNeverTheWorldStream() {
-    FaultPlan lossy = FaultPlan.reliable().withLoss(0.05, 0.05);
+    FaultPlan lossy = FaultPlan.reliable().withDropRate(0.05).withDuplicateRate(0.05);
     long duplicatesSeen = 0;
     long requestFramesDropped = 0;
 
@@ -84,12 +83,12 @@ class FuzzTest {
       SimRun run = SimRun.of(SimRun.baseSeed() + i, lossy, TICKS).go();
       assertEquals(List.of(), run.violations(), run.describe());
       duplicatesSeen += run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum();
-      requestFramesDropped += counter(run, "transport.dropped", Channel.REQUEST);
+      requestFramesDropped += run.fleetCounter("transport.dropped", Channel.REQUEST);
       assertEquals(
-          counter(run, "transport.sent", Channel.WORLD),
-          counter(run, "transport.received", Channel.WORLD),
+          run.fleetCounter("transport.sent", Channel.WORLD),
+          run.fleetCounter("transport.received", Channel.WORLD),
           run.describe());
-      assertEquals(0, counter(run, "transport.dropped", Channel.WORLD), run.describe());
+      assertEquals(0, run.fleetCounter("transport.dropped", Channel.WORLD), run.describe());
     }
 
     assertTrue(duplicatesSeen > 0, "expected the request stream to duplicate at least once");
@@ -153,14 +152,18 @@ class FuzzTest {
     long resumes = 0;
     long resnapshots = 0;
     long duplicates = 0;
-    long held = 0;
+    long framesHeld = 0;
     long linkResets = 0;
-    long compared = 0;
+    long nodesCompared = 0;
     long deepWorlds = 0;
     long slowFleets = 0;
     long emptyServers = 0;
 
-    for (int i = 0; i < coverageSeeds(); i++) {
+    // A claim about what the sampler reaches rather than about any one run, so this takes a
+    // size of its own whatever `maestro.dst.runs` says: a handful of seeds cannot reach every
+    // outcome, and a very large sweep only repeats the answer.
+    int seeds = Math.clamp(SimRun.runCount(), MIN_COVERAGE_SEEDS, MAX_COVERAGE_SEEDS);
+    for (int i = 0; i < seeds; i++) {
       SimRun run = SimRun.fuzzed(SimRun.baseSeed() + i).go();
       assertEquals(List.of(), run.violations(ProbeController.MAX_TICKS_LATE), run.describe());
 
@@ -168,15 +171,15 @@ class FuzzTest {
       regionSizes.add(run.topology.regionSize());
       gridWidths.add(run.topology.regionsPerSide());
       deepWorlds += run.topology.minY() < 0 ? 1 : 0;
-      slowFleets += run.scenario.slowNodes() > 0 ? 1 : 0;
-      emptyServers += run.scenario.playerCount() == 0 ? 1 : 0;
+      slowFleets += run.scenario.counts().get(Count.SLOW_NODES) > 0 ? 1 : 0;
+      emptyServers += run.scenario.counts().get(Count.PLAYERS) == 0 ? 1 : 0;
       resumes += run.sim.metrics().total("world.resume");
       resnapshots += run.sim.metrics().total("world.resnapshot");
       duplicates += run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum();
       linkResets += run.sim.metrics().total("transport.link.reset");
-      held += counter(run, "transport.held", Channel.WORLD);
+      framesHeld += run.fleetCounter("transport.held", Channel.WORLD);
       for (ModeledNode node : run.sim.nodes()) {
-        compared += Invariants.caughtUp(run.controller, node) ? 1 : 0;
+        nodesCompared += Invariants.caughtUp(run.controller, node) ? 1 : 0;
       }
     }
 
@@ -189,29 +192,8 @@ class FuzzTest {
     assertTrue(resumes > 0, "no node ever resumed its world stream");
     assertTrue(resnapshots > 0, "no node was ever resnapshotted");
     assertTrue(duplicates > 0, "no request was ever delivered twice");
-    assertTrue(held > 0, "no world frame was ever held behind a partition");
+    assertTrue(framesHeld > 0, "no world frame was ever held behind a partition");
     assertTrue(linkResets > 0, "no connection was ever reset with the process alive");
-    assertTrue(compared > 0, "no node ever caught up far enough to compare its state");
-  }
-
-  /**
-   * Seeds the coverage sweep runs. It claims something about what the sampler reaches rather than
-   * about any one run, so it takes a size of its own whatever {@code maestro.dst.runs} says: a
-   * handful of seeds cannot reach every outcome, and a very large one only repeats the answer.
-   */
-  private static int coverageSeeds() {
-    return Math.clamp(SimRun.runCount(), MIN_COVERAGE_SEEDS, MAX_COVERAGE_SEEDS);
-  }
-
-  /** Counters are per node and per channel, so a whole-fleet total has to be summed. */
-  private static long counter(SimRun run, String name, Channel channel) {
-    long total = 0;
-    for (int i = 0; i < run.regions.count(); i++) {
-      total +=
-          run.sim
-              .metrics()
-              .counter(name, "node", NodeId.of(i).toString(), "channel", channel.name());
-    }
-    return total;
+    assertTrue(nodesCompared > 0, "no node ever caught up far enough to compare its state");
   }
 }

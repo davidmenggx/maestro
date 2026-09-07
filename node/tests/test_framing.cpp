@@ -21,19 +21,19 @@ TEST(Framing, RoundTripsLengthHeader) {
   EXPECT_EQ(Body, Payload);
 }
 
-TEST(Framing, EmptyPayloadHasZeroLength) {
+TEST(Framing, EmptyPayloadIsAZeroLengthFrame) {
   const auto Framed = frame({});
   ASSERT_EQ(Framed.size(), HeaderSize);
   EXPECT_EQ(peekLength(Framed), 0u);
 }
 
-TEST(Framing, PeekReturnsZeroWhenHeaderIncomplete) {
-  const std::vector<std::uint8_t> Partial{0x01, 0x02}; // < HeaderSize
-  EXPECT_EQ(peekLength(Partial), 0u);
+TEST(Framing, PeekHasNoAnswerUntilTheHeaderIsComplete) {
+  const std::vector<std::uint8_t> Partial{0x01, 0x02};
+  EXPECT_FALSE(peekLength(Partial).has_value());
 }
 
 TEST(Framing, EncodesLengthLittleEndian) {
-  const std::vector<std::uint8_t> Payload(0x0102, 0xAB); // 258 bytes
+  const std::vector<std::uint8_t> Payload(0x0102, 0xAB);
   const auto Framed = frame(Payload);
   EXPECT_EQ(Framed[0], 0x02);
   EXPECT_EQ(Framed[1], 0x01);

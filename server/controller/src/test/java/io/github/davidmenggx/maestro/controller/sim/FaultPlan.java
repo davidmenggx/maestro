@@ -36,7 +36,7 @@ public record FaultPlan(
   public record NodeRecovered(long tick, NodeId node) implements Fault {}
 
   /** Partitions are only found by the failure detector (as opposed to disconnects). */
-  public record Partitioned(long tick, NodeId node, boolean on) implements Fault {}
+  public record Partitioned(long tick, NodeId node, boolean active) implements Fault {}
 
   public FaultPlan {
     if (minLatencySteps < 1 || maxLatencySteps < minLatencySteps) {
@@ -115,17 +115,17 @@ public record FaultPlan(
     return plan;
   }
 
-  public FaultPlan withLoss(double drop, double duplicate) {
-    return new FaultPlan(minLatencySteps, maxLatencySteps, drop, duplicate, faults);
+  public FaultPlan withDropRate(double rate) {
+    return new FaultPlan(minLatencySteps, maxLatencySteps, rate, duplicateRate, faults);
+  }
+
+  public FaultPlan withDuplicateRate(double rate) {
+    return new FaultPlan(minLatencySteps, maxLatencySteps, dropRate, rate, faults);
   }
 
   public FaultPlan with(Fault... added) {
     List<Fault> all = new ArrayList<>(faults);
     Collections.addAll(all, added);
     return new FaultPlan(minLatencySteps, maxLatencySteps, dropRate, duplicateRate, all);
-  }
-
-  public List<Fault> at(long tick) {
-    return faults.stream().filter(f -> f.tick() == tick).toList();
   }
 }

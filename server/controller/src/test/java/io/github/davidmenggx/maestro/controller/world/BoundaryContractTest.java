@@ -16,26 +16,26 @@ class BoundaryContractTest {
 
   private static final Pos SOMEWHERE = new Pos(1, 2, 3);
 
-  @Test
-  void onlyPerBlockPathTypesAreCarriedByACell() {
-    // The seventeen `getPathTypeFromState` can return, and no others.
-    assertEquals(17, countPerBlock());
-    assertTrue(PathTypes.isPerBlock((byte) PathType.BLOCKED));
-    assertTrue(PathTypes.isPerBlock((byte) PathType.WATER));
-    assertTrue(PathTypes.isPerBlock((byte) PathType.DOOR_IRON_CLOSED));
-  }
+  /** The number of types `getPathTypeFromState` can return, pinned against vanilla. */
+  private static final int PER_BLOCK_TYPES = 17;
 
   @Test
-  void theEnumerationAndThePredicateAgree() {
-    // The fuzzer draws a cell type by index, so the two views of the same set
-    // have to name the same ordinals.
+  void onlyPerBlockPathTypesAreCarriedByACell() {
+    // The fuzzer draws a cell type by index, so the enumeration and the predicate
+    // are two views of one set and have to name the same ordinals.
     Set<Byte> enumerated = new LinkedHashSet<>();
     for (int i = 0; i < PathTypes.perBlockCount(); i++) {
       byte ordinal = PathTypes.perBlock(i);
       assertTrue(PathTypes.isPerBlock(ordinal), PathTypes.name(ordinal));
       assertTrue(enumerated.add(ordinal), "listed twice: " + PathTypes.name(ordinal));
     }
-    assertEquals(countPerBlock(), enumerated.size());
+
+    int matching = 0;
+    for (int ordinal = 0; ordinal < PathTypes.count(); ordinal++) {
+      matching += PathTypes.isPerBlock((byte) ordinal) ? 1 : 0;
+    }
+    assertEquals(PER_BLOCK_TYPES, matching);
+    assertEquals(PER_BLOCK_TYPES, enumerated.size());
   }
 
   @Test
@@ -85,29 +85,20 @@ class BoundaryContractTest {
   @Test
   void aMobClassCoversEveryPathTypeOrIsRejected() {
     assertThrows(IllegalArgumentException.class, () -> profile(new float[3]));
-    assertThrows(
-        IllegalArgumentException.class,
-        () ->
-            new MobClass(
-                (short) 1,
-                0f,
-                1f,
-                new float[PathTypes.count()],
-                0.5f,
-                true,
-                false,
-                false,
-                false,
-                16));
+    assertThrows(IllegalArgumentException.class, () -> new MobClass.Shape(0f, 1f, 0.5f));
+    assertThrows(IllegalArgumentException.class, () -> new MobClass.Shape(0.6f, 1.9f, -1f));
 
-    MobClass ok = profile(new float[PathTypes.count()]);
-    assertEquals(PathTypes.count(), ok.malus().length);
+    MobClass accepted = profile(new float[PathTypes.count()]);
+    assertEquals(PathTypes.count(), accepted.malus().length);
 
-    // The array is copied in, so a later write cannot reach the profile.
+    // The array is copied both ways, so neither the caller's array nor a handed-out
+    // one can reach the profile's own.
     float[] mutable = new float[PathTypes.count()];
     MobClass copied = profile(mutable);
     mutable[0] = 99f;
+    copied.malus()[1] = 99f;
     assertEquals(0f, copied.malus()[0]);
+    assertEquals(0f, copied.malus()[1]);
   }
 
   @Test
@@ -118,16 +109,11 @@ class BoundaryContractTest {
   }
 
   private static MobClass profile(float[] malus) {
-    return new MobClass((short) 1, 0.6f, 1.9f, malus, 0.5f, true, false, false, false, 16);
-  }
-
-  private static int countPerBlock() {
-    int count = 0;
-    for (int ordinal = 0; ordinal < PathTypes.count(); ordinal++) {
-      if (PathTypes.isPerBlock((byte) ordinal)) {
-        count++;
-      }
-    }
-    return count;
+    return new MobClass(
+        (short) 1,
+        new MobClass.Shape(0.6f, 1.9f, 0.5f),
+        new MobClass.Abilities(true, false, false, false),
+        malus,
+        16);
   }
 }

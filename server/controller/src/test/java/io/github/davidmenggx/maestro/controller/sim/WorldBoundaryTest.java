@@ -1,8 +1,10 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
@@ -18,7 +20,6 @@ import org.junit.jupiter.api.Test;
 class WorldBoundaryTest {
 
   private static final long TICKS = 30;
-  private static final int CHUNK_SIZE = 16;
   private static final short MOB_CLASS = 1;
   private static final int MOB = 1;
   private static final Pos HERE = new Pos(4, 40, 4);
@@ -78,7 +79,7 @@ class WorldBoundaryTest {
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(1, run.out.dropped(DropReason.NO_NODE), run.describe());
     for (ModeledNode node : run.sim.nodes()) {
-      assertTrue(!node.hasState(), run.describe());
+      assertFalse(node.hasState(), run.describe());
     }
   }
 
@@ -122,9 +123,9 @@ class WorldBoundaryTest {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
     script.add(new WorldEvent.MobSpawned(0, MOB, MOB_CLASS, HERE));
     script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE));
-    script.add(new WorldEvent.ChunkUnloaded(6, HERE.x() / CHUNK_SIZE, HERE.z() / CHUNK_SIZE));
+    script.add(new WorldEvent.ChunkUnloaded(6, Chunks.of(HERE.x()), Chunks.of(HERE.z())));
     script.add(new WorldEvent.PathRequested(8, MOB, HERE, THERE));
-    script.add(new WorldEvent.ChunkLoaded(10, HERE.x() / CHUNK_SIZE, HERE.z() / CHUNK_SIZE));
+    script.add(new WorldEvent.ChunkLoaded(10, Chunks.of(HERE.x()), Chunks.of(HERE.z())));
     script.add(new WorldEvent.PathRequested(14, MOB, HERE, THERE));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
