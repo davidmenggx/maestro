@@ -55,8 +55,7 @@ class HarnessGuardsTest {
       stray.see(scenario.strayRequestChance());
     }
 
-    // A sample stuck at one setting would not fuzz anything. The bounds come from
-    // the sampler itself, so widening a range cannot quietly leave this behind.
+    // A sample stuck at one setting would not fuzz anything.
     capacity.assertCovers(1, Scenario.MAX_NODE_CAPACITY);
     slowNodes.assertCovers(0, Scenario.MAX_SLOW_NODES);
     mobs.assertCovers(0, Scenario.MAX_MOB_COUNT);
@@ -341,11 +340,7 @@ class HarnessGuardsTest {
       high = Math.max(high, value);
     }
 
-    /**
-     * Asserts the draws reached both ends of {@code [low, high]}, give or take a margin. The margin
-     * is what keeps a sweep this size off a knife edge on a wide range, where landing on the exact
-     * endpoint is a coin toss rather than a property of the sampler.
-     */
+    /** Asserts the draws reached both ends of {@code [low, high]}, give or take a margin. */
     void assertCovers(double low, double high) {
       double margin = (high - low) * EDGE_MARGIN;
       assertTrue(this.low <= low + margin, "lowest draw was " + this.low + ", floor is " + low);

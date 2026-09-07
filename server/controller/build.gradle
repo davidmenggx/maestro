@@ -32,9 +32,6 @@ tasks.withType(JavaCompile).configureEach {
   options.release = 25
 }
 
-// Seeds each sweep tier runs when nothing overrides it. A deep seed costs several
-// times a shallow one, so a single budget would be set by the slowest tier and
-// waste the rest. CI shards these across seed ranges rather than raising them.
 def fuzzTiers = [shallow: "20000", deep: "6000", coverage: "2000"]
 
 // Forwarded to the forked test JVM, which does not inherit the Gradle JVM's
@@ -57,8 +54,6 @@ def forwardSweepProperties = { Test task, String defaultRuns ->
   }
 }
 
-// The seed sweeps are tagged out of here and run as their own task, so the unit
-// suite stays fast enough to sit in front of every build.
 test {
   useJUnitPlatform {
     excludeTags 'fuzz'
@@ -66,8 +61,7 @@ test {
   forwardSweepProperties(delegate, null)
 }
 
-// One task per tier, so a tier is a thing you can run rather than only a way CI
-// happens to be sliced. Each keeps its own report, which is what a CI job uploads.
+// One task per tier.
 fuzzTiers.each { tier, defaultRuns ->
   tasks.register("fuzz-${tier}", Test) {
     group = 'verification'

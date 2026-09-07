@@ -63,10 +63,7 @@ jobs:
           path: server/build/boot-smoke-test.log
           if-no-files-found: ignore
 
-  # One job per tier per seed range. The tiers cost very different amounts per seed,
-  # so each gets the shard count that lands its jobs in the same wall-clock band,
-  # and a red job names the tier that broke before anyone opens a log. The sweeps
-  # are independent runs, so splitting the seed range across jobs is free.
+  # One job per tier per seed range.
   fuzz:
     name: Fuzz ${{ matrix.tier }} ${{ matrix.shard }}
     runs-on: ubuntu-latest
@@ -78,8 +75,6 @@ jobs:
         tier: [shallow, deep]
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
         exclude:
-          # A shallow seed costs a fraction of a deep one, so the same total number
-          # of seeds fits in half the shards.
           - tier: shallow
             shard: 4
           - tier: shallow
@@ -93,8 +88,6 @@ jobs:
             seeds: 25000
           - tier: deep
             seeds: 12500
-          # Fixed size and nothing to shard: it asserts what the sampler reaches
-          # rather than anything about a single run.
           - tier: coverage
             shard: 0
             seeds: 2000

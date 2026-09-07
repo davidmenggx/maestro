@@ -9,9 +9,7 @@ import io.github.davidmenggx.maestro.controller.env.Rng;
  *
  * <p>{@link #sample} draws one from the ranges below, so a seed sweep covers the settings and not
  * only the event ordering. Every range includes the degenerate end (no mobs, no players, no block
- * changes), because an empty server is a state the controller has to sit in without producing
- * anything. The named constants are for tests that need one specific pressure, and {@link
- * #toBuilder} changes one setting of an existing scenario without restating the rest.
+ * changes).
  */
 public record Scenario(
     int nodeCapacity,
@@ -100,7 +98,7 @@ public record Scenario(
     return new Builder(this);
   }
 
-  /** Copy of a {@link Scenario} with one setting moved, so a test states only what it changes. */
+  /** Copy of a {@link Scenario} with one setting moved. */
   public static final class Builder {
 
     private int nodeCapacity;

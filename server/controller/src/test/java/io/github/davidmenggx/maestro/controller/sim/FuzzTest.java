@@ -18,9 +18,7 @@ import org.junit.jupiter.api.Test;
  * failing seed replays with `make fuzz SEED=...`.
  *
  * <p>Each sweep carries a tier alongside the {@code fuzz} tag, and a tier runs as its own task and
- * its own CI job. What a seed costs varies by more than an order of magnitude across these, so one
- * seed budget for all of them would be set by the most expensive sweep and waste the cheap ones.
- * Splitting also means a red build names what broke before anyone opens a log.
+ * its own CI job.
  */
 @Tag("fuzz")
 class FuzzTest {

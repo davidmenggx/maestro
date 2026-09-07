@@ -23,7 +23,7 @@ public final class SimRun {
   /** p99 target from the SLO, in ticks. Looser than the admission bound in `ProbeController`. */
   public static final double TICK_BUDGET = 3.0;
 
-  /** Sweep size when nothing sets {@code maestro.dst.runs}, as when a sweep is run from an IDE. */
+  /** Sweep size when nothing sets {@code maestro.dst.runs}. */
   private static final int DEFAULT_RUNS = 100;
 
   /**

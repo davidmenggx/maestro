@@ -22,7 +22,7 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
 
   public static final Topology DEFAULT = new Topology(CHUNK_SIZE, 2, 0, 64, 2);
 
-  /** Floors a sampled world may sit on. The overworld's is negative, so the sampler covers that. */
+  /** Floors a sampled world may sit on. The overworld's is negative. */
   static List<Integer> floors() {
     return List.of(0, -16, -64);
   }

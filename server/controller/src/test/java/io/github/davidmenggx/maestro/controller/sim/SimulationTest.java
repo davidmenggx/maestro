@@ -9,12 +9,7 @@ import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
-/**
- * Fixed-seed runs, each pinning one behavior to an exact count that a sweep cannot state: which
- * recovery a fault takes, how many snapshots it costs, and which drop reason a request gets. The
- * sweeps in {@link FuzzTest} cover the same code over the ranges these settings are drawn from, so
- * anything they already assert as an aggregate is not repeated here.
- */
+/** Fixed-seed runs, each pinning one behavior to an exact count that a sweep cannot state. */
 class SimulationTest {
 
   private static final long TICKS = 150;
