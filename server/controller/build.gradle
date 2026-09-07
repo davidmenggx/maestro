@@ -32,8 +32,7 @@ tasks.withType(JavaCompile).configureEach {
   options.release = 25
 }
 
-// Sweep size the `fuzz` task uses when nothing overrides it. Long enough to be
-// worth a CI job of its own, short enough to run before a commit.
+// Sweep size the `fuzz` task uses when nothing overrides it.
 def defaultFuzzRuns = "2000"
 
 // Forwarded to the forked test JVM, which does not inherit the Gradle JVM's
@@ -75,7 +74,5 @@ tasks.register('fuzz', Test) {
   }
   forwardSweepProperties(delegate, defaultFuzzRuns)
 
-  // The sweep size is the input that matters and it is not a file, so let the
-  // task run whenever it is asked for rather than reporting itself up to date.
   outputs.upToDateWhen { false }
 }

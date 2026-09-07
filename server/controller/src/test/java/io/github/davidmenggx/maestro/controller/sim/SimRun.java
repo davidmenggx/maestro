@@ -23,10 +23,9 @@ public final class SimRun {
   /** p99 target from the SLO, in ticks. Looser than the admission bound in `ProbeController`. */
   public static final double TICK_BUDGET = 3.0;
 
-  /** Sweep size when nothing overrides it. The fuzz task raises it; unit tests keep it small. */
   private static final int DEFAULT_RUNS = 8;
 
-  /** Length of a fuzzed run. The long end outlives the outbox retention window several times. */
+  /** Length of a fuzzed run. */
   private static final long MIN_FUZZED_TICKS = 60;
 
   private static final long MAX_FUZZED_TICKS = 320;

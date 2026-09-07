@@ -63,8 +63,6 @@ jobs:
           path: server/build/boot-smoke-test.log
           if-no-files-found: ignore
 
-  # Its own job: the sweep is minutes of CPU, and a failure here is a seed to
-  # replay rather than a broken build.
   fuzz:
     name: Fuzz sweep
     runs-on: ubuntu-latest
@@ -87,8 +85,7 @@ jobs:
       - name: Seed sweep
         run: make fuzz RUNS=5000
 
-      # The failing seed is printed with the run that produced it, so the report
-      # is what turns a red job into `make fuzz SEED=n`.
+      # The failing seed is printed with the run that produced it.
       - name: Upload fuzz report
         if: failure()
         uses: actions/upload-artifact@v4

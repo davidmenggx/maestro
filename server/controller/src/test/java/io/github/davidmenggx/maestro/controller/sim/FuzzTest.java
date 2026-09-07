@@ -17,19 +17,12 @@ import org.junit.jupiter.api.Test;
  * Seed sweeps. Every run here draws its own geometry, load, length and faults, so the suite grows
  * with {@code -Dmaestro.dst.runs} rather than by adding cases, and a failing seed replays with
  * `make fuzz SEED=...`.
- *
- * <p>Tagged out of the unit suite because these are the long tests: the unit suite proves each
- * behavior at a fixed seed, and this one looks for the settings nobody thought to write down.
  */
 @Tag("fuzz")
 class FuzzTest {
 
   private static final long TICKS = 150;
 
-  /**
-   * Size of the sweep the coverage check runs, fixed rather than taken from {@code
-   * maestro.dst.runs}, so a short sweep cannot pass it by reaching nothing.
-   */
   private static final int COVERAGE_SEEDS = 300;
 
   @Test
@@ -67,7 +60,6 @@ class FuzzTest {
       assertEquals(List.of(), run.violations(), run.describe());
       duplicatesSeen += run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum();
       requestFramesDropped += counter(run, "transport.dropped", Channel.REQUEST);
-      // Nothing on the ordered stream is lost.
       assertEquals(
           counter(run, "transport.sent", Channel.WORLD),
           counter(run, "transport.received", Channel.WORLD),
@@ -125,8 +117,7 @@ class FuzzTest {
   }
 
   /**
-   * Anti-vacuity. A sweep that never reaches a code path proves nothing about it, so this asserts
-   * the sweep actually produces every outcome the invariants are written against.
+   * Asserts the sweep actually produces every outcome the invariants are written against.
    */
   @Test
   void theSweepReachesEveryOutcomeItClaimsTo() {

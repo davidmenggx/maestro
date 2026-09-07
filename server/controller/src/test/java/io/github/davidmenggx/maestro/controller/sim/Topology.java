@@ -6,28 +6,22 @@ import io.github.davidmenggx.maestro.controller.env.Rng;
  * The coordinate space a run happens in and how it is divided among nodes: a square grid of square,
  * full-height regions, one node each. Separate from {@link Scenario}, which says what happens
  * inside that space.
- *
- * <p>{@code minY} is fuzzed because a negative floor is what the overworld actually has, and every
- * region index on both sides of the wire is computed against it.
  */
 public record Topology(int regionSize, int regionsPerSide, int minY, int height, int relief) {
 
   /** Chunk width. Regions are chunk aligned, or residency cannot be decided per region. */
   public static final int CHUNK_SIZE = 16;
 
-  /** Below this a hill could reach the top of the column and leave a mob nowhere to stand. */
   private static final int MIN_HEIGHT = 32;
 
   private static final int MAX_HEIGHT = 96;
   private static final int MAX_REGIONS_PER_SIDE = 3;
   private static final int MAX_RELIEF = MIN_HEIGHT / 4;
 
-  /** The deep end is the overworld's floor; the shallow end keeps a hand-built run small. */
   private static final int[] FLOORS = {0, -16, -64};
 
   private static final int[] REGION_SIZES = {CHUNK_SIZE, 2 * CHUNK_SIZE};
 
-  /** Four nodes over a small world, the shape the fixed-seed tests are written against. */
   public static final Topology DEFAULT = new Topology(CHUNK_SIZE, 2, 0, 64, 2);
 
   public Topology {

@@ -20,7 +20,6 @@ import org.junit.jupiter.api.Test;
  */
 class HarnessGuardsTest {
 
-  /** Enough draws that a range which is genuinely reachable is reached. */
   private static final int DRAWS = 300;
 
   @Test
@@ -79,8 +78,7 @@ class HarnessGuardsTest {
 
     assertEquals(Set.of(16, 32), regionSizes);
     assertEquals(Set.of(1, 2, 3), gridWidths);
-    // A negative floor is what the overworld has, and every region index is
-    // computed against it on both sides of the wire.
+    // The overworld has a negative floor.
     assertEquals(Set.of(0, -16, -64), floors);
     height.assertSpans(34, 94);
     relief.assertSpans(0, 8);

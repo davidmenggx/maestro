@@ -26,7 +26,7 @@ public final class SyntheticWorkload implements Workload {
 
   private static final int PLAYER_MOVE_INTERVAL_TICKS = 5;
 
-  /** Vertical spread of block changes around the surface, in blocks either way. */
+  /** Vertical spread of block changes around the surface. */
   private static final int BLOCK_CHANGE_SPREAD = 2;
 
   /** How far outside the region grid a stray request starts. */
