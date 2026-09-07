@@ -11,29 +11,30 @@ import maestro.fbs.PathType;
  */
 public final class PathTypes {
 
+  private static final byte[] PER_BLOCK_ORDINALS = {
+    (byte) PathType.BLOCKED,
+    (byte) PathType.OPEN,
+    (byte) PathType.TRAPDOOR,
+    (byte) PathType.POWDER_SNOW,
+    (byte) PathType.FENCE,
+    (byte) PathType.LAVA,
+    (byte) PathType.WATER,
+    (byte) PathType.RAIL,
+    (byte) PathType.FIRE,
+    (byte) PathType.DAMAGING,
+    (byte) PathType.DOOR_OPEN,
+    (byte) PathType.DOOR_WOOD_CLOSED,
+    (byte) PathType.DOOR_IRON_CLOSED,
+    (byte) PathType.LEAVES,
+    (byte) PathType.STICKY_HONEY,
+    (byte) PathType.COCOA,
+    (byte) PathType.DAMAGE_CAUTIOUS
+  };
+
   private static final boolean[] PER_BLOCK = new boolean[PathType.names.length];
 
   static {
-    int[] perBlock = {
-      PathType.BLOCKED,
-      PathType.OPEN,
-      PathType.TRAPDOOR,
-      PathType.POWDER_SNOW,
-      PathType.FENCE,
-      PathType.LAVA,
-      PathType.WATER,
-      PathType.RAIL,
-      PathType.FIRE,
-      PathType.DAMAGING,
-      PathType.DOOR_OPEN,
-      PathType.DOOR_WOOD_CLOSED,
-      PathType.DOOR_IRON_CLOSED,
-      PathType.LEAVES,
-      PathType.STICKY_HONEY,
-      PathType.COCOA,
-      PathType.DAMAGE_CAUTIOUS
-    };
-    for (int ordinal : perBlock) {
+    for (byte ordinal : PER_BLOCK_ORDINALS) {
       PER_BLOCK[ordinal] = true;
     }
   }
@@ -48,6 +49,16 @@ public final class PathTypes {
   /** Whether a cell on the wire may carry this ordinal. */
   public static boolean isPerBlock(byte pathType) {
     return pathType >= 0 && pathType < PER_BLOCK.length && PER_BLOCK[pathType];
+  }
+
+  /** How many ordinals a cell may carry. */
+  public static int perBlockCount() {
+    return PER_BLOCK_ORDINALS.length;
+  }
+
+  /** The nth type a cell may carry, in enum order, so an index is a stable choice. */
+  public static byte perBlock(int index) {
+    return PER_BLOCK_ORDINALS[index];
   }
 
   public static String name(byte pathType) {

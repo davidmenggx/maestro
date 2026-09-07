@@ -12,13 +12,23 @@ import java.util.List;
  */
 public final class Invariants {
 
-  /** Id for the throwaway node a fresh recomputation is loaded into. Outside any region grid. */
-  private static final int FRESH_NODE = 90;
+  /**
+   * First id for the throwaway nodes a fresh recomputation is loaded into. One is made per region,
+   * at {@code FRESH_NODE + region}, so the block it occupies has to clear every id a fleet can
+   * assign: a run gives its nodes {@code 0 .. nodeCount - 1}, and no sampled grid holds more than
+   * {@link Topology#maxNodeCount()} regions.
+   */
+  static final int FRESH_NODE = Topology.maxNodeCount();
 
   private Invariants() {}
 
   public static List<String> check(
-      Simulation sim, ProbeController controller, RecordingOutput out, double tickBudget) {
+      Simulation sim,
+      ProbeController controller,
+      RecordingOutput out,
+      SimWorld world,
+      RegionMap regions,
+      double tickBudget) {
     List<String> violations = new ArrayList<>();
 
     // Per-region sequence monotonicity with no gaps, snapshot well-formedness, the
@@ -57,6 +67,10 @@ public final class Invariants {
       }
     }
 
+    // Every node that caught up with its stream holds what a fresh snapshot holds,
+    // whatever sequence of resets, replays and resnapshots got it there.
+    violations.addAll(checkCaughtUpNodes(sim, controller, world, regions));
+
     // Every request is answered or explicitly dropped, exactly once.
     int accounted = out.answered() + out.dropped();
     if (accounted != controller.requestsIssued()) {
@@ -85,6 +99,25 @@ public final class Invariants {
   }
 
   /**
+   * A node has caught up when it holds a region and its world stream reached the last sequence the
+   * controller produced for it. One still behind, partitioned or dead has nothing to compare.
+   */
+  public static boolean caughtUp(ProbeController controller, ModeledNode node) {
+    return node.hasState() && node.lastSequence() == controller.producedSequence(node.id());
+  }
+
+  private static List<String> checkCaughtUpNodes(
+      Simulation sim, ProbeController controller, SimWorld world, RegionMap regions) {
+    List<String> violations = new ArrayList<>();
+    for (ModeledNode node : sim.nodes()) {
+      if (caughtUp(controller, node)) {
+        violations.addAll(checkAgainstFreshSnapshot(sim, node, world, regions));
+      }
+    }
+    return violations;
+  }
+
+  /**
    * State after a failover must equal a fresh full recomputation: a node that rebuilt from a
    * snapshot plus deltas holds what a node handed a fresh snapshot of the same world holds.
    */
@@ -94,7 +127,10 @@ public final class Invariants {
     if (region < 0) {
       return List.of(node.id() + " owns no region to compare");
     }
-    ModeledNode fresh = sim.addNode(NodeId.of(FRESH_NODE), 1);
+    // Built outside the fleet, so comparing does not change what `sim.nodes()` holds.
+    ModeledNode fresh =
+        new ModeledNode(
+            sim, (SimTransport) sim.env().transport(), NodeId.of(FRESH_NODE + region), 1);
     fresh.receive(
         Channel.WORLD, ByteBuffer.wrap(ProbeController.encodeAssignment(regions, region, 0)));
     fresh.receive(
@@ -111,8 +147,10 @@ public final class Invariants {
     if (resumed.stateDigest() != fresh.stateDigest()) {
       violations.add(
           "region state differs after failover: "
+              + resumed.id()
+              + " "
               + Long.toHexString(resumed.stateDigest())
-              + " vs "
+              + " vs fresh "
               + Long.toHexString(fresh.stateDigest()));
     }
     return violations;

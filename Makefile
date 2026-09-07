@@ -8,7 +8,9 @@
 #   make            build node + server
 #   make node       build the C++ compute node
 #   make server     build the Fabric mod jar
-#   make test       run both test suites
+#   make test       run both unit test suites
+#   make fuzz       run the controller's deterministic simulation seed sweeps
+#                   (TIER=shallow|deep|coverage narrows it to one tier)
 #   make test-boot  boot a dev server and assert the mixins applied
 #   make clean      remove build outputs (keeps fetched deps)
 #   make help       list targets
@@ -34,7 +36,7 @@ MAESTRO_WITH_OTEL ?= ON
 
 .PHONY: all help flatc schema schema-cpp schema-java \
         node node-configure node-test \
-        server server-test dst test test-boot run-node run-server clean distclean
+        server server-test fuzz test test-boot run-node run-server clean distclean
 
 all: node server ## Build the C++ node and the Java mod
 
@@ -86,11 +88,12 @@ run-node: node ## Print the node binary's usage
 server: schema-java ## Build the Fabric server mod jar
 	cd server && $(GRADLE) build
 
-server-test: schema-java ## Run the Java unit tests (mod and controller)
+server-test: schema-java ## Run the Java unit tests (mod and controller), fuzz excluded
 	cd server && $(GRADLE) test :controller:test
 
-dst: schema-java ## Run the controller's deterministic simulation tests only
-	cd server && $(GRADLE) :controller:test $(if $(SEED),-Dmaestro.dst.seed=$(SEED)) \
+fuzz: schema-java ## Run the DST seed sweeps (TIER=shallow|deep|coverage SEED=n RUNS=n)
+	cd server && $(GRADLE) :controller:$(if $(TIER),fuzz-$(TIER),fuzz) \
+		$(if $(SEED),-Dmaestro.dst.seed=$(SEED)) \
 		$(if $(RUNS),-Dmaestro.dst.runs=$(RUNS))
 
 run-server: schema-java ## Boot a dev server (WORLD=<name> loads worlds/<name>)
@@ -102,7 +105,7 @@ test-boot: schema-java ## Boot the dev server and assert the mixins applied
 # ---------------------------------------------------------------------------
 # Aggregate / cleanup
 # ---------------------------------------------------------------------------
-test: node-test server-test ## Run all tests
+test: node-test server-test ## Run every unit test suite (see `fuzz` for the sweeps)
 
 clean: ## Remove build outputs (keeps fetched dependencies)
 	rm -rf $(BUILD)/node $(GEN_CPP) $(GEN_JAVA)

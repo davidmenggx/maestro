@@ -36,6 +36,17 @@ public final class SimMetrics implements Metrics {
     return counters.getOrDefault(key(name, labels), 0L);
   }
 
+  /** Every labeled series of one counter, summed. */
+  public long total(String name) {
+    long sum = 0;
+    for (Map.Entry<String, Long> entry : counters.entrySet()) {
+      if (entry.getKey().equals(name) || entry.getKey().startsWith(name + "{")) {
+        sum += entry.getValue();
+      }
+    }
+    return sum;
+  }
+
   /** Nearest-rank percentile. Returns {@code NaN} when nothing was recorded. */
   public double percentile(String name, double p, String... labels) {
     List<Double> values = distributions.get(key(name, labels));

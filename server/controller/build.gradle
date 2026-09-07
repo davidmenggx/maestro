@@ -32,21 +32,53 @@ tasks.withType(JavaCompile).configureEach {
   options.release = 25
 }
 
-test {
-  useJUnitPlatform()
+def fuzzTiers = [shallow: "20000", deep: "6000", coverage: "2000"]
 
-  // Forwarded to the forked test JVM, which does not inherit the Gradle JVM's
-  // properties. `make dst SEED=n` replays a seed reported by a failing run.
+// Forwarded to the forked test JVM, which does not inherit the Gradle JVM's
+// properties. `make fuzz SEED=n` replays a seed reported by a failing run.
+def forwardSweepProperties = { Test task, String defaultRuns ->
   ["maestro.dst.seed", "maestro.dst.runs"].each { key ->
     def value = System.getProperty(key)
     if (value != null) {
-      systemProperty key, value
+      task.systemProperty key, value
     }
+  }
+  if (defaultRuns != null && System.getProperty("maestro.dst.runs") == null) {
+    task.systemProperty "maestro.dst.runs", defaultRuns
   }
 
   // A seed printed on failure is the whole replay story, so keep test output.
-  testLogging {
+  task.testLogging {
     showStandardStreams = true
     exceptionFormat = 'full'
   }
+}
+
+test {
+  useJUnitPlatform {
+    excludeTags 'fuzz'
+  }
+  forwardSweepProperties(delegate, null)
+}
+
+// One task per tier.
+fuzzTiers.each { tier, defaultRuns ->
+  tasks.register("fuzz-${tier}", Test) {
+    group = 'verification'
+    description = "Runs the ${tier} deterministic simulation seed sweeps."
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform {
+      includeTags "fuzz & ${tier}"
+    }
+    forwardSweepProperties(delegate, defaultRuns)
+
+    outputs.upToDateWhen { false }
+  }
+}
+
+tasks.register('fuzz') {
+  group = 'verification'
+  description = 'Runs every tier of the deterministic simulation seed sweeps.'
+  dependsOn fuzzTiers.keySet().collect { "fuzz-${it}" }
 }

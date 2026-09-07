@@ -154,7 +154,7 @@ class WorldBoundaryTest {
   }
 
   private static List<WorldEvent> chunkLoads(long tick) {
-    int chunksPerSide = SimRun.REGION_SIZE * SimRun.REGIONS_PER_SIDE / CHUNK_SIZE;
+    int chunksPerSide = Topology.DEFAULT.chunksPerSide();
     List<WorldEvent> events = new ArrayList<>();
     for (int chunkX = 0; chunkX < chunksPerSide; chunkX++) {
       for (int chunkZ = 0; chunkZ < chunksPerSide; chunkZ++) {

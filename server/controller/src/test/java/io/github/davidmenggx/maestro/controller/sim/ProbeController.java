@@ -142,6 +142,13 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   }
 
   /**
+   * Highest world sequence produced for a node, whether or not it has been sent or acknowledged.
+   */
+  public long producedSequence(NodeId node) {
+    return lastSequence.getOrDefault(node, 0L);
+  }
+
+  /**
    * Internal bookkeeping that has to agree: one mob mapping per outstanding request, per-node
    * in-flight counters that sum to the total, and an admission bound that was never exceeded.
    */
