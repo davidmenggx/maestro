@@ -26,20 +26,24 @@ public final class MaestroServer implements DedicatedServerModInitializer {
   private static PoolOffload offload;
 
   public static MaestroConfig config() {
-    if (config == null) {
-      throw new IllegalStateException("Maestro config read before initialization");
-    }
-    return config;
+    return initialized(config, "config");
   }
 
   /** Production half of the controller's time seam. */
   public static ServerClock clock() {
-    return clock;
+    return initialized(clock, "clock");
   }
 
   /** Production half of the controller's off-main-thread seam. */
   public static PoolOffload offload() {
-    return offload;
+    return initialized(offload, "offload");
+  }
+
+  private static <T> T initialized(T value, String name) {
+    if (value == null) {
+      throw new IllegalStateException("Maestro " + name + " read before initialization");
+    }
+    return value;
   }
 
   @Override

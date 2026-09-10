@@ -371,7 +371,11 @@ public final class ModeledNode {
   }
 
   private static List<Pos> straightLine(Pos start, Pos target) {
-    List<Pos> path = new ArrayList<>();
+    int steps =
+        Math.max(
+            Math.abs(target.x() - start.x()),
+            Math.max(Math.abs(target.y() - start.y()), Math.abs(target.z() - start.z())));
+    List<Pos> path = new ArrayList<>(Math.min(steps, MAX_PATH_NODES));
     int x = start.x();
     int y = start.y();
     int z = start.z();

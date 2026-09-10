@@ -8,16 +8,16 @@ public final class Digest {
 
   private long value = OFFSET;
 
-  public Digest mix(long v) {
+  public Digest mix(long number) {
     for (int shift = 0; shift < 64; shift += 8) {
-      value = (value ^ ((v >>> shift) & 0xFF)) * PRIME;
+      value = (value ^ ((number >>> shift) & 0xFF)) * PRIME;
     }
     return this;
   }
 
-  public Digest mix(String s) {
-    for (int i = 0; i < s.length(); i++) {
-      value = (value ^ s.charAt(i)) * PRIME;
+  public Digest mix(String text) {
+    for (int i = 0; i < text.length(); i++) {
+      value = (value ^ text.charAt(i)) * PRIME;
     }
     return this;
   }

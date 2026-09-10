@@ -1,17 +1,18 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.Rng;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import java.util.List;
 
 /**
  * The coordinate space a run happens in and how it is divided among nodes: a square grid of square,
  * full-height regions, one node each. Separate from {@link Scenario}, which says what happens
  * inside that space.
+ *
+ * <p>The {@code with} methods exist so a focused test can move one dimension of {@link #DEFAULT}
+ * without restating the rest.
  */
 public record Topology(int regionSize, int regionsPerSide, int minY, int height, int relief) {
-
-  /** Chunk width. Regions are chunk aligned, or residency cannot be decided per region. */
-  public static final int CHUNK_SIZE = 16;
 
   static final int MIN_HEIGHT = 32;
   static final int MAX_HEIGHT = 96;
@@ -20,7 +21,7 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
   /** Capped against the shortest column the sampler can draw, so every draw clears the check. */
   static final int MAX_RELIEF = MIN_HEIGHT / 4;
 
-  public static final Topology DEFAULT = new Topology(CHUNK_SIZE, 2, 0, 64, 2);
+  public static final Topology DEFAULT = new Topology(Chunks.SIZE, 2, 0, 64, 2);
 
   /** Floors a sampled world may sit on. The overworld's is negative. */
   static List<Integer> floors() {
@@ -28,7 +29,7 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
   }
 
   static List<Integer> regionSizes() {
-    return List.of(CHUNK_SIZE, 2 * CHUNK_SIZE);
+    return List.of(Chunks.SIZE, 2 * Chunks.SIZE);
   }
 
   /**
@@ -40,8 +41,8 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
   }
 
   public Topology {
-    if (regionSize <= 0 || regionSize % CHUNK_SIZE != 0) {
-      throw new IllegalArgumentException("region size must be a multiple of " + CHUNK_SIZE);
+    if (regionSize <= 0 || regionSize % Chunks.SIZE != 0) {
+      throw new IllegalArgumentException("region size must be a multiple of " + Chunks.SIZE);
     }
     if (regionsPerSide < 1) {
       throw new IllegalArgumentException("a grid holds at least one region: " + regionsPerSide);
@@ -65,7 +66,27 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
   }
 
   public int chunksPerSide() {
-    return extent() / CHUNK_SIZE;
+    return extent() / Chunks.SIZE;
+  }
+
+  public Topology withRegionSize(int value) {
+    return new Topology(value, regionsPerSide, minY, height, relief);
+  }
+
+  public Topology withRegionsPerSide(int value) {
+    return new Topology(regionSize, value, minY, height, relief);
+  }
+
+  public Topology withMinY(int value) {
+    return new Topology(regionSize, regionsPerSide, value, height, relief);
+  }
+
+  public Topology withHeight(int value) {
+    return new Topology(regionSize, regionsPerSide, minY, value, relief);
+  }
+
+  public Topology withRelief(int value) {
+    return new Topology(regionSize, regionsPerSide, minY, height, value);
   }
 
   public static Topology sample(Rng rng) {

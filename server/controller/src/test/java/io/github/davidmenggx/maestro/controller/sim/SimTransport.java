@@ -22,7 +22,13 @@ import java.util.Set;
  */
 public final class SimTransport implements Transport {
 
-  private record Link(NodeId node, Channel channel, boolean toNode) {}
+  /** Which way a frame is travelling. Each direction of a channel orders itself. */
+  private enum Direction {
+    TO_NODE,
+    TO_CONTROLLER
+  }
+
+  private record Link(NodeId node, Channel channel, Direction direction) {}
 
   private final Simulation sim;
   private final FaultPlan faults;
@@ -87,12 +93,12 @@ public final class SimTransport implements Transport {
 
   @Override
   public void send(NodeId node, Channel channel, ByteBuffer frame) {
-    transmit(node, channel, frame, true);
+    transmit(node, channel, frame, Direction.TO_NODE);
   }
 
   /** The node side of the same wire. */
   void toController(NodeId node, Channel channel, ByteBuffer frame) {
-    transmit(node, channel, frame, false);
+    transmit(node, channel, frame, Direction.TO_CONTROLLER);
   }
 
   /** Process death: node state is lost and the controller sees a reset. */
@@ -132,8 +138,8 @@ public final class SimTransport implements Transport {
   }
 
   /** Ordered frames are held and replayed when the partition lifts; unordered ones are lost. */
-  public void partition(NodeId node, boolean on) {
-    if (on) {
+  public void partition(NodeId node, boolean active) {
+    if (active) {
       partitioned.add(node);
       return;
     }
@@ -141,24 +147,19 @@ public final class SimTransport implements Transport {
       return;
     }
     int sentEpoch = epoch.getOrDefault(node, 0);
-    for (Map.Entry<Link, List<byte[]>> held : backlog.entrySet()) {
-      Link link = held.getKey();
+    for (Map.Entry<Link, List<byte[]>> entry : backlog.entrySet()) {
+      Link link = entry.getKey();
       if (!link.node().equals(node)) {
         continue;
       }
-      for (byte[] bytes : held.getValue()) {
-        long time = Math.max(sim.now() + latency(), lastDelivery.getOrDefault(link, 0L) + 1);
-        lastDelivery.put(link, time);
-        sim.scheduleAt(
-            time,
-            "backlog:" + link.channel(),
-            () -> arrive(node, link.channel(), bytes, link.toNode(), sentEpoch));
+      for (byte[] bytes : entry.getValue()) {
+        deliverInOrder(link, bytes, sentEpoch, "backlog:" + link.channel());
       }
-      held.getValue().clear();
+      entry.getValue().clear();
     }
   }
 
-  private void transmit(NodeId node, Channel channel, ByteBuffer frame, boolean toNode) {
+  private void transmit(NodeId node, Channel channel, ByteBuffer frame, Direction direction) {
     byte[] bytes = new byte[frame.remaining()];
     frame.duplicate().get(bytes);
     sim.digest().mix(bytes);
@@ -173,7 +174,9 @@ public final class SimTransport implements Transport {
     int sentEpoch = epoch.getOrDefault(node, 0);
     if (partitioned.contains(node)) {
       if (channel.ordered()) {
-        backlog.computeIfAbsent(new Link(node, channel, toNode), k -> new ArrayList<>()).add(bytes);
+        backlog
+            .computeIfAbsent(new Link(node, channel, direction), link -> new ArrayList<>())
+            .add(bytes);
         sim.metrics().count("transport.held", 1, "node", nodeLabel, "channel", channel.name());
       } else {
         sim.metrics().count("transport.lost", 1, "node", nodeLabel, "channel", channel.name());
@@ -182,11 +185,7 @@ public final class SimTransport implements Transport {
     }
 
     if (channel.ordered()) {
-      Link link = new Link(node, channel, toNode);
-      long time = Math.max(sim.now() + latency(), lastDelivery.getOrDefault(link, 0L) + 1);
-      lastDelivery.put(link, time);
-      sim.scheduleAt(
-          time, "frame:" + channel, () -> arrive(node, channel, bytes, toNode, sentEpoch));
+      deliverInOrder(new Link(node, channel, direction), bytes, sentEpoch, "frame:" + channel);
       return;
     }
 
@@ -195,23 +194,34 @@ public final class SimTransport implements Transport {
       return;
     }
     sim.schedule(
-        latency(), "frame:" + channel, () -> arrive(node, channel, bytes, toNode, sentEpoch));
+        latency(), "frame:" + channel, () -> arrive(node, channel, bytes, direction, sentEpoch));
     if (rng.nextDouble() < faults.duplicateRate()) {
       // An independent delay, so a duplicate can also land before the original.
       sim.metrics().count("transport.duplicated", 1, "node", nodeLabel, "channel", channel.name());
       sim.schedule(
-          latency(), "frame-dup:" + channel, () -> arrive(node, channel, bytes, toNode, sentEpoch));
+          latency(),
+          "frame-dup:" + channel,
+          () -> arrive(node, channel, bytes, direction, sentEpoch));
     }
   }
 
-  private void arrive(NodeId node, Channel channel, byte[] bytes, boolean toNode, int sentEpoch) {
+  /** Holds the arrival back behind the last one on the same link, so order cannot invert. */
+  private void deliverInOrder(Link link, byte[] bytes, int sentEpoch, String name) {
+    long time = Math.max(sim.now() + latency(), lastDelivery.getOrDefault(link, 0L) + 1);
+    lastDelivery.put(link, time);
+    sim.scheduleAt(
+        time, name, () -> arrive(link.node(), link.channel(), bytes, link.direction(), sentEpoch));
+  }
+
+  private void arrive(
+      NodeId node, Channel channel, byte[] bytes, Direction direction, int sentEpoch) {
     if (epoch.getOrDefault(node, 0) != sentEpoch || !linkUp(node)) {
       sim.metrics().count("transport.lost", 1, "node", node.toString(), "channel", channel.name());
       return;
     }
     sim.metrics()
         .count("transport.received", 1, "node", node.toString(), "channel", channel.name());
-    if (toNode) {
+    if (direction == Direction.TO_NODE) {
       nodes.get(node).receive(channel, ByteBuffer.wrap(bytes));
     } else {
       listener.onFrame(node, channel, ByteBuffer.wrap(bytes));

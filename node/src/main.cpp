@@ -22,9 +22,12 @@ struct Options {
 enum class ArgsResult { Parsed, Help, Error };
 
 void printUsage(std::ostream &OS) {
+  const Options Defaults;
   OS << "usage: maestro-node [options]\n"
-     << "  --port <n>          TCP port to listen on (default 47800)\n"
-     << "  --otlp <host:port>  OTLP/gRPC collector endpoint\n"
+     << "  --port <n>          TCP port to listen on (default " << Defaults.Port
+     << ")\n"
+     << "  --otlp <host:port>  OTLP/gRPC collector endpoint (default "
+     << Defaults.OtlpEndpoint << ")\n"
      << "  --stateless         run without persistent world state\n"
      << "  --help              show this message\n";
 }
@@ -86,9 +89,9 @@ int main(int Argc, char **Argv) {
 
   maestro::obs::init("maestro-node", Opts.OtlpEndpoint);
 
-  asio::io_context Io;
+  asio::io_context IoContext;
   asio::ip::tcp::acceptor Acceptor(
-      Io, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), Opts.Port));
+      IoContext, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), Opts.Port));
 
   std::cout << "maestro-node bound to :" << Opts.Port
             << (Opts.Stateless ? "  [stateless]" : "  [stateful]") << '\n';

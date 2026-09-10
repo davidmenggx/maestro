@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -18,10 +19,9 @@ class SimulationTest {
   private static final long CUT_TICK = 40;
 
   /**
-   * How long that node stays away. Its region emits at most one world frame a tick, and only on a
-   * tick that changes a block inside it, so the partition has to outlast the replay window by
-   * several times its length before the stream rolls past the resume point. A margin that stopped
-   * being enough shows up as the resume count below going non-zero, not as a quiet pass.
+   * How long that node stays away. A region emits at most one world frame a tick, so the partition
+   * has to outlast the replay window several times over before the stream rolls past the resume
+   * point. Too short a margin shows up as the resume count below going non-zero.
    */
   private static final long AWAY_TICKS = 4L * ProbeController.RETENTION_FRAMES;
 
@@ -62,7 +62,7 @@ class SimulationTest {
 
   @Test
   void aDuplicatedRequestIsAnsweredOnceByTheController() {
-    SimRun run = SimRun.of(5L, FaultPlan.reliable().withLoss(0.0, 0.4), TICKS).go();
+    SimRun run = SimRun.of(5L, FaultPlan.reliable().withDuplicateRate(0.4), TICKS).go();
 
     // The node re-answers a retry with the same bytes, so the controller sees more
     // responses than requests and must discard the extras rather than double-apply.
@@ -108,10 +108,15 @@ class SimulationTest {
     assertTrue(
         first.out.dropped(DropReason.NODE_LOST) + first.out.dropped(DropReason.NO_NODE) > 0,
         first.describe());
-    // The world stream restarts from a fresh snapshot rather than resuming into a gap.
+    // The world stream restarts from a fresh snapshot rather than resuming into a gap,
+    // and what the node rebuilt has to equal a fresh recomputation of the same world.
     assertTrue(first.sim.node(victim).hasState(), first.describe());
     assertTrue(
         first.sim.metrics().counter("offload.submitted", "job", "snapshot") > first.regions.count(),
+        first.describe());
+    assertEquals(
+        List.of(),
+        Invariants.checkAgainstFreshSnapshot(first, first.sim.node(victim)),
         first.describe());
   }
 
@@ -131,9 +136,7 @@ class SimulationTest {
         run.sim.metrics().counter("offload.submitted", "job", "snapshot"),
         run.describe());
     assertEquals(
-        List.of(),
-        Invariants.checkAgainstFreshSnapshot(run.sim, run.sim.node(victim), run.world, run.regions),
-        run.describe());
+        List.of(), Invariants.checkAgainstFreshSnapshot(run, run.sim.node(victim)), run.describe());
   }
 
   @Test
@@ -151,7 +154,7 @@ class SimulationTest {
                 29L,
                 plan,
                 CUT_TICK + AWAY_TICKS + TAIL_TICKS,
-                Scenario.DEFAULT.toBuilder().maxBlockChangesPerTick(CHANGES_PER_TICK).build())
+                Scenario.DEFAULT.with(Count.BLOCK_CHANGES_PER_TICK, CHANGES_PER_TICK))
             .go();
 
     assertEquals(List.of(), run.violations(), run.describe());
@@ -166,9 +169,7 @@ class SimulationTest {
         run.sim.metrics().counter("offload.submitted", "job", "snapshot") > run.regions.count(),
         run.describe());
     assertEquals(
-        List.of(),
-        Invariants.checkAgainstFreshSnapshot(run.sim, run.sim.node(victim), run.world, run.regions),
-        run.describe());
+        List.of(), Invariants.checkAgainstFreshSnapshot(run, run.sim.node(victim)), run.describe());
   }
 
   @Test
@@ -188,18 +189,7 @@ class SimulationTest {
     assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
     assertTrue(run.out.dropped(DropReason.SHED) > 0, run.describe());
     // Held rather than lost, so the stream has no gap once the partition lifts.
-    assertTrue(counter(run, "transport.held", Channel.WORLD) > 0, run.describe());
+    assertTrue(run.fleetCounter("transport.held", Channel.WORLD) > 0, run.describe());
     assertTrue(run.sim.node(victim).lastSequence() > 1, run.describe());
-  }
-
-  private static long counter(SimRun run, String name, Channel channel) {
-    long total = 0;
-    for (int i = 0; i < run.regions.count(); i++) {
-      total +=
-          run.sim
-              .metrics()
-              .counter(name, "node", NodeId.of(i).toString(), "channel", channel.name());
-    }
-    return total;
   }
 }

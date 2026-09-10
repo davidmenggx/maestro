@@ -11,34 +11,48 @@ import java.util.Objects;
  * ones a cell can never carry, because the node resolves those before charging a malus.
  */
 public record MobClass(
-    short classId,
-    float width,
-    float height,
-    float[] malus,
-    float maxUpStep,
-    boolean canPassDoors,
-    boolean canOpenDoors,
-    boolean canFloat,
-    boolean canWalkOverFences,
-    int maxFollowRange) {
+    short classId, Shape shape, Abilities abilities, float[] malus, int maxFollowRange) {
+
+  /** Collision box, and the height the mob clears without jumping. */
+  public record Shape(float width, float height, float maxUpStep) {
+
+    public Shape {
+      if (width <= 0 || height <= 0) {
+        throw new IllegalArgumentException("footprint must be positive: " + width + "x" + height);
+      }
+      if (maxUpStep < 0) {
+        throw new IllegalArgumentException("step height must not be negative: " + maxUpStep);
+      }
+    }
+  }
+
+  /** The evaluator toggles that decide which cells a mob may enter at all. */
+  public record Abilities(
+      boolean canPassDoors, boolean canOpenDoors, boolean canFloat, boolean canWalkOverFences) {}
 
   public MobClass {
     if (classId < 0) {
       throw new IllegalArgumentException("class id must not be negative: " + classId);
     }
-    if (width <= 0 || height <= 0) {
-      throw new IllegalArgumentException("footprint must be positive: " + width + "x" + height);
-    }
     if (maxFollowRange <= 0) {
       throw new IllegalArgumentException("follow range must be positive: " + maxFollowRange);
     }
+    Objects.requireNonNull(shape, "shape");
+    Objects.requireNonNull(abilities, "abilities");
     Objects.requireNonNull(malus, "malus");
     if (malus.length != PathTypes.count()) {
       throw new IllegalArgumentException(
           "malus must cover all " + PathTypes.count() + " path types, got " + malus.length);
     }
-    // Defensive copy: the array is the one mutable part of an otherwise immutable
-    // profile. Equality stays reference-based on it, so do not use this as a key.
     malus = malus.clone();
+  }
+
+  /**
+   * Copied on the way out as well as in, so the array cannot be written through. Equality stays
+   * reference-based on it, so do not use a profile as a map key.
+   */
+  @Override
+  public float[] malus() {
+    return malus.clone();
   }
 }

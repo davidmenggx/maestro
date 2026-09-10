@@ -110,7 +110,7 @@ class NondeterminismGuardTest {
   void everyRuleIsWellFormed() {
     for (Rule rule : RULES) {
       assertFalse(rule.owner().contains("."), "owners are internal names: " + rule.owner());
-      assertTrue(!rule.member().isBlank(), "empty member in " + rule.owner());
+      assertFalse(rule.member().isBlank(), "empty member in " + rule.owner());
     }
   }
 
@@ -211,8 +211,10 @@ class NondeterminismGuardTest {
     try (Stream<Path> files = Files.walk(root)) {
       List<Path> classes =
           files
-              .filter(p -> p.toString().endsWith(".class"))
-              .filter(p -> !root.relativize(p).toString().replace('\\', '/').startsWith(GENERATED))
+              .filter(path -> path.toString().endsWith(".class"))
+              .filter(
+                  path ->
+                      !root.relativize(path).toString().replace('\\', '/').startsWith(GENERATED))
               .sorted()
               .toList();
       for (Path file : classes) {

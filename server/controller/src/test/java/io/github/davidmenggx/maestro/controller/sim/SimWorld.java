@@ -1,6 +1,7 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.Rng;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.WorldSource;
@@ -18,8 +19,6 @@ import maestro.fbs.PathType;
  * negative floors and columns that run-length encode into more than a couple of runs.
  */
 public final class SimWorld implements WorldSource {
-
-  public static final int CHUNK_SIZE = Topology.CHUNK_SIZE;
 
   /** Marks a cell whose type still comes from the terrain rule rather than a block change. */
   private static final byte NO_OVERRIDE = -1;
@@ -57,9 +56,9 @@ public final class SimWorld implements WorldSource {
     this.loadedChunks = new boolean[chunksPerSide * chunksPerSide];
     Arrays.fill(overrides, NO_OVERRIDE);
 
-    int base = topology.minY() + topology.height() / 2;
+    int lowestGround = topology.minY() + topology.height() / 2;
     for (int i = 0; i < ground.length; i++) {
-      ground[i] = base + rng.nextInt(topology.relief() + 1);
+      ground[i] = lowestGround + rng.nextInt(topology.relief() + 1);
     }
 
     List<MobClass> profiles = new ArrayList<>(mobClassCount);
@@ -126,7 +125,7 @@ public final class SimWorld implements WorldSource {
     if (!inside(x, y, z)) {
       return (byte) PathType.BLOCKED;
     }
-    if (!loadedChunks[chunkIndex(x / CHUNK_SIZE, z / CHUNK_SIZE)]) {
+    if (!loadedChunks[chunkIndex(Chunks.of(x), Chunks.of(z))]) {
       return (byte) PathType.BLOCKED;
     }
     byte override = overrides[index(x, y, z)];
@@ -147,16 +146,19 @@ public final class SimWorld implements WorldSource {
       malus[ordinal] =
           rng.nextDouble() < IMPASSABLE_CHANCE ? -1.0f : (float) (rng.nextDouble() * MAX_MALUS);
     }
+    MobClass.Shape shape =
+        new MobClass.Shape(
+            MIN_WIDTH + (float) rng.nextDouble() * MAX_EXTRA_WIDTH,
+            MIN_MOB_HEIGHT + (float) rng.nextDouble() * MAX_EXTRA_MOB_HEIGHT,
+            MIN_UP_STEP + (float) rng.nextDouble() * MAX_EXTRA_UP_STEP);
+    MobClass.Abilities abilities =
+        new MobClass.Abilities(
+            rng.nextBoolean(), rng.nextBoolean(), rng.nextBoolean(), rng.nextBoolean());
     return new MobClass(
         classId,
-        MIN_WIDTH + (float) rng.nextDouble() * MAX_EXTRA_WIDTH,
-        MIN_MOB_HEIGHT + (float) rng.nextDouble() * MAX_EXTRA_MOB_HEIGHT,
+        shape,
+        abilities,
         malus,
-        MIN_UP_STEP + (float) rng.nextDouble() * MAX_EXTRA_UP_STEP,
-        rng.nextBoolean(),
-        rng.nextBoolean(),
-        rng.nextBoolean(),
-        rng.nextBoolean(),
         MIN_FOLLOW_RANGE + rng.nextInt(MAX_EXTRA_FOLLOW_RANGE + 1));
   }
 

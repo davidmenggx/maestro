@@ -64,8 +64,8 @@ public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint, boo
     }
   }
 
-  private static Throwable rootCause(Throwable t) {
-    Throwable cause = t;
+  private static Throwable rootCause(Throwable thrown) {
+    Throwable cause = thrown;
     while (cause.getCause() != null && cause.getCause() != cause) {
       cause = cause.getCause();
     }

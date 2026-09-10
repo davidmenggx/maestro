@@ -8,8 +8,10 @@ import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldInput;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.PriorityQueue;
@@ -26,10 +28,10 @@ public final class Simulation {
   /** Intra-tick resolution. One step is 50 microseconds. */
   public static final int STEPS_PER_TICK = 1000;
 
-  /** A Minecraft tick is 50ms. {@code STEPS_PER_TICK * NANOS_PER_STEP} must equal this. */
-  private static final long NANOS_PER_TICK = 50_000_000L;
+  /** A Minecraft tick is 50ms. */
+  static final long NANOS_PER_TICK = 50_000_000L;
 
-  private static final long NANOS_PER_STEP = NANOS_PER_TICK / STEPS_PER_TICK;
+  static final long NANOS_PER_STEP = NANOS_PER_TICK / STEPS_PER_TICK;
 
   /** Where in the tick the fleet works. Mid-tick, so serving does not spill into the next tick. */
   private static final int SERVICE_STEP = STEPS_PER_TICK / 2;
@@ -44,11 +46,11 @@ public final class Simulation {
     }
   }
 
-  private final FaultPlan faults;
   private final SeededRng rng;
   private final Rng offloadRng;
   private final PriorityQueue<Scheduled> queue = new PriorityQueue<>();
   private final Map<NodeId, ModeledNode> nodes = new LinkedHashMap<>();
+  private final Map<Long, List<FaultPlan.Fault>> faultsByTick = new LinkedHashMap<>();
   private final SimMetrics metrics = new SimMetrics();
   private final Digest digest = new Digest();
   private final SimTransport transport;
@@ -59,17 +61,23 @@ public final class Simulation {
   private long tick = -1;
 
   public Simulation(long seed, FaultPlan faults) {
-    this.faults = faults;
     this.rng = SeededRng.of(seed);
     this.offloadRng = rng.derive("offload");
     this.transport = new SimTransport(this, faults, rng.derive("transport"), nodes);
     this.env =
         new ControllerEnv(
             new SimClock(), rng.derive("controller"), new SimOffload(), transport, metrics);
+    for (FaultPlan.Fault fault : faults.faults()) {
+      faultsByTick.computeIfAbsent(fault.tick(), tick -> new ArrayList<>()).add(fault);
+    }
   }
 
   public ControllerEnv env() {
     return env;
+  }
+
+  public SimTransport transport() {
+    return transport;
   }
 
   public SimMetrics metrics() {
@@ -151,14 +159,14 @@ public final class Simulation {
   }
 
   private void applyFaults(long tick) {
-    for (FaultPlan.Fault fault : faults.at(tick)) {
+    for (FaultPlan.Fault fault : faultsByTick.getOrDefault(tick, List.of())) {
       digest.mix(fault.toString());
       switch (fault) {
         case FaultPlan.NodeDied died -> transport.kill(died.node());
         case FaultPlan.LinkReset reset -> transport.resetLink(reset.node());
         case FaultPlan.NodeRecovered recovered -> transport.revive(recovered.node());
         case FaultPlan.Partitioned partitioned ->
-            transport.partition(partitioned.node(), partitioned.on());
+            transport.partition(partitioned.node(), partitioned.active());
       }
     }
   }
@@ -193,8 +201,8 @@ public final class Simulation {
 
   /**
    * Work runs immediately, but its completion waits for the end of whichever tick it finishes in,
-   * because that is where production drains finished jobs. A result is never visible to the
-   * controller inside the tick that submitted it.
+   * because that is where production drains finished jobs. A result therefore never reaches the
+   * controller inside the call that submitted it.
    */
   private final class SimOffload implements Offload {
 

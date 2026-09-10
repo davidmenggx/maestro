@@ -1,6 +1,9 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.Rng;
+import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
+import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.Pos;
@@ -20,9 +23,6 @@ import java.util.Set;
  * been answered or dropped and the invariants can require it.
  */
 public final class SyntheticWorkload implements Workload {
-
-  /** A mob repaths every 15 ticks or so, which is roughly what vanilla does. */
-  public static final double DEFAULT_REQUEST_CHANCE = 0.07;
 
   private static final int PLAYER_MOVE_INTERVAL_TICKS = 5;
 
@@ -73,10 +73,10 @@ public final class SyntheticWorkload implements Workload {
 
   private void start(WorldInput input) {
     reloadEverything(0, input);
-    for (int i = 0; i < scenario.mobCount(); i++) {
+    for (int i = 0; i < scenario.counts().get(Count.MOBS); i++) {
       spawn(0, input);
     }
-    for (int player = 1; player <= scenario.playerCount(); player++) {
+    for (int player = 1; player <= scenario.counts().get(Count.PLAYERS); player++) {
       players.add(player);
       input.accept(new WorldEvent.PlayerMoved(0, player, randomStanding()));
     }
@@ -95,7 +95,7 @@ public final class SyntheticWorkload implements Workload {
   }
 
   private void churnChunks(long tick, WorldInput input) {
-    if (rng.nextDouble() >= scenario.chunkChurnChance()) {
+    if (rng.nextDouble() >= scenario.chances().get(Chance.CHUNK_CHURN)) {
       return;
     }
     int chunkX = rng.nextInt(world.chunksPerSide());
@@ -114,11 +114,11 @@ public final class SyntheticWorkload implements Workload {
    * column run-length encodes into more than the two runs flat terrain would give.
    */
   private void changeBlocks(long tick, WorldInput input) {
-    int changes = rng.nextInt(scenario.maxBlockChangesPerTick() + 1);
+    int changes = rng.nextInt(scenario.counts().get(Count.BLOCK_CHANGES_PER_TICK) + 1);
     for (int i = 0; i < changes; i++) {
       int x = rng.nextInt(world.size());
       int z = rng.nextInt(world.size());
-      if (!world.chunkLoaded(x / SimWorld.CHUNK_SIZE, z / SimWorld.CHUNK_SIZE)) {
+      if (!world.chunkLoaded(Chunks.of(x), Chunks.of(z))) {
         // Minecraft cannot change a block it is not holding.
         continue;
       }
@@ -134,7 +134,7 @@ public final class SyntheticWorkload implements Workload {
   }
 
   private void churnMobs(long tick, WorldInput input) {
-    if (mobs.isEmpty() || rng.nextDouble() >= scenario.mobChurnChance()) {
+    if (mobs.isEmpty() || rng.nextDouble() >= scenario.chances().get(Chance.MOB_CHURN)) {
       return;
     }
     input.accept(new WorldEvent.MobRemoved(tick, removeNth(rng.nextInt(mobs.size()))));
@@ -156,22 +156,24 @@ public final class SyntheticWorkload implements Workload {
   private void requestPaths(long tick, WorldInput input) {
     // Safe to iterate directly: emitting an event never calls back into the workload.
     for (Map.Entry<Integer, Pos> mob : mobs.entrySet()) {
-      if (rng.nextDouble() >= scenario.requestChance()) {
+      if (rng.nextDouble() >= scenario.chances().get(Chance.REQUEST)) {
         continue;
       }
       // A stray start is outside every region, which no node owns and no snapshot covers.
       Pos start =
-          rng.nextDouble() < scenario.strayRequestChance() ? outsideTheGrid() : mob.getValue();
+          rng.nextDouble() < scenario.chances().get(Chance.STRAY_REQUEST)
+              ? outsideTheGrid()
+              : mob.getValue();
       input.accept(new WorldEvent.PathRequested(tick, mob.getKey(), start, randomStanding()));
     }
   }
 
   /** The chosen mob may have nothing outstanding, in which case the cancel must do nothing. */
   private void cancelPath(long tick, WorldInput input) {
-    if (mobs.isEmpty() || rng.nextDouble() >= scenario.cancelChance()) {
+    if (mobs.isEmpty() || rng.nextDouble() >= scenario.chances().get(Chance.CANCEL)) {
       return;
     }
-    input.accept(new WorldEvent.PathCanceled(tick, nth(rng.nextInt(mobs.size()))));
+    input.accept(new WorldEvent.PathCanceled(tick, mobsFrom(rng.nextInt(mobs.size())).next()));
   }
 
   /**
@@ -179,8 +181,9 @@ public final class SyntheticWorkload implements Workload {
    * will read is never fixed for a whole run.
    */
   private void movePlayers(long tick, WorldInput input) {
-    if (scenario.playerCount() > 0 && rng.nextDouble() < scenario.playerChurnChance()) {
-      int player = 1 + rng.nextInt(scenario.playerCount());
+    int playerCount = scenario.counts().get(Count.PLAYERS);
+    if (playerCount > 0 && rng.nextDouble() < scenario.chances().get(Chance.PLAYER_CHURN)) {
+      int player = 1 + rng.nextInt(playerCount);
       if (players.remove(player)) {
         input.accept(new WorldEvent.PlayerLeft(tick, player));
       } else {
@@ -204,23 +207,20 @@ public final class SyntheticWorkload implements Workload {
     input.accept(new WorldEvent.MobSpawned(tick, mobId, classId, pos));
   }
 
-  private int nth(int position) {
-    Iterator<Integer> ids = mobs.keySet().iterator();
-    for (int i = 0; i < position; i++) {
-      ids.next();
-    }
-    return ids.next();
-  }
-
-  /** Removes the mob at the given insertion position without copying the key set. */
   private int removeNth(int position) {
-    Iterator<Integer> ids = mobs.keySet().iterator();
-    for (int i = 0; i < position; i++) {
-      ids.next();
-    }
+    Iterator<Integer> ids = mobsFrom(position);
     int mobId = ids.next();
     ids.remove();
     return mobId;
+  }
+
+  /** Reaches an insertion position without copying the key set. */
+  private Iterator<Integer> mobsFrom(int position) {
+    Iterator<Integer> ids = mobs.keySet().iterator();
+    for (int i = 0; i < position; i++) {
+      ids.next();
+    }
+    return ids;
   }
 
   private Pos randomStanding() {

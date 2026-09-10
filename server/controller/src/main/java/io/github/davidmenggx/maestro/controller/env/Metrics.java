@@ -15,16 +15,4 @@ public interface Metrics {
   void record(String name, double value, String... labels);
 
   void gauge(String name, long value, String... labels);
-
-  Metrics NOOP =
-      new Metrics() {
-        @Override
-        public void count(String name, long delta, String... labels) {}
-
-        @Override
-        public void record(String name, double value, String... labels) {}
-
-        @Override
-        public void gauge(String name, long value, String... labels) {}
-      };
 }

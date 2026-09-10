@@ -13,6 +13,7 @@ import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 import java.time.Duration;
 import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public final class Telemetry {
 
@@ -26,8 +27,7 @@ public final class Telemetry {
    * failures through JUL, which would otherwise repeat on every cycle whenever no collector is
    * listening -- the normal case in development.
    */
-  private static final java.util.logging.Logger EXPORTER_LOGGER =
-      java.util.logging.Logger.getLogger("io.opentelemetry.exporter");
+  private static final Logger EXPORTER_LOGGER = Logger.getLogger("io.opentelemetry.exporter");
 
   private static OpenTelemetrySdk sdk;
 

@@ -3,6 +3,8 @@ package io.github.davidmenggx.maestro.controller.sim;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
+import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import java.util.ArrayList;
 import java.util.List;
@@ -65,10 +67,14 @@ public final class SimRun {
       sim.addNode(id, scenario.capacityOf(i));
     }
 
-    this.regions = new RegionMap(topology.regionSize(), topology.regionsPerSide(), nodes);
-    this.world = new SimWorld(topology, scenario.mobClassCount(), sim.rng().derive("terrain"));
+    this.regions = new RegionMap(topology, nodes);
+    this.world =
+        new SimWorld(
+            topology, scenario.counts().get(Count.MOB_CLASSES), sim.rng().derive("terrain"));
     this.out = new RecordingOutput(sim);
-    this.controller = new ProbeController(sim.env(), world, out, regions, scenario.nodeCapacity());
+    this.controller =
+        new ProbeController(
+            sim.env(), world, out, regions, scenario.counts().get(Count.NODE_CAPACITY));
     this.workload = workloadFactory.apply(world, sim.rng().derive("workload"));
   }
 
@@ -126,7 +132,16 @@ public final class SimRun {
   }
 
   public List<String> violations(double tickBudget) {
-    return Invariants.check(sim, controller, out, world, regions, tickBudget);
+    return Invariants.check(this, tickBudget);
+  }
+
+  /** Transport counters are per node and per channel, so a whole-fleet total has to be summed. */
+  public long fleetCounter(String name, Channel channel) {
+    long total = 0;
+    for (NodeId node : regions.nodes()) {
+      total += sim.metrics().counter(name, "node", node.toString(), "channel", channel.name());
+    }
+    return total;
   }
 
   /** Seed and outcome, for a failure message that is enough to reproduce the run. */

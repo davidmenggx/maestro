@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Replays a fixed list of events, applying the world mutations they describe as it goes. This is
@@ -19,9 +20,9 @@ public final class ScriptedWorkload implements Workload {
   private final SimWorld world;
 
   public ScriptedWorkload(SimWorld world, List<WorldEvent> events) {
-    this.world = java.util.Objects.requireNonNull(world, "world");
+    this.world = Objects.requireNonNull(world, "world");
     for (WorldEvent event : events) {
-      byTick.computeIfAbsent(event.tick(), k -> new ArrayList<>()).add(event);
+      byTick.computeIfAbsent(event.tick(), tick -> new ArrayList<>()).add(event);
     }
   }
 
@@ -35,9 +36,11 @@ public final class ScriptedWorkload implements Workload {
 
   private void apply(WorldEvent event) {
     switch (event) {
-      case WorldEvent.ChunkLoaded e -> world.loadChunk(e.chunkX(), e.chunkZ());
-      case WorldEvent.BlockChanged e ->
-          world.set(e.pos().x(), e.pos().y(), e.pos().z(), e.pathType());
+      case WorldEvent.ChunkLoaded loaded -> world.loadChunk(loaded.chunkX(), loaded.chunkZ());
+      case WorldEvent.ChunkUnloaded unloaded ->
+          world.unloadChunk(unloaded.chunkX(), unloaded.chunkZ());
+      case WorldEvent.BlockChanged changed ->
+          world.set(changed.pos().x(), changed.pos().y(), changed.pos().z(), changed.pathType());
       default -> {}
     }
   }

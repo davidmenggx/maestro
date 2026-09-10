@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -46,46 +47,25 @@ class MaestroConfigTest {
   }
 
   @Test
-  void rejectsUnknownMode(@TempDir Path dir) throws IOException {
-    Path path =
-        write(
-            dir,
+  void rejectsAFileItCannotUse(@TempDir Path dir) throws IOException {
+    List<String> unusable =
+        List.of(
+            // An unknown enum value, a missing field, a blank endpoint, and truncated JSON.
             """
             {"mode": "sharded", "subMode": "batch", "otlpEndpoint": "http://localhost:4317"}
-            """);
-
-    assertThrows(IllegalStateException.class, () -> MaestroConfig.load(path));
-  }
-
-  @Test
-  void rejectsMissingField(@TempDir Path dir) throws IOException {
-    Path path =
-        write(
-            dir,
+            """,
             """
             {"mode": "stateful", "otlpEndpoint": "http://localhost:4317"}
-            """);
-
-    assertThrows(IllegalStateException.class, () -> MaestroConfig.load(path));
-  }
-
-  @Test
-  void rejectsBlankEndpoint(@TempDir Path dir) throws IOException {
-    Path path =
-        write(
-            dir,
+            """,
             """
             {"mode": "stateful", "subMode": "batch", "otlpEndpoint": "  "}
-            """);
+            """,
+            "{\"mode\": ");
 
-    assertThrows(IllegalStateException.class, () -> MaestroConfig.load(path));
-  }
-
-  @Test
-  void rejectsMalformedJson(@TempDir Path dir) throws IOException {
-    Path path = write(dir, "{\"mode\": ");
-
-    assertThrows(IllegalStateException.class, () -> MaestroConfig.load(path));
+    for (String json : unusable) {
+      Path path = write(dir, json);
+      assertThrows(IllegalStateException.class, () -> MaestroConfig.load(path), json);
+    }
   }
 
   private static Path write(Path dir, String json) throws IOException {

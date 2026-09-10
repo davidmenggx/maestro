@@ -1,89 +1,134 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.Rng;
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.Map;
 
 /**
  * How much load a run puts on the fleet, and how much the world moves underneath it. Separate from
  * {@link FaultPlan}, which says what the network does rather than what the server asks for, and
  * from {@link Topology}, which says what shape the world is.
  *
- * <p>{@link #sample} draws one from the ranges below, so a seed sweep covers the settings and not
- * only the event ordering. Every range includes the degenerate end (no mobs, no players, no block
- * changes).
+ * <p>Every setting is declared once below, with the floor it may never go under and the ceiling
+ * {@link #sample} draws it up to, so the sampler, the validation and the coverage assertions all
+ * read the same table. A ceiling bounds the draw only: a focused test may set a value above it.
  */
-public record Scenario(
-    int nodeCapacity,
-    int slowNodes,
-    int mobCount,
-    int mobClassCount,
-    int maxBlockChangesPerTick,
-    int playerCount,
-    double requestChance,
-    double cancelChance,
-    double mobChurnChance,
-    double chunkChurnChance,
-    double playerChurnChance,
-    double strayRequestChance) {
+public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) {
+
+  /** A whole-number setting. */
+  public enum Count {
+    NODE_CAPACITY(1, 12),
+    SLOW_NODES(0, 2),
+    MOBS(0, 48),
+    MOB_CLASSES(1, 4),
+    BLOCK_CHANGES_PER_TICK(0, 6),
+    PLAYERS(0, 3);
+
+    private final int floor;
+    private final int ceiling;
+
+    Count(int floor, int ceiling) {
+      this.floor = floor;
+      this.ceiling = ceiling;
+    }
+
+    public int floor() {
+      return floor;
+    }
+
+    public int ceiling() {
+      return ceiling;
+    }
+  }
+
+  /** The chance, per mob or per tick depending on the event, that the workload emits one. */
+  public enum Chance {
+    REQUEST(0.3),
+    CANCEL(0.1),
+    MOB_CHURN(0.15),
+    CHUNK_CHURN(0.12),
+    PLAYER_CHURN(0.1),
+    STRAY_REQUEST(0.1);
+
+    private final double ceiling;
+
+    Chance(double ceiling) {
+      this.ceiling = ceiling;
+    }
+
+    public double ceiling() {
+      return ceiling;
+    }
+  }
 
   public Scenario {
-    if (nodeCapacity < 1) {
-      throw new IllegalArgumentException("a node serves at least one request a tick");
+    counts = complete(counts, Count.class);
+    chances = complete(chances, Chance.class);
+    for (Count setting : Count.values()) {
+      int value = counts.get(setting);
+      if (value < setting.floor()) {
+        throw new IllegalArgumentException(
+            setting + " must be at least " + setting.floor() + ": " + value);
+      }
     }
-    requireCount(slowNodes, "slowNodes");
-    requireCount(mobCount, "mobCount");
-    requireCount(maxBlockChangesPerTick, "maxBlockChangesPerTick");
-    requireCount(playerCount, "playerCount");
-    if (mobClassCount < 1) {
-      throw new IllegalArgumentException("a world has at least one mob profile: " + mobClassCount);
+    for (Chance setting : Chance.values()) {
+      double value = chances.get(setting);
+      if (!(value >= 0 && value <= 1)) {
+        throw new IllegalArgumentException(setting + " must be in [0, 1]: " + value);
+      }
     }
-    requireChance(requestChance, "requestChance");
-    requireChance(cancelChance, "cancelChance");
-    requireChance(mobChurnChance, "mobChurnChance");
-    requireChance(chunkChurnChance, "chunkChurnChance");
-    requireChance(playerChurnChance, "playerChurnChance");
-    requireChance(strayRequestChance, "strayRequestChance");
   }
 
   /** A fleet with headroom and a world whose chunks stay resident. */
   public static final Scenario DEFAULT =
       new Scenario(
-          8, 0, 12, 2, 3, 1, SyntheticWorkload.DEFAULT_REQUEST_CHANCE, 0.02, 0.05, 0.0, 0.01, 0.0);
+          Map.of(
+              Count.NODE_CAPACITY, 8,
+              Count.SLOW_NODES, 0,
+              Count.MOBS, 12,
+              Count.MOB_CLASSES, 2,
+              Count.BLOCK_CHANGES_PER_TICK, 3,
+              Count.PLAYERS, 1),
+          Map.of(
+              // A mob repaths every 15 ticks or so, which is roughly what vanilla does.
+              Chance.REQUEST, 0.07,
+              Chance.CANCEL, 0.02,
+              Chance.MOB_CHURN, 0.05,
+              Chance.CHUNK_CHURN, 0.0,
+              Chance.PLAYER_CHURN, 0.01,
+              Chance.STRAY_REQUEST, 0.0));
 
   /** Far more demand than the fleet can serve, so pre-send rejection has to hold the line. */
   public static final Scenario SATURATED =
-      DEFAULT.toBuilder().nodeCapacity(1).mobCount(40).requestChance(0.25).build();
+      DEFAULT.with(Count.NODE_CAPACITY, 1).with(Count.MOBS, 40).with(Chance.REQUEST, 0.25);
 
   /** Chunks come and go under the controller, so regions keep losing and regaining readability. */
-  public static final Scenario CHURN = DEFAULT.toBuilder().chunkChurnChance(0.08).build();
+  public static final Scenario CHURN = DEFAULT.with(Chance.CHUNK_CHURN, 0.08);
 
-  static final int MAX_NODE_CAPACITY = 12;
-  static final int MAX_SLOW_NODES = 2;
-  static final int MAX_MOB_COUNT = 48;
-  static final int MAX_MOB_CLASSES = 4;
-  static final int MAX_BLOCK_CHANGES_PER_TICK = 6;
-  static final int MAX_PLAYERS = 3;
-  static final double MAX_REQUEST_CHANCE = 0.3;
-  static final double MAX_CANCEL_CHANCE = 0.1;
-  static final double MAX_MOB_CHURN_CHANCE = 0.15;
-  static final double MAX_CHUNK_CHURN_CHANCE = 0.12;
-  static final double MAX_PLAYER_CHURN_CHANCE = 0.1;
-  static final double MAX_STRAY_REQUEST_CHANCE = 0.1;
-
-  /** One draw from the full range of each setting, including ones the fleet cannot serve. */
+  /** One draw from the full range of every setting, including ones the fleet cannot serve. */
   public static Scenario sample(Rng rng) {
-    return new Scenario(
-        1 + rng.nextInt(MAX_NODE_CAPACITY),
-        rng.nextInt(MAX_SLOW_NODES + 1),
-        rng.nextInt(MAX_MOB_COUNT + 1),
-        1 + rng.nextInt(MAX_MOB_CLASSES),
-        rng.nextInt(MAX_BLOCK_CHANGES_PER_TICK + 1),
-        rng.nextInt(MAX_PLAYERS + 1),
-        rng.nextDouble() * MAX_REQUEST_CHANCE,
-        rng.nextDouble() * MAX_CANCEL_CHANCE,
-        rng.nextDouble() * MAX_MOB_CHURN_CHANCE,
-        rng.nextDouble() * MAX_CHUNK_CHURN_CHANCE,
-        rng.nextDouble() * MAX_PLAYER_CHURN_CHANCE,
-        rng.nextDouble() * MAX_STRAY_REQUEST_CHANCE);
+    Map<Count, Integer> counts = new EnumMap<>(Count.class);
+    for (Count setting : Count.values()) {
+      counts.put(setting, setting.floor() + rng.nextInt(setting.ceiling() - setting.floor() + 1));
+    }
+    Map<Chance, Double> chances = new EnumMap<>(Chance.class);
+    for (Chance setting : Chance.values()) {
+      chances.put(setting, rng.nextDouble() * setting.ceiling());
+    }
+    return new Scenario(counts, chances);
+  }
+
+  public Scenario with(Count setting, int value) {
+    Map<Count, Integer> moved = new EnumMap<>(counts);
+    moved.put(setting, value);
+    return new Scenario(moved, chances);
+  }
+
+  public Scenario with(Chance setting, double value) {
+    Map<Chance, Double> moved = new EnumMap<>(chances);
+    moved.put(setting, value);
+    return new Scenario(counts, moved);
   }
 
   /**
@@ -91,130 +136,17 @@ public record Scenario(
    * which assumes one uniform capacity, has to meet a fleet that does not have one.
    */
   public int capacityOf(int nodeIndex) {
-    return nodeIndex < slowNodes ? Math.max(1, nodeCapacity / 4) : nodeCapacity;
+    int capacity = counts.get(Count.NODE_CAPACITY);
+    return nodeIndex < counts.get(Count.SLOW_NODES) ? Math.max(1, capacity / 4) : capacity;
   }
 
-  public Builder toBuilder() {
-    return new Builder(this);
-  }
-
-  /** Copy of a {@link Scenario} with one setting moved. */
-  public static final class Builder {
-
-    private int nodeCapacity;
-    private int slowNodes;
-    private int mobCount;
-    private int mobClassCount;
-    private int maxBlockChangesPerTick;
-    private int playerCount;
-    private double requestChance;
-    private double cancelChance;
-    private double mobChurnChance;
-    private double chunkChurnChance;
-    private double playerChurnChance;
-    private double strayRequestChance;
-
-    private Builder(Scenario from) {
-      nodeCapacity = from.nodeCapacity;
-      slowNodes = from.slowNodes;
-      mobCount = from.mobCount;
-      mobClassCount = from.mobClassCount;
-      maxBlockChangesPerTick = from.maxBlockChangesPerTick;
-      playerCount = from.playerCount;
-      requestChance = from.requestChance;
-      cancelChance = from.cancelChance;
-      mobChurnChance = from.mobChurnChance;
-      chunkChurnChance = from.chunkChurnChance;
-      playerChurnChance = from.playerChurnChance;
-      strayRequestChance = from.strayRequestChance;
+  /** Fixes iteration order at the enum's, and refuses a table with a setting left out. */
+  private static <K extends Enum<K>, V> Map<K, V> complete(Map<K, V> values, Class<K> type) {
+    EnumMap<K, V> copy = new EnumMap<>(type);
+    copy.putAll(values);
+    if (copy.size() != type.getEnumConstants().length) {
+      throw new IllegalArgumentException("every setting needs a value, got " + copy.keySet());
     }
-
-    public Builder nodeCapacity(int value) {
-      nodeCapacity = value;
-      return this;
-    }
-
-    public Builder slowNodes(int value) {
-      slowNodes = value;
-      return this;
-    }
-
-    public Builder mobCount(int value) {
-      mobCount = value;
-      return this;
-    }
-
-    public Builder mobClassCount(int value) {
-      mobClassCount = value;
-      return this;
-    }
-
-    public Builder maxBlockChangesPerTick(int value) {
-      maxBlockChangesPerTick = value;
-      return this;
-    }
-
-    public Builder playerCount(int value) {
-      playerCount = value;
-      return this;
-    }
-
-    public Builder requestChance(double value) {
-      requestChance = value;
-      return this;
-    }
-
-    public Builder cancelChance(double value) {
-      cancelChance = value;
-      return this;
-    }
-
-    public Builder mobChurnChance(double value) {
-      mobChurnChance = value;
-      return this;
-    }
-
-    public Builder chunkChurnChance(double value) {
-      chunkChurnChance = value;
-      return this;
-    }
-
-    public Builder playerChurnChance(double value) {
-      playerChurnChance = value;
-      return this;
-    }
-
-    public Builder strayRequestChance(double value) {
-      strayRequestChance = value;
-      return this;
-    }
-
-    public Scenario build() {
-      return new Scenario(
-          nodeCapacity,
-          slowNodes,
-          mobCount,
-          mobClassCount,
-          maxBlockChangesPerTick,
-          playerCount,
-          requestChance,
-          cancelChance,
-          mobChurnChance,
-          chunkChurnChance,
-          playerChurnChance,
-          strayRequestChance);
-    }
-  }
-
-  private static void requireCount(int count, String name) {
-    if (count < 0) {
-      throw new IllegalArgumentException(name + " must not be negative: " + count);
-    }
-  }
-
-  private static void requireChance(double chance, String name) {
-    if (chance < 0 || chance > 1) {
-      throw new IllegalArgumentException(name + " must be in [0, 1]: " + chance);
-    }
+    return Collections.unmodifiableMap(copy);
   }
 }
