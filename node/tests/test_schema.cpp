@@ -130,3 +130,39 @@ TEST(Schema, WorldFrameCarriesRunLengthEncodedSnapshot) {
             fbs::PathType::WATER);
   EXPECT_EQ(Decoded->runs()->Get(WaterOffset + 1)->length(), 1u);
 }
+
+TEST(Schema, PathRequestCarriesTraceContext) {
+  flatbuffers::FlatBufferBuilder Fbb;
+
+  const fbs::TraceContext Trace(0x0123456789abcdefULL, 0xfedcba9876543210ULL,
+                                0x1122334455667788ULL, /*flags=*/1);
+  const fbs::Vec3i Start(1, 64, 2);
+  const fbs::Vec3i Target(10, 64, 20);
+
+  fbs::PathRequestBuilder Builder(Fbb);
+  Builder.add_request_id(7);
+  Builder.add_mob_id(3);
+  Builder.add_class_id(1);
+  Builder.add_start(&Start);
+  Builder.add_target(&Target);
+  Builder.add_world_sequence(99);
+  Builder.add_trace(&Trace);
+  const auto Request = Builder.Finish();
+
+  const auto FrameOffset = fbs::CreateRequestFrame(
+      Fbb, fbs::RequestMsg::PathRequest, Request.Union());
+  Fbb.Finish(FrameOffset);
+
+  const auto *Frame =
+      flatbuffers::GetRoot<fbs::RequestFrame>(Fbb.GetBufferPointer());
+  ASSERT_EQ(Frame->body_type(), fbs::RequestMsg::PathRequest);
+
+  const auto *Decoded = Frame->body_as_PathRequest();
+  ASSERT_NE(Decoded, nullptr);
+  ASSERT_NE(Decoded->trace(), nullptr);
+  EXPECT_EQ(Decoded->trace()->trace_id_hi(), 0x0123456789abcdefULL);
+  EXPECT_EQ(Decoded->trace()->trace_id_lo(), 0xfedcba9876543210ULL);
+  EXPECT_EQ(Decoded->trace()->span_id(), 0x1122334455667788ULL);
+  EXPECT_EQ(Decoded->trace()->flags(), 1u);
+  EXPECT_EQ(Decoded->world_sequence(), 99u);
+}

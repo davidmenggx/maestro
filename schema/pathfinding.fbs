@@ -2,8 +2,16 @@ include "common.fbs";
 
 namespace maestro.fbs;
 
-// At-least-once and idempotent, keyed by `request_id`. `world_sequence` pins the
-// state the request is posed against, so the node can block on a stale snapshot.
+// W3C trace context of the span that issued the request.
+struct TraceContext {
+  trace_id_hi:ulong;
+  trace_id_lo:ulong;
+  span_id:ulong;
+  flags:ubyte;
+}
+
+// At-least-once and idempotent, keyed by `request_id`. `world_sequence` is the
+// stream position the request was posed against. The node never blocks for it.
 table PathRequest {
   request_id:ulong;
   mob_id:uint;
@@ -11,8 +19,11 @@ table PathRequest {
   start:Vec3i;
   target:Vec3i;
   world_sequence:ulong;
+  trace:TraceContext;
 }
 
+// Requests on UDP, so a batch is bounded by the datagram
+// size and a tick's requests may span several.
 table PathRequestBatch {
   requests:[PathRequest];
 }
@@ -20,6 +31,7 @@ table PathRequestBatch {
 // `nodes` is the Minecraft path (one block position per Node). Empty means no
 // path was found. `reached` mirrors `Path.reached`. `cost` is the malus-weighted
 // A* path cost. `computed_tick` drives last-write-wins within a tick.
+// `world_sequence` is the position the node actually answered against.
 table PathResponse {
   request_id:ulong;
   reached:bool;

@@ -18,6 +18,7 @@ import maestro.fbs.Ping;
 import maestro.fbs.RegionAssignment;
 import maestro.fbs.RequestFrame;
 import maestro.fbs.RequestMsg;
+import maestro.fbs.TraceContext;
 import maestro.fbs.Vec2i;
 import maestro.fbs.Vec3i;
 import maestro.fbs.WorldDelta;
@@ -149,6 +150,9 @@ public final class Frames {
       PathRequest.addStart(builder, vec3(builder, request.start()));
       PathRequest.addTarget(builder, vec3(builder, request.target()));
       PathRequest.addWorldSequence(builder, worldSequence);
+      // Minted from the request's span once the controller has a tracer; the harness traces
+      // nothing.
+      PathRequest.addTrace(builder, TraceContext.createTraceContext(builder, 0, 0, 0, 0));
       offsets[i] = PathRequest.endPathRequest(builder);
     }
     int requestsVector = PathRequestBatch.createRequestsVector(builder, offsets);

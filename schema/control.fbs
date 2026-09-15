@@ -10,20 +10,26 @@ namespace maestro.fbs;
 // the sequence the node last applied, so deltas continue
 // from the next one; 0 means the node's state was dropped
 // and a full snapshot follows.
+//
+// Ownership is controller-authoritative. `epoch` increments
+// each time the region changes owner.
 table RegionAssignment {
   region_id:uint;
   min_xz:Vec2i;
   max_xz:Vec2i;
   resume_from_sequence:ulong;
+  epoch:uint;
 }
 
-// A node's opening frame on a new connection: which region it still holds and
-// how far its world stream got. `last_sequence` is 0 when the node holds no
-// state, which is what a restarted process reports. The controller replies with
-// a `RegionAssignment` whose `resume_from_sequence` says which way it went.
+// A node's opening frame on a new connection: which region it still holds, at
+// which epoch, and how far its world stream got. `last_sequence` is 0 when the
+// node holds no state, which is what a restarted process reports. The
+// controller replies with a `RegionAssignment` whose `resume_from_sequence`
+// says which way it went.
 table Hello {
   region_id:uint;
   last_sequence:ulong;
+  epoch:uint;
 }
 
 table Ping {
@@ -38,7 +44,8 @@ table Pong {
 }
 
 // One union per channel per direction, so a reader dispatches on a single
-// root type once it knows which channel a frame arrived on.
+// root type once it knows which channel a frame arrived on. The world and
+// control channels are TCP, the request channel is UDP.
 union WorldMsg { WorldDelta, RegionAssignment, WorldSnapshot }
 table WorldFrame { body:WorldMsg; }
 

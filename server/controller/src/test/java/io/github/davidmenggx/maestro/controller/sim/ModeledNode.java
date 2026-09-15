@@ -70,6 +70,7 @@ public final class ModeledNode {
 
   private boolean assigned;
   private int regionId;
+  private int epoch;
   private int minX;
   private int minZ;
   private int size;
@@ -124,6 +125,7 @@ public final class ModeledNode {
   void kill() {
     assigned = false;
     regionId = 0;
+    epoch = 0;
     cells = new byte[0];
     lastSequence = 0;
     queue.clear();
@@ -140,7 +142,11 @@ public final class ModeledNode {
   void linkUp() {
     FlatBufferBuilder builder = new FlatBufferBuilder(64);
     int hello =
-        Hello.createHello(builder, hasState() ? regionId : 0, hasState() ? lastSequence : 0);
+        Hello.createHello(
+            builder,
+            hasState() ? regionId : 0,
+            hasState() ? lastSequence : 0,
+            hasState() ? epoch : 0);
     builder.finish(
         ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Hello, hello));
     transport.toController(id, Channel.CONTROL, ByteBuffer.wrap(builder.sizedByteArray()));
@@ -226,6 +232,7 @@ public final class ModeledNode {
     minZ = assignment.minXz().z();
     size = assignment.maxXz().x() - minX + 1;
     regionId = (int) assignment.regionId();
+    epoch = (int) assignment.epoch();
     assigned = true;
     if (resumeFrom == 0) {
       // The controller dropped this node's stream, so a snapshot is on its way.
