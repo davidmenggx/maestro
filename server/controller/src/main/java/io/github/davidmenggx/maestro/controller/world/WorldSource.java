@@ -29,4 +29,10 @@ public interface WorldSource {
    * WorldEvent.BlockChanged} would carry. Positions outside a loaded chunk read as {@code BLOCKED}.
    */
   byte pathTypeAt(int x, int y, int z);
+
+  /**
+   * Top of the block's collision shape in sixteenths, matching what a {@link
+   * WorldEvent.BlockChanged} would carry. Positions outside a loaded chunk read as a full cube.
+   */
+  int floorAt(int x, int y, int z);
 }

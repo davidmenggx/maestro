@@ -23,9 +23,11 @@ import maestro.fbs.ControlReplyMsg;
 import maestro.fbs.Hello;
 import maestro.fbs.MobClass;
 import maestro.fbs.MobClassTable;
+import maestro.fbs.PathNode;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
 import maestro.fbs.PathResponse;
+import maestro.fbs.PathType;
 import maestro.fbs.Ping;
 import maestro.fbs.Pong;
 import maestro.fbs.RegionAssignment;
@@ -33,7 +35,7 @@ import maestro.fbs.RequestFrame;
 import maestro.fbs.RequestMsg;
 import maestro.fbs.ResponseFrame;
 import maestro.fbs.ResponseMsg;
-import maestro.fbs.Vec3i;
+import maestro.fbs.Vec3s;
 import maestro.fbs.WorldDelta;
 import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
@@ -51,7 +53,8 @@ public final class ModeledNode {
 
   private static final int MAX_PATH_NODES = 32;
 
-  private record Pending(long requestId, int mobId, Pos start, Pos target, long worldSequence) {}
+  /** Positions are region-relative, as received. */
+  private record Pending(long requestId, Pos start, Pos target) {}
 
   private final Simulation sim;
   private final SimTransport transport;
@@ -69,14 +72,13 @@ public final class ModeledNode {
   private final List<String> violations = new ArrayList<>();
 
   private boolean assigned;
+  private long run;
   private int regionId;
-  private int epoch;
-  private int minX;
-  private int minZ;
   private int size;
   private int baseY;
   private int height;
   private byte[] cells = new byte[0];
+  private byte[] floors = new byte[0];
   private long lastSequence;
   private long duplicateRequests;
 
@@ -119,14 +121,22 @@ public final class ModeledNode {
 
   /** Region state only. Two nodes holding the same world agree on this whatever path they took. */
   public long stateDigest() {
-    return new Digest().mix(minX).mix(minZ).mix(size).mix(baseY).mix(height).mix(cells).value();
+    return new Digest()
+        .mix(regionId)
+        .mix(size)
+        .mix(baseY)
+        .mix(height)
+        .mix(cells)
+        .mix(floors)
+        .value();
   }
 
   void kill() {
     assigned = false;
+    run = 0;
     regionId = 0;
-    epoch = 0;
     cells = new byte[0];
+    floors = new byte[0];
     lastSequence = 0;
     queue.clear();
     queued.clear();
@@ -144,9 +154,9 @@ public final class ModeledNode {
     int hello =
         Hello.createHello(
             builder,
+            hasState() ? run : 0,
             hasState() ? regionId : 0,
-            hasState() ? lastSequence : 0,
-            hasState() ? epoch : 0);
+            hasState() ? lastSequence : 0);
     builder.finish(
         ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Hello, hello));
     transport.toController(id, Channel.CONTROL, ByteBuffer.wrap(builder.sizedByteArray()));
@@ -160,12 +170,12 @@ public final class ModeledNode {
     }
   }
 
-  void service(long tick) {
+  void service() {
     int served = 0;
     while (!queue.isEmpty() && served < capacityPerTick) {
       Pending pending = queue.poll();
       queued.remove(pending.requestId());
-      byte[] response = buildResponse(pending, tick);
+      byte[] response = buildResponse(pending);
       answered.put(pending.requestId(), response);
       transport.toController(id, Channel.REQUEST, ByteBuffer.wrap(response));
       served++;
@@ -222,21 +232,18 @@ public final class ModeledNode {
   }
 
   private void assign(RegionAssignment assignment) {
-    long resumeFrom = assignment.resumeFromSequence();
-    if (resumeFrom != 0 && (!hasState() || resumeFrom != lastSequence)) {
-      violations.add(
-          id + ": told to resume from " + resumeFrom + " but holds through " + lastSequence);
+    if (assignment.resume() && (!hasState() || assignment.run() != run)) {
+      violations.add(id + ": told to resume a stream it does not hold");
       return;
     }
-    minX = assignment.minXz().x();
-    minZ = assignment.minXz().z();
-    size = assignment.maxXz().x() - minX + 1;
+    run = assignment.run();
+    size = assignment.size();
     regionId = (int) assignment.regionId();
-    epoch = (int) assignment.epoch();
     assigned = true;
-    if (resumeFrom == 0) {
+    if (!assignment.resume()) {
       // The controller dropped this node's stream, so a snapshot is on its way.
       cells = new byte[0];
+      floors = new byte[0];
       lastSequence = 0;
     }
   }
@@ -266,6 +273,7 @@ public final class ModeledNode {
     baseY = snapshot.baseY();
     height = columnHeight;
     cells = new byte[columns * height];
+    floors = new byte[columns * height];
     int runIndex = 0;
     for (int column = 0; column < columns; column++) {
       int y = 0;
@@ -277,12 +285,14 @@ public final class ModeledNode {
           violations.add(id + ": snapshot run carries derived type " + PathTypes.name(type));
           return;
         }
+        byte floor = (byte) run.floor();
         for (int i = 0; i < run.length(); i++) {
           if (y >= height) {
             violations.add(id + ": column " + column + " overflows region height");
             return;
           }
-          cells[column * height + y++] = type;
+          cells[column * height + y] = type;
+          floors[column * height + y++] = floor;
         }
       }
       if (y != height) {
@@ -312,10 +322,11 @@ public final class ModeledNode {
         violations.add(id + ": delta cell carries derived type " + PathTypes.name(type));
         continue;
       }
-      Vec3i pos = cell.pos();
+      Vec3s pos = cell.pos();
       int index = index(pos.x(), pos.y(), pos.z());
       if (index >= 0) {
         cells[index] = type;
+        floors[index] = (byte) cell.floor();
       }
     }
   }
@@ -339,10 +350,8 @@ public final class ModeledNode {
     queue.add(
         new Pending(
             requestId,
-            (int) request.mobId(),
             new Pos(request.start().x(), request.start().y(), request.start().z()),
-            new Pos(request.target().x(), request.target().y(), request.target().z()),
-            request.worldSequence()));
+            new Pos(request.target().x(), request.target().y(), request.target().z())));
   }
 
   private void pong(Ping ping) {
@@ -352,7 +361,7 @@ public final class ModeledNode {
     transport.toController(id, Channel.CONTROL, ByteBuffer.wrap(builder.sizedByteArray()));
   }
 
-  private byte[] buildResponse(Pending pending, long tick) {
+  private byte[] buildResponse(Pending pending) {
     List<Pos> path = straightLine(pending.start(), pending.target());
     boolean reached = !path.isEmpty() && path.get(path.size() - 1).equals(pending.target());
 
@@ -360,7 +369,8 @@ public final class ModeledNode {
     PathResponse.startNodesVector(builder, path.size());
     for (int i = path.size() - 1; i >= 0; i--) {
       Pos node = path.get(i);
-      Vec3i.createVec3i(builder, node.x(), node.y(), node.z());
+      PathNode.createPathNode(
+          builder, (short) node.x(), (short) node.y(), (short) node.z(), PathType.WALKABLE);
     }
     int nodes = builder.endVector();
 
@@ -369,7 +379,6 @@ public final class ModeledNode {
     PathResponse.addReached(builder, reached);
     PathResponse.addNodes(builder, nodes);
     PathResponse.addCost(builder, path.size());
-    PathResponse.addComputedTick(builder, tick);
     PathResponse.addWorldSequence(builder, lastSequence);
     int response = PathResponse.endPathResponse(builder);
 
@@ -397,12 +406,10 @@ public final class ModeledNode {
   }
 
   private int index(int x, int y, int z) {
-    int dx = x - minX;
-    int dz = z - minZ;
     int dy = y - baseY;
-    if (dx < 0 || dx >= size || dz < 0 || dz >= size || dy < 0 || dy >= height) {
+    if (x < 0 || x >= size || z < 0 || z >= size || dy < 0 || dy >= height) {
       return -1;
     }
-    return (dx * size + dz) * height + dy;
+    return (x * size + z) * height + dy;
   }
 }

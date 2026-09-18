@@ -40,7 +40,12 @@ public final class ScriptedWorkload implements Workload {
       case WorldEvent.ChunkUnloaded unloaded ->
           world.unloadChunk(unloaded.chunkX(), unloaded.chunkZ());
       case WorldEvent.BlockChanged changed ->
-          world.set(changed.pos().x(), changed.pos().y(), changed.pos().z(), changed.pathType());
+          world.set(
+              changed.pos().x(),
+              changed.pos().y(),
+              changed.pos().z(),
+              changed.pathType(),
+              changed.floor());
       default -> {}
     }
   }

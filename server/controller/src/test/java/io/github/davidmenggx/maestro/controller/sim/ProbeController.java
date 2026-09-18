@@ -25,11 +25,11 @@ import java.util.function.Supplier;
 import maestro.fbs.ControlReplyFrame;
 import maestro.fbs.ControlReplyMsg;
 import maestro.fbs.Hello;
+import maestro.fbs.PathNode;
 import maestro.fbs.PathResponse;
 import maestro.fbs.Pong;
 import maestro.fbs.ResponseFrame;
 import maestro.fbs.ResponseMsg;
-import maestro.fbs.Vec3i;
 
 /**
  * Minimal controller used to prove the seams carry a real workload: it assigns regions, snapshots
@@ -54,7 +54,8 @@ public final class ProbeController implements WorldInput, Transport.Listener {
    */
   static final int RETENTION_FRAMES = 48;
 
-  private record Outstanding(int mobId, NodeId node, long issuedTick) {}
+  /** {@code target} is kept so the result can be handed back as a complete {@code Path}. */
+  private record Outstanding(int mobId, NodeId node, long issuedTick, Pos target) {}
 
   /**
    * What the controller tracks about one node. The connection is only part of it: the world stream
@@ -113,6 +114,9 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private final List<WorldEvent.BlockChanged> pendingCells = new ArrayList<>();
   private final List<String> selfViolations = new ArrayList<>();
 
+  /** Identifies this controller process to the fleet; nothing from another run is resumed. */
+  private final long run;
+
   private long nextRequestId = 1;
   private long pingSequence;
   private int requestsIssued;
@@ -127,6 +131,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     this.out = Objects.requireNonNull(out, "out");
     this.regions = Objects.requireNonNull(regions, "regions");
     this.nodeCapacity = nodeCapacity;
+    this.run = env.rng().nextLong();
     this.snapshotted = new boolean[regions.count()];
     // Seeded in region order, so anything that iterates the fleet does so the
     // same way whatever order the nodes first spoke in.
@@ -140,6 +145,10 @@ public final class ProbeController implements WorldInput, Transport.Listener {
 
   public int requestsIssued() {
     return requestsIssued;
+  }
+
+  public long run() {
+    return run;
   }
 
   public int outstandingCount() {
@@ -276,6 +285,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     long nodeSequence = hello.lastSequence();
     boolean resume =
         nodeSequence > 0
+            && hello.run() == run
             && region >= 0
             && hello.regionId() == region
             && snapshotted[region]
@@ -288,7 +298,6 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       state.nextToSend = nodeSequence + 1;
     } else {
       env.metrics().count("world.resnapshot", 1, "node", node.toString());
-      nodeSequence = 0;
       state.outbox.clear();
       state.evicted = 0;
       state.logBase = Long.MAX_VALUE;
@@ -302,7 +311,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     if (region >= 0) {
       // On the world channel, not the control one: the assignment has to arrive
       // ahead of the frames it applies to, and only one channel orders them.
-      send(node, Channel.WORLD, Frames.assignment(regions, region, nodeSequence));
+      send(node, Channel.WORLD, Frames.assignment(regions, region, resume, run));
     }
     // Ordered channel, because a request naming a class the node has not been
     // told about cannot be answered.
@@ -414,13 +423,13 @@ public final class ProbeController implements WorldInput, Transport.Listener {
 
     long requestId = nextRequestId++;
     requestByMob.put(mobId, requestId);
-    outstanding.put(requestId, new Outstanding(mobId, node, event.tick()));
+    outstanding.put(requestId, new Outstanding(mobId, node, event.tick(), event.target()));
     if (++state.inFlight > admitted) {
       selfViolations.add(
           node + " holds " + state.inFlight + " requests, past the admission bound of " + admitted);
     }
     state.requests.add(
-        new Frames.Request(requestId, mobId, classId, event.start(), event.target()));
+        new Frames.Request(requestId, classId, event.start(), event.target(), event.search()));
   }
 
   private void onPathResponse(PathResponse response) {
@@ -432,20 +441,26 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     }
     forget(request);
 
-    List<Pos> nodes = new ArrayList<>(response.nodesLength());
-    Vec3i scratch = new Vec3i();
+    // Positions come back relative to the region the request went to.
+    int region = regions.indexOf(request.node());
+    int originX = regions.minX(region);
+    int originZ = regions.minZ(region);
+    List<WorldOutput.Node> nodes = new ArrayList<>(response.nodesLength());
+    PathNode scratch = new PathNode();
     for (int i = 0; i < response.nodesLength(); i++) {
       response.nodes(scratch, i);
-      nodes.add(new Pos(scratch.x(), scratch.y(), scratch.z()));
+      Pos pos =
+          new Pos(scratch.pos().x() + originX, scratch.pos().y(), scratch.pos().z() + originZ);
+      nodes.add(new WorldOutput.Node(pos, (byte) scratch.type()));
     }
     env.metrics().record("path.latency.ticks", env.clock().tick() - request.issuedTick());
     out.pathComputed(
         new WorldOutput.PathResult(
             request.mobId(),
+            request.target(),
             response.reached(),
             nodes,
             response.cost(),
-            response.computedTick(),
             request.issuedTick()));
   }
 
@@ -519,7 +534,9 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       List<WorldEvent.BlockChanged> cells = state.cells;
       state.cells = new ArrayList<>();
       long sequence = ++state.lastSequence;
-      offload(entry.getKey(), sequence, "delta", () -> Frames.delta(sequence, cells));
+      int region = regions.indexOf(entry.getKey());
+      offload(
+          entry.getKey(), sequence, "delta", () -> Frames.delta(sequence, cells, regions, region));
     }
   }
 
@@ -535,11 +552,11 @@ public final class ProbeController implements WorldInput, Transport.Listener {
         continue;
       }
       NodeId node = entry.getKey();
-      long sequence = state.lastSequence;
+      int region = regions.indexOf(node);
       env.offload()
           .submit(
               "requests",
-              () -> Frames.requests(batch, sequence),
+              () -> Frames.requests(batch, regions, region),
               frame -> send(node, Channel.REQUEST, frame));
     }
   }

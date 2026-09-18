@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Set;
 import maestro.fbs.PathType;
 import org.junit.jupiter.api.Test;
@@ -15,6 +14,7 @@ import org.junit.jupiter.api.Test;
 class BoundaryContractTest {
 
   private static final Pos SOMEWHERE = new Pos(1, 2, 3);
+  private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256);
 
   /** The number of types `getPathTypeFromState` can return, pinned against vanilla. */
   private static final int PER_BLOCK_TYPES = 17;
@@ -62,24 +62,32 @@ class BoundaryContractTest {
   void aBlockChangeCarryingADerivedTypeIsRejected() {
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathType.WALKABLE));
+        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathType.WALKABLE, 16));
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathTypes.count()));
+        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathTypes.count(), 16));
     assertThrows(
-        IllegalArgumentException.class, () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) -1));
+        IllegalArgumentException.class,
+        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) -1, 16));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathType.BLOCKED, 256));
   }
 
   @Test
   void eventsRejectImpossibleFields() {
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldEvent.PathRequested(-1, 1, SOMEWHERE, SOMEWHERE));
+        () -> new WorldEvent.PathRequested(-1, 1, SOMEWHERE, SOMEWHERE, SEARCH));
     assertThrows(
         IllegalArgumentException.class,
         () -> new WorldEvent.MobSpawned(0, 1, (short) -1, SOMEWHERE));
     assertThrows(
-        NullPointerException.class, () -> new WorldEvent.PathRequested(0, 1, null, SOMEWHERE));
+        NullPointerException.class,
+        () -> new WorldEvent.PathRequested(0, 1, null, SOMEWHERE, SEARCH));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(-1, 16f, 256));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 0f, 256));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 16f, 0));
   }
 
   @Test
@@ -102,10 +110,11 @@ class BoundaryContractTest {
   }
 
   @Test
-  void aResultCannotPredateItsRequest() {
+  void aPathNodeCarriesAKnownPathType() {
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldOutput.PathResult(1, true, List.of(), 1f, 5, 9));
+        () -> new WorldOutput.Node(SOMEWHERE, (byte) PathTypes.count()));
+    assertThrows(IllegalArgumentException.class, () -> new WorldOutput.Node(SOMEWHERE, (byte) -1));
   }
 
   private static MobClass profile(float[] malus) {
@@ -113,7 +122,6 @@ class BoundaryContractTest {
         (short) 1,
         new MobClass.Shape(0.6f, 1.9f, 0.5f),
         new MobClass.Abilities(true, false, false, false),
-        malus,
-        16);
+        malus);
   }
 }

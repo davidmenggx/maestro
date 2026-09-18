@@ -10,8 +10,7 @@ import java.util.Objects;
  * <p>{@code malus} is indexed by {@code PathType} ordinal and covers every ordinal, including the
  * ones a cell can never carry, because the node resolves those before charging a malus.
  */
-public record MobClass(
-    short classId, Shape shape, Abilities abilities, float[] malus, int maxFollowRange) {
+public record MobClass(short classId, Shape shape, Abilities abilities, float[] malus) {
 
   /** Collision box, and the height the mob clears without jumping. */
   public record Shape(float width, float height, float maxUpStep) {
@@ -33,9 +32,6 @@ public record MobClass(
   public MobClass {
     if (classId < 0) {
       throw new IllegalArgumentException("class id must not be negative: " + classId);
-    }
-    if (maxFollowRange <= 0) {
-      throw new IllegalArgumentException("follow range must be positive: " + maxFollowRange);
     }
     Objects.requireNonNull(shape, "shape");
     Objects.requireNonNull(abilities, "abilities");

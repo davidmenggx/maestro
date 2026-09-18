@@ -18,9 +18,8 @@ import maestro.fbs.Ping;
 import maestro.fbs.RegionAssignment;
 import maestro.fbs.RequestFrame;
 import maestro.fbs.RequestMsg;
-import maestro.fbs.TraceContext;
 import maestro.fbs.Vec2i;
-import maestro.fbs.Vec3i;
+import maestro.fbs.Vec3s;
 import maestro.fbs.WorldDelta;
 import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
@@ -36,11 +35,13 @@ public final class Frames {
   private Frames() {}
 
   /** One path request as the controller holds it until the tick is flushed. */
-  public record Request(long requestId, int mobId, short classId, Pos start, Pos target) {}
+  public record Request(
+      long requestId, short classId, Pos start, Pos target, WorldEvent.Search search) {}
 
   /**
-   * A region's columns, run-length encoded. Runs are packed one per int as {@code (length << 8) |
-   * pathType}, which keeps a full-height region's worth of runs out of the allocator.
+   * A region's columns, run-length encoded. Runs are packed one per int as {@code (length << 16) |
+   * (floor << 8) | pathType}, which keeps a full-height region's worth of runs out of the
+   * allocator.
    */
   public static final class RegionRuns {
 
@@ -54,11 +55,11 @@ public final class Frames {
       this.packedRuns = new int[columns * 2];
     }
 
-    private void add(int length, byte pathType) {
+    private void add(int length, int cell) {
       if (runCount == packedRuns.length) {
         packedRuns = Arrays.copyOf(packedRuns, runCount * 2);
       }
-      packedRuns[runCount++] = (length << 8) | (pathType & 0xFF);
+      packedRuns[runCount++] = (length << 16) | cell;
     }
   }
 
@@ -77,21 +78,24 @@ public final class Frames {
       for (int dz = 0; dz < regionSize; dz++) {
         int closedRuns = 0;
         int runLength = 0;
-        byte runType = 0;
+        int runCell = 0;
         for (int dy = 0; dy < height; dy++) {
-          byte type = world.pathTypeAt(minX + dx, minY + dy, minZ + dz);
-          if (runLength > 0 && type == runType) {
+          int x = minX + dx;
+          int y = minY + dy;
+          int z = minZ + dz;
+          int cell = (world.floorAt(x, y, z) << 8) | (world.pathTypeAt(x, y, z) & 0xFF);
+          if (runLength > 0 && cell == runCell) {
             runLength++;
             continue;
           }
           if (runLength > 0) {
-            runs.add(runLength, runType);
+            runs.add(runLength, runCell);
             closedRuns++;
           }
-          runType = type;
+          runCell = cell;
           runLength = 1;
         }
-        runs.add(runLength, runType);
+        runs.add(runLength, runCell);
         runs.runsPerColumn[dx * regionSize + dz] = closedRuns + 1;
       }
     }
@@ -104,7 +108,7 @@ public final class Frames {
     WorldSnapshot.startRunsVector(builder, runs.runCount);
     for (int i = runs.runCount - 1; i >= 0; i--) {
       int run = runs.packedRuns[i];
-      CellRun.createCellRun(builder, run >>> 8, run & 0xFF);
+      CellRun.createCellRun(builder, run >>> 16, run & 0xFF, (run >>> 8) & 0xFF);
     }
     int runsVector = builder.endVector();
 
@@ -124,13 +128,23 @@ public final class Frames {
     return snapshot(sequence, world.minY(), readRegion(world, regions, region));
   }
 
-  public static byte[] delta(long sequence, List<WorldEvent.BlockChanged> cells) {
+  /** Cell positions go out relative to the region's origin, as every position on the wire does. */
+  public static byte[] delta(
+      long sequence, List<WorldEvent.BlockChanged> cells, RegionMap regions, int region) {
+    int originX = regions.minX(region);
+    int originZ = regions.minZ(region);
     FlatBufferBuilder builder = new FlatBufferBuilder(256);
     WorldDelta.startCellsVector(builder, cells.size());
     for (int i = cells.size() - 1; i >= 0; i--) {
       WorldEvent.BlockChanged cell = cells.get(i);
+      Pos pos = cell.pos();
       CellDelta.createCellDelta(
-          builder, cell.pos().x(), cell.pos().y(), cell.pos().z(), cell.pathType());
+          builder,
+          (short) (pos.x() - originX),
+          (short) pos.y(),
+          (short) (pos.z() - originZ),
+          cell.pathType(),
+          cell.floor());
     }
     int vector = builder.endVector();
     int delta = WorldDelta.createWorldDelta(builder, sequence, vector);
@@ -138,21 +152,22 @@ public final class Frames {
     return builder.sizedByteArray();
   }
 
-  public static byte[] requests(List<Request> batch, long worldSequence) {
+  public static byte[] requests(List<Request> batch, RegionMap regions, int region) {
+    int originX = regions.minX(region);
+    int originZ = regions.minZ(region);
     FlatBufferBuilder builder = new FlatBufferBuilder(512);
     int[] offsets = new int[batch.size()];
     for (int i = 0; i < batch.size(); i++) {
       Request request = batch.get(i);
+      WorldEvent.Search search = request.search();
       PathRequest.startPathRequest(builder);
       PathRequest.addRequestId(builder, request.requestId());
-      PathRequest.addMobId(builder, request.mobId());
       PathRequest.addClassId(builder, request.classId());
-      PathRequest.addStart(builder, vec3(builder, request.start()));
-      PathRequest.addTarget(builder, vec3(builder, request.target()));
-      PathRequest.addWorldSequence(builder, worldSequence);
-      // Minted from the request's span once the controller has a tracer; the harness traces
-      // nothing.
-      PathRequest.addTrace(builder, TraceContext.createTraceContext(builder, 0, 0, 0, 0));
+      PathRequest.addStart(builder, vec3(builder, request.start(), originX, originZ));
+      PathRequest.addTarget(builder, vec3(builder, request.target(), originX, originZ));
+      PathRequest.addReachRange(builder, search.reachRange());
+      PathRequest.addMaxPathLength(builder, search.maxPathLength());
+      PathRequest.addMaxVisitedNodes(builder, search.maxVisitedNodes());
       offsets[i] = PathRequest.endPathRequest(builder);
     }
     int requestsVector = PathRequestBatch.createRequestsVector(builder, offsets);
@@ -164,18 +179,15 @@ public final class Frames {
     return builder.sizedByteArray();
   }
 
-  public static byte[] assignment(RegionMap regions, int region, long resumeFrom) {
+  public static byte[] assignment(RegionMap regions, int region, boolean resume, long run) {
     FlatBufferBuilder builder = new FlatBufferBuilder(128);
-    int regionSize = regions.topology().regionSize();
     RegionAssignment.startRegionAssignment(builder);
+    RegionAssignment.addRun(builder, run);
     RegionAssignment.addRegionId(builder, region);
     RegionAssignment.addMinXz(
         builder, Vec2i.createVec2i(builder, regions.minX(region), regions.minZ(region)));
-    RegionAssignment.addMaxXz(
-        builder,
-        Vec2i.createVec2i(
-            builder, regions.minX(region) + regionSize - 1, regions.minZ(region) + regionSize - 1));
-    RegionAssignment.addResumeFromSequence(builder, resumeFrom);
+    RegionAssignment.addSize(builder, regions.topology().regionSize());
+    RegionAssignment.addResume(builder, resume);
     int assignment = RegionAssignment.endRegionAssignment(builder);
     builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.RegionAssignment, assignment));
     return builder.sizedByteArray();
@@ -219,11 +231,11 @@ public final class Frames {
     maestro.fbs.MobClass.addCanOpenDoors(builder, abilities.canOpenDoors());
     maestro.fbs.MobClass.addCanFloat(builder, abilities.canFloat());
     maestro.fbs.MobClass.addCanWalkOverFences(builder, abilities.canWalkOverFences());
-    maestro.fbs.MobClass.addMaxFollowRange(builder, profile.maxFollowRange());
     return maestro.fbs.MobClass.endMobClass(builder);
   }
 
-  private static int vec3(FlatBufferBuilder builder, Pos pos) {
-    return Vec3i.createVec3i(builder, pos.x(), pos.y(), pos.z());
+  private static int vec3(FlatBufferBuilder builder, Pos pos, int originX, int originZ) {
+    return Vec3s.createVec3s(
+        builder, (short) (pos.x() - originX), (short) pos.y(), (short) (pos.z() - originZ));
   }
 }

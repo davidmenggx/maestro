@@ -5,31 +5,29 @@ include "pathfinding.fbs";
 
 namespace maestro.fbs;
 
-// Assigns a square, full-height region. `region_id` is a
-// server-assigned monotonic id. `resume_from_sequence` is
-// the sequence the node last applied, so deltas continue
-// from the next one; 0 means the node's state was dropped
-// and a full snapshot follows.
-//
-// Ownership is controller-authoritative. `epoch` increments
-// each time the region changes owner.
+// Assigns a square, full-height area: the region plus its halo, since the
+// node has no use for the boundary between them. `run` identifies the
+// controller process; region ids and sequence numbers are only meaningful
+// within one. `resume` means the node keeps what it holds and deltas continue
+// after the `last_sequence` it reported; otherwise its state is dropped and a
+// full snapshot follows.
 table RegionAssignment {
+  run:ulong;
   region_id:uint;
   min_xz:Vec2i;
-  max_xz:Vec2i;
-  resume_from_sequence:ulong;
-  epoch:uint;
+  size:ushort;
+  resume:bool;
 }
 
-// A node's opening frame on a new connection: which region it still holds, at
-// which epoch, and how far its world stream got. `last_sequence` is 0 when the
-// node holds no state, which is what a restarted process reports. The
-// controller replies with a `RegionAssignment` whose `resume_from_sequence`
-// says which way it went.
+// A node's opening frame on a new connection: which region it still holds,
+// from which controller run, and how far its world stream got. `last_sequence`
+// is 0 when the node holds no state, which is what a restarted process
+// reports. The controller replies with a `RegionAssignment` that says whether
+// the stream resumes.
 table Hello {
+  run:ulong;
   region_id:uint;
   last_sequence:ulong;
-  epoch:uint;
 }
 
 table Ping {

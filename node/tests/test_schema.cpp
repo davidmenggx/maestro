@@ -23,8 +23,9 @@ TEST(Schema, WorldFrameCarriesWorldDelta) {
 
   // Cells carry per-block types only, so no `WALKABLE` or `*_IN_NEIGHBOR` here.
   const fbs::CellDelta Cells[] = {
-      fbs::CellDelta(fbs::Vec3i(1, 2, 3), fbs::PathType::OPEN),
-      fbs::CellDelta(fbs::Vec3i(4, 5, 6), fbs::PathType::WATER),
+      fbs::CellDelta(fbs::Vec3s(1, 2, 3), fbs::PathType::OPEN, /*floor=*/0),
+      fbs::CellDelta(fbs::Vec3s(4, 5, 6), fbs::PathType::BLOCKED,
+                     /*floor=*/8),
   };
   const auto CellsVec = Fbb.CreateVectorOfStructs(Cells, std::size(Cells));
 
@@ -49,6 +50,7 @@ TEST(Schema, WorldFrameCarriesWorldDelta) {
   EXPECT_EQ(Decoded->cells()->Get(0)->node_type(), fbs::PathType::OPEN);
   EXPECT_EQ(Decoded->cells()->Get(0)->pos().x(), 1);
   EXPECT_EQ(Decoded->cells()->Get(1)->pos().z(), 6);
+  EXPECT_EQ(Decoded->cells()->Get(1)->floor(), 8u);
 }
 
 TEST(Schema, WorldFrameCarriesRunLengthEncodedSnapshot) {
@@ -58,26 +60,29 @@ TEST(Schema, WorldFrameCarriesRunLengthEncodedSnapshot) {
 
   flatbuffers::FlatBufferBuilder Fbb;
 
-  // A 2x2 region of superflat columns, indexed `x * Width + z`. The column at
-  // (1, 0) has a water cell on the surface, so run counts differ per column and
-  // the reader cannot assume a fixed stride into `runs`.
-  const uint16_t RunCounts[] = {2, 2, 3, 2};
+  // A 2x2 region of superflat columns, indexed `x * Width + z`. Column (0, 1)
+  // is topped by a slab, which is the same type as the blocks below it and
+  // still has to be its own run. Column (1, 0) has a water cell on the surface.
+  // Run counts therefore differ per column and the reader cannot assume a
+  // fixed stride into `runs`.
+  const uint16_t RunCounts[] = {2, 3, 3, 2};
   static_assert(std::size(RunCounts) == Columns);
   const auto RunCountsVec = Fbb.CreateVector(RunCounts, std::size(RunCounts));
 
   const fbs::CellRun Runs[] = {
-      fbs::CellRun(4, fbs::PathType::BLOCKED),
-      fbs::CellRun(380, fbs::PathType::OPEN),
+      fbs::CellRun(4, fbs::PathType::BLOCKED, 16),
+      fbs::CellRun(380, fbs::PathType::OPEN, 0),
 
-      fbs::CellRun(4, fbs::PathType::BLOCKED),
-      fbs::CellRun(380, fbs::PathType::OPEN),
+      fbs::CellRun(3, fbs::PathType::BLOCKED, 16),
+      fbs::CellRun(1, fbs::PathType::BLOCKED, 8),
+      fbs::CellRun(380, fbs::PathType::OPEN, 0),
 
-      fbs::CellRun(4, fbs::PathType::BLOCKED),
-      fbs::CellRun(1, fbs::PathType::WATER),
-      fbs::CellRun(379, fbs::PathType::OPEN),
+      fbs::CellRun(4, fbs::PathType::BLOCKED, 16),
+      fbs::CellRun(1, fbs::PathType::WATER, 0),
+      fbs::CellRun(379, fbs::PathType::OPEN, 0),
 
-      fbs::CellRun(4, fbs::PathType::BLOCKED),
-      fbs::CellRun(380, fbs::PathType::OPEN),
+      fbs::CellRun(4, fbs::PathType::BLOCKED, 16),
+      fbs::CellRun(380, fbs::PathType::OPEN, 0),
   };
   const auto RunsVec = Fbb.CreateVectorOfStructs(Runs, std::size(Runs));
 
@@ -119,7 +124,17 @@ TEST(Schema, WorldFrameCarriesRunLengthEncodedSnapshot) {
   }
   EXPECT_EQ(Offset, Decoded->runs()->size());
 
-  // Column (1, 0) is the odd one out: index 2, three runs, water in the middle.
+  // Column (0, 1) is index 1: the slab run has the same type as the run below
+  // and a different floor.
+  const unsigned SlabColumn = 0 * Width + 1;
+  unsigned SlabOffset = Decoded->run_counts()->Get(0);
+  EXPECT_EQ(Decoded->run_counts()->Get(SlabColumn), 3u);
+  EXPECT_EQ(Decoded->runs()->Get(SlabOffset)->node_type(),
+            Decoded->runs()->Get(SlabOffset + 1)->node_type());
+  EXPECT_EQ(Decoded->runs()->Get(SlabOffset)->floor(), 16u);
+  EXPECT_EQ(Decoded->runs()->Get(SlabOffset + 1)->floor(), 8u);
+
+  // Column (1, 0) is index 2: water in the middle.
   const unsigned WaterColumn = 1 * Width + 0;
   unsigned WaterOffset = 0;
   for (unsigned Column = 0; Column < WaterColumn; ++Column) {
@@ -129,40 +144,4 @@ TEST(Schema, WorldFrameCarriesRunLengthEncodedSnapshot) {
   EXPECT_EQ(Decoded->runs()->Get(WaterOffset + 1)->node_type(),
             fbs::PathType::WATER);
   EXPECT_EQ(Decoded->runs()->Get(WaterOffset + 1)->length(), 1u);
-}
-
-TEST(Schema, PathRequestCarriesTraceContext) {
-  flatbuffers::FlatBufferBuilder Fbb;
-
-  const fbs::TraceContext Trace(0x0123456789abcdefULL, 0xfedcba9876543210ULL,
-                                0x1122334455667788ULL, /*flags=*/1);
-  const fbs::Vec3i Start(1, 64, 2);
-  const fbs::Vec3i Target(10, 64, 20);
-
-  fbs::PathRequestBuilder Builder(Fbb);
-  Builder.add_request_id(7);
-  Builder.add_mob_id(3);
-  Builder.add_class_id(1);
-  Builder.add_start(&Start);
-  Builder.add_target(&Target);
-  Builder.add_world_sequence(99);
-  Builder.add_trace(&Trace);
-  const auto Request = Builder.Finish();
-
-  const auto FrameOffset = fbs::CreateRequestFrame(
-      Fbb, fbs::RequestMsg::PathRequest, Request.Union());
-  Fbb.Finish(FrameOffset);
-
-  const auto *Frame =
-      flatbuffers::GetRoot<fbs::RequestFrame>(Fbb.GetBufferPointer());
-  ASSERT_EQ(Frame->body_type(), fbs::RequestMsg::PathRequest);
-
-  const auto *Decoded = Frame->body_as_PathRequest();
-  ASSERT_NE(Decoded, nullptr);
-  ASSERT_NE(Decoded->trace(), nullptr);
-  EXPECT_EQ(Decoded->trace()->trace_id_hi(), 0x0123456789abcdefULL);
-  EXPECT_EQ(Decoded->trace()->trace_id_lo(), 0xfedcba9876543210ULL);
-  EXPECT_EQ(Decoded->trace()->span_id(), 0x1122334455667788ULL);
-  EXPECT_EQ(Decoded->trace()->flags(), 1u);
-  EXPECT_EQ(Decoded->world_sequence(), 99u);
 }

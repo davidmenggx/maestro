@@ -24,12 +24,13 @@ class WorldBoundaryTest {
   private static final int MOB = 1;
   private static final Pos HERE = new Pos(4, 40, 4);
   private static final Pos THERE = new Pos(20, 40, 20);
+  private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256);
 
   @Test
   void aMobRemovedWhileWaitingIsDroppedExactlyOnce() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
     script.add(new WorldEvent.MobSpawned(0, MOB, MOB_CLASS, HERE));
-    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE, SEARCH));
     script.add(new WorldEvent.MobRemoved(3, MOB));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
@@ -43,7 +44,7 @@ class WorldBoundaryTest {
   @Test
   void aRequestForAnUnknownMobIsDropped() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
-    script.add(new WorldEvent.PathRequested(2, 99, HERE, THERE));
+    script.add(new WorldEvent.PathRequested(2, 99, HERE, THERE, SEARCH));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
 
@@ -56,8 +57,8 @@ class WorldBoundaryTest {
   void aSecondRequestForOneMobSupersedesTheFirst() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
     script.add(new WorldEvent.MobSpawned(0, MOB, MOB_CLASS, HERE));
-    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE));
-    script.add(new WorldEvent.PathRequested(3, MOB, HERE, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE, SEARCH));
+    script.add(new WorldEvent.PathRequested(3, MOB, HERE, HERE, SEARCH));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
 
@@ -72,7 +73,7 @@ class WorldBoundaryTest {
     // No chunks load, so no region is ever snapshottable and no node can answer.
     List<WorldEvent> script = new ArrayList<>();
     script.add(new WorldEvent.MobSpawned(0, MOB, MOB_CLASS, HERE));
-    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE, SEARCH));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
 
@@ -88,7 +89,7 @@ class WorldBoundaryTest {
     // The change lands while the region is still unreadable, so it must not be
     // sent as a delta: the snapshot that follows already contains it.
     List<WorldEvent> script = new ArrayList<>();
-    script.add(new WorldEvent.BlockChanged(2, new Pos(4, 40, 4), (byte) PathType.WATER));
+    script.add(new WorldEvent.BlockChanged(2, new Pos(4, 40, 4), (byte) PathType.WATER, 0));
     script.addAll(chunkLoads(5));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
@@ -105,7 +106,7 @@ class WorldBoundaryTest {
   void aCanceledRequestIsDroppedRatherThanAnswered() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
     script.add(new WorldEvent.MobSpawned(0, MOB, MOB_CLASS, HERE));
-    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE, SEARCH));
     script.add(new WorldEvent.PathCanceled(3, MOB));
     // A cancel for a mob with nothing outstanding changes nothing.
     script.add(new WorldEvent.PathCanceled(8, MOB));
@@ -122,11 +123,11 @@ class WorldBoundaryTest {
   void anUnloadedChunkStopsItsRegionUntilTheChunkReturns() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
     script.add(new WorldEvent.MobSpawned(0, MOB, MOB_CLASS, HERE));
-    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE, SEARCH));
     script.add(new WorldEvent.ChunkUnloaded(6, Chunks.of(HERE.x()), Chunks.of(HERE.z())));
-    script.add(new WorldEvent.PathRequested(8, MOB, HERE, THERE));
+    script.add(new WorldEvent.PathRequested(8, MOB, HERE, THERE, SEARCH));
     script.add(new WorldEvent.ChunkLoaded(10, Chunks.of(HERE.x()), Chunks.of(HERE.z())));
-    script.add(new WorldEvent.PathRequested(14, MOB, HERE, THERE));
+    script.add(new WorldEvent.PathRequested(14, MOB, HERE, THERE, SEARCH));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
 
@@ -145,7 +146,7 @@ class WorldBoundaryTest {
   void aRequestNamingAnUnregisteredClassIsCaughtByTheNode() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
     script.add(new WorldEvent.MobSpawned(0, MOB, (short) 99, HERE));
-    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, HERE, THERE, SEARCH));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
 

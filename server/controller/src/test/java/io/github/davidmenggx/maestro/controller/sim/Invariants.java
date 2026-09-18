@@ -121,7 +121,9 @@ public final class Invariants {
     // Built outside the fleet, so comparing does not change what `sim.nodes()` holds.
     ModeledNode fresh =
         new ModeledNode(run.sim, run.sim.transport(), NodeId.of(FRESH_NODE + region), 1);
-    fresh.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(run.regions, region, 0)));
+    fresh.receive(
+        Channel.WORLD,
+        ByteBuffer.wrap(Frames.assignment(run.regions, region, false, run.controller.run())));
     fresh.receive(
         Channel.WORLD, ByteBuffer.wrap(Frames.snapshot(run.world, run.regions, region, 1)));
 

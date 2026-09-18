@@ -32,6 +32,11 @@ public final class SyntheticWorkload implements Workload {
   /** How far outside the region grid a stray request starts. */
   private static final int MAX_STRAY_DISTANCE = 8;
 
+  /** Follow ranges vanilla mobs actually have run from 16 to about 48 blocks. */
+  private static final int MIN_PATH_LENGTH = 16;
+
+  private static final int MAX_EXTRA_PATH_LENGTH = 32;
+
   private final SimWorld world;
   private final Rng rng;
   private final long quietAfter;
@@ -128,8 +133,9 @@ public final class SyntheticWorkload implements Workload {
               world.minY(),
               world.minY() + world.height() - 1);
       byte type = PathTypes.perBlock(rng.nextInt(PathTypes.perBlockCount()));
-      world.set(x, y, z, type);
-      input.accept(new WorldEvent.BlockChanged(tick, new Pos(x, y, z), type));
+      int floor = SimWorld.floorFor(type, rng);
+      world.set(x, y, z, type, floor);
+      input.accept(new WorldEvent.BlockChanged(tick, new Pos(x, y, z), type, floor));
     }
   }
 
@@ -164,8 +170,19 @@ public final class SyntheticWorkload implements Workload {
           rng.nextDouble() < scenario.chances().get(Chance.STRAY_REQUEST)
               ? outsideTheGrid()
               : mob.getValue();
-      input.accept(new WorldEvent.PathRequested(tick, mob.getKey(), start, randomStanding()));
+      input.accept(
+          new WorldEvent.PathRequested(
+              tick, mob.getKey(), start, randomStanding(), randomSearch()));
     }
+  }
+
+  /**
+   * Vanilla asks with a reach range of 0 or 1 and a path length bound of the mob's follow range,
+   * which the node visit budget is sixteen times.
+   */
+  private WorldEvent.Search randomSearch() {
+    float maxPathLength = MIN_PATH_LENGTH + rng.nextInt(MAX_EXTRA_PATH_LENGTH + 1);
+    return new WorldEvent.Search(rng.nextInt(2), maxPathLength, (int) (maxPathLength * 16));
   }
 
   /** The chosen mob may have nothing outstanding, in which case the cancel must do nothing. */

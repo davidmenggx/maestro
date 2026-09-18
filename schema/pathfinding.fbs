@@ -2,42 +2,59 @@ include "common.fbs";
 
 namespace maestro.fbs;
 
-// W3C trace context of the span that issued the request.
-struct TraceContext {
-  trace_id_hi:ulong;
-  trace_id_lo:ulong;
-  span_id:ulong;
-  flags:ubyte;
+// Which search answers a request. `VANILLA` reproduces `PathFinder` and
+// `WalkNodeEvaluator` decision for decision; any other entry is an
+// alternative measured against it on identical inputs.
+enum Pathfinder : ubyte {
+  VANILLA
 }
 
-// At-least-once and idempotent, keyed by `request_id`. `world_sequence` is the
-// stream position the request was posed against. The node never blocks for it.
+// At-least-once and idempotent, keyed by `request_id`. Carries exactly the
+// inputs of `PathFinder.findPath` that vary per call: `start` is the node
+// `WalkNodeEvaluator.getStart` resolved on the server (it reads live entity
+// state), `reach_range` is the Manhattan distance that counts as arrival, and
+// `max_path_length` and `max_visited_nodes` (already multiplied) bound the
+// search. Everything else about the mob comes from its `MobClass`.
+//
+// Tracing carries nothing. A request's trace id is `(run, mix(request_id))`
+// and its span id is `request_id`, where `run` arrives with the
+// `RegionAssignment` and `mix` is the splitmix64 finalizer
+//   z ^= z >> 30; z *= 0xbf58476d1ce4e5b9;
+//   z ^= z >> 27; z *= 0x94d049bb133111eb;
+//   z ^= z >> 31;
+// so both sides name one trace and ratio sampling still sees random bits.
 table PathRequest {
   request_id:ulong;
-  mob_id:uint;
   class_id:ushort;
-  start:Vec3i;
-  target:Vec3i;
-  world_sequence:ulong;
-  trace:TraceContext;
+  start:Vec3s;
+  target:Vec3s;
+  reach_range:ubyte;
+  max_path_length:float;
+  max_visited_nodes:ushort;
+  pathfinder:Pathfinder = VANILLA;
 }
 
-// Requests on UDP, so a batch is bounded by the datagram
-// size and a tick's requests may span several.
+// Requests ride UDP, one frame per datagram, so a batch is bounded by the
+// datagram size and a tick's requests may span several.
 table PathRequestBatch {
   requests:[PathRequest];
 }
 
-// `nodes` is the Minecraft path (one block position per Node). Empty means no
-// path was found. `reached` mirrors `Path.reached`. `cost` is the malus-weighted
-// A* path cost. `computed_tick` drives last-write-wins within a tick.
-// `world_sequence` is the position the node actually answered against.
+// One node of a Minecraft `Path`. `type` is the resolved `PathType`, which
+// the navigation reads while following the path.
+struct PathNode {
+  pos:Vec3s;
+  type:PathType;
+}
+
+// Empty `nodes` means no path was found. `reached` mirrors `Path.reached`.
+// `cost` is the malus-weighted A* cost of the end node. `world_sequence` is
+// the stream position the node actually answered against.
 table PathResponse {
   request_id:ulong;
   reached:bool;
-  nodes:[Vec3i];
+  nodes:[PathNode];
   cost:float;
-  computed_tick:ulong;
   world_sequence:ulong;
 }
 

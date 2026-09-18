@@ -30,15 +30,19 @@ public sealed interface WorldEvent {
 
   /**
    * {@code pathType} is {@code getPathTypeFromState} for the new block state: the per-block layer
-   * only, as an ordinal of the shared {@code PathType} enum. Exactly one event per block change.
+   * only, as an ordinal of the shared {@code PathType} enum. {@code floor} is the top of the
+   * block's collision shape in sixteenths, 0 when it has none. Exactly one event per block change.
    */
-  record BlockChanged(long tick, Pos pos, byte pathType) implements WorldEvent {
+  record BlockChanged(long tick, Pos pos, byte pathType, int floor) implements WorldEvent {
     public BlockChanged {
       requireTick(tick);
       Objects.requireNonNull(pos, "pos");
       if (!PathTypes.isPerBlock(pathType)) {
         throw new IllegalArgumentException(
             "a cell carries per-block path types only, got " + PathTypes.name(pathType));
+      }
+      if (floor < 0 || floor > Cells.MAX_FLOOR) {
+        throw new IllegalArgumentException("floor is sixteenths of a block in a byte: " + floor);
       }
     }
   }
@@ -75,14 +79,35 @@ public sealed interface WorldEvent {
   }
 
   /**
-   * One A* request. The controller mints the request id, so a repeat for the same mob supersedes
+   * The inputs of one {@code PathFinder.findPath} call that vary per call rather than per mob: how
+   * close counts as arrival, and the two bounds on the search.
+   */
+  record Search(int reachRange, float maxPathLength, int maxVisitedNodes) {
+    public Search {
+      if (reachRange < 0) {
+        throw new IllegalArgumentException("reach range must not be negative: " + reachRange);
+      }
+      if (!(maxPathLength > 0)) {
+        throw new IllegalArgumentException("path length bound must be positive: " + maxPathLength);
+      }
+      if (maxVisitedNodes < 1) {
+        throw new IllegalArgumentException("a search visits at least one node: " + maxVisitedNodes);
+      }
+    }
+  }
+
+  /**
+   * One A* request. {@code start} is the start node the evaluator resolved on the server, not the
+   * mob's position. The controller mints the request id, so a repeat for the same mob supersedes
    * the outstanding one rather than racing it.
    */
-  record PathRequested(long tick, int mobId, Pos start, Pos target) implements WorldEvent {
+  record PathRequested(long tick, int mobId, Pos start, Pos target, Search search)
+      implements WorldEvent {
     public PathRequested {
       requireTick(tick);
       Objects.requireNonNull(start, "start");
       Objects.requireNonNull(target, "target");
+      Objects.requireNonNull(search, "search");
     }
   }
 

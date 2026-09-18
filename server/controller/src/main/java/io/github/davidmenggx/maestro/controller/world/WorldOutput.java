@@ -1,6 +1,7 @@
 package io.github.davidmenggx.maestro.controller.world;
 
 import java.util.List;
+import java.util.Objects;
 
 /**
  * What the controller hands back to the server, on the main thread. Exactly one call per request:
@@ -26,19 +27,26 @@ public interface WorldOutput {
     SHED
   }
 
-  /** {@code nodes} is the Minecraft path, one block position per node; empty means no path. */
+  /** One node of the path, with the resolved type the navigation reads while following it. */
+  record Node(Pos pos, byte pathType) {
+    public Node {
+      Objects.requireNonNull(pos, "pos");
+      if (pathType < 0 || pathType >= PathTypes.count()) {
+        throw new IllegalArgumentException("unknown path type " + pathType);
+      }
+    }
+  }
+
+  /**
+   * What {@code Path(nodes, target, reached)} takes, plus the tick the request was issued so the
+   * server knows how old the answer is. Empty {@code nodes} means no path.
+   */
   record PathResult(
-      int mobId, boolean reached, List<Pos> nodes, float cost, long computedTick, long issuedTick) {
+      int mobId, Pos target, boolean reached, List<Node> nodes, float cost, long issuedTick) {
 
     public PathResult {
+      Objects.requireNonNull(target, "target");
       nodes = List.copyOf(nodes);
-      if (computedTick < issuedTick) {
-        throw new IllegalArgumentException(
-            "a path cannot be computed before it was asked for: "
-                + computedTick
-                + " < "
-                + issuedTick);
-      }
     }
   }
 
