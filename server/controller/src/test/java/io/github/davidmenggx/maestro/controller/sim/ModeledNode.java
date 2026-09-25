@@ -260,9 +260,9 @@ public final class ModeledNode {
   }
 
   /**
-   * Records a gap if the frame is not the one expected next. The first frame after a fresh assignment sets the
-   * baseline, since the controller's sequence carries on across a reset and the node cannot know
-   * where it got to.
+   * Records a gap if the frame is not the one expected next. The first frame after a fresh
+   * assignment sets the baseline, since the controller's sequence carries on across a reset and the
+   * node cannot know where it got to.
    */
   private void advanceSequence(long sequence) {
     if (awaitingBaseline) {

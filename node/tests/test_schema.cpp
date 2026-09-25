@@ -143,3 +143,157 @@ TEST(Schema, AChunkWithNoColumnsIsNotResident) {
   EXPECT_EQ(Decoded->run_counts(), nullptr);
   EXPECT_EQ(Decoded->runs(), nullptr);
 }
+
+TEST(Schema, PathTypeOrdinalsArePinned) {
+  // The server sends vanilla ordinals as is, so the first, the last, and one
+  // from the middle are pinned against the vanilla enum.
+  static_assert(static_cast<int>(fbs::PathType::BLOCKED) == 0);
+  static_assert(static_cast<int>(fbs::PathType::WATER) == 9);
+  static_assert(static_cast<int>(fbs::PathType::BIG_MOBS_CLOSE_TO_DANGER) ==
+                26);
+  EXPECT_EQ(static_cast<int>(fbs::PathType::MAX), 26);
+}
+
+TEST(Schema, RequestFrameCarriesABatch) {
+  flatbuffers::FlatBufferBuilder Fbb;
+  const fbs::Vec3s Start(1, 64, -1);
+  const fbs::Vec3s Target(-30, 70, 12);
+  const auto Request = fbs::CreatePathRequest(
+      Fbb, /*request_id=*/42, /*class_id=*/3, &Start, &Target,
+      /*reach_range=*/1, /*max_path_length=*/32.5f,
+      /*max_visited_nodes=*/560);
+  const auto Batch =
+      fbs::CreatePathRequestBatch(Fbb, Fbb.CreateVector(std::vector{Request}));
+  Fbb.Finish(fbs::CreateRequestFrame(Fbb, fbs::RequestMsg::PathRequestBatch,
+                                     Batch.Union()));
+
+  flatbuffers::Verifier Verifier(Fbb.GetBufferPointer(), Fbb.GetSize());
+  ASSERT_TRUE(Verifier.VerifyBuffer<fbs::RequestFrame>(nullptr));
+
+  const auto *Decoded =
+      flatbuffers::GetRoot<fbs::RequestFrame>(Fbb.GetBufferPointer())
+          ->body_as_PathRequestBatch();
+  ASSERT_NE(Decoded, nullptr);
+  ASSERT_EQ(Decoded->requests()->size(), 1u);
+  const auto *Req = Decoded->requests()->Get(0);
+  EXPECT_EQ(Req->request_id(), 42u);
+  EXPECT_EQ(Req->class_id(), 3u);
+  EXPECT_EQ(Req->start()->y(), 64);
+  EXPECT_EQ(Req->target()->x(), -30);
+  EXPECT_EQ(Req->reach_range(), 1u);
+  EXPECT_FLOAT_EQ(Req->max_path_length(), 32.5f);
+  EXPECT_EQ(Req->max_visited_nodes(), 560u);
+}
+
+TEST(Schema, ResponseFrameCarriesResolvedNodes) {
+  flatbuffers::FlatBufferBuilder Fbb;
+  // Path nodes carry resolved types, which a cell never can.
+  const fbs::PathNode Nodes[] = {
+      fbs::PathNode(fbs::Vec3s(0, 64, 0), fbs::PathType::WALKABLE),
+      fbs::PathNode(fbs::Vec3s(1, 64, 0), fbs::PathType::WALKABLE_DOOR),
+  };
+  const auto NodesVec = Fbb.CreateVectorOfStructs(Nodes, std::size(Nodes));
+  const auto Response = fbs::CreatePathResponse(
+      Fbb, /*request_id=*/7, /*reached=*/true, NodesVec, /*cost=*/2.f,
+      /*world_sequence=*/99);
+  Fbb.Finish(fbs::CreateResponseFrame(Fbb, fbs::ResponseMsg::PathResponse,
+                                      Response.Union()));
+
+  const auto *Decoded =
+      flatbuffers::GetRoot<fbs::ResponseFrame>(Fbb.GetBufferPointer())
+          ->body_as_PathResponse();
+  ASSERT_NE(Decoded, nullptr);
+  EXPECT_EQ(Decoded->request_id(), 7u);
+  EXPECT_TRUE(Decoded->reached());
+  EXPECT_FLOAT_EQ(Decoded->cost(), 2.f);
+  EXPECT_EQ(Decoded->world_sequence(), 99u);
+  ASSERT_EQ(Decoded->nodes()->size(), std::size(Nodes));
+  EXPECT_EQ(Decoded->nodes()->Get(1)->type(), fbs::PathType::WALKABLE_DOOR);
+  EXPECT_EQ(Decoded->nodes()->Get(1)->pos().x(), 1);
+}
+
+TEST(Schema, ControlFrameCarriesAFullMalusTable) {
+  flatbuffers::FlatBufferBuilder Fbb;
+  std::vector<float> Malus(static_cast<int>(fbs::PathType::MAX) + 1, 0.f);
+  Malus[static_cast<int>(fbs::PathType::WATER)] = 8.f;
+  Malus[static_cast<int>(fbs::PathType::LAVA)] = -1.f;
+  const auto Profile = fbs::CreateMobClass(
+      Fbb, /*class_id=*/5, /*width=*/0.6f, /*height=*/1.95f,
+      Fbb.CreateVector(Malus), /*max_up_step=*/0.6f, /*can_pass_doors=*/true,
+      /*can_open_doors=*/false, /*can_float=*/true,
+      /*can_walk_over_fences=*/false);
+  Fbb.Finish(
+      fbs::CreateControlFrame(Fbb, fbs::ControlMsg::MobClass, Profile.Union()));
+
+  const auto *Decoded =
+      flatbuffers::GetRoot<fbs::ControlFrame>(Fbb.GetBufferPointer())
+          ->body_as_MobClass();
+  ASSERT_NE(Decoded, nullptr);
+  EXPECT_EQ(Decoded->class_id(), 5u);
+  EXPECT_FLOAT_EQ(Decoded->height(), 1.95f);
+  EXPECT_FLOAT_EQ(Decoded->max_up_step(), 0.6f);
+  EXPECT_TRUE(Decoded->can_pass_doors());
+  EXPECT_FALSE(Decoded->can_open_doors());
+  EXPECT_TRUE(Decoded->can_float());
+  EXPECT_FALSE(Decoded->can_walk_over_fences());
+  ASSERT_EQ(Decoded->malus()->size(), Malus.size());
+  EXPECT_FLOAT_EQ(Decoded->malus()->Get(static_cast<int>(fbs::PathType::WATER)),
+                  8.f);
+  EXPECT_FLOAT_EQ(Decoded->malus()->Get(static_cast<int>(fbs::PathType::LAVA)),
+                  -1.f);
+}
+
+TEST(Schema, HelloDefaultsToTheVanillaPathfinder) {
+  flatbuffers::FlatBufferBuilder Fbb;
+  fbs::HelloBuilder Builder(Fbb);
+  Builder.add_run(11);
+  Builder.add_region_id(4);
+  Builder.add_last_sequence(250);
+  const auto Hello = Builder.Finish();
+  Fbb.Finish(fbs::CreateControlReplyFrame(Fbb, fbs::ControlReplyMsg::Hello,
+                                          Hello.Union()));
+
+  const auto *Decoded =
+      flatbuffers::GetRoot<fbs::ControlReplyFrame>(Fbb.GetBufferPointer())
+          ->body_as_Hello();
+  ASSERT_NE(Decoded, nullptr);
+  EXPECT_EQ(Decoded->run(), 11u);
+  EXPECT_EQ(Decoded->region_id(), 4u);
+  EXPECT_EQ(Decoded->last_sequence(), 250u);
+  EXPECT_EQ(Decoded->pathfinder(), fbs::Pathfinder::VANILLA);
+}
+
+TEST(Schema, HeartbeatCarriesQueueDepth) {
+  flatbuffers::FlatBufferBuilder Fbb;
+  const auto Beat = fbs::CreateHeartbeat(Fbb, /*queue_depth=*/17);
+  Fbb.Finish(fbs::CreateControlReplyFrame(Fbb, fbs::ControlReplyMsg::Heartbeat,
+                                          Beat.Union()));
+
+  const auto *Frame =
+      flatbuffers::GetRoot<fbs::ControlReplyFrame>(Fbb.GetBufferPointer());
+  EXPECT_EQ(Frame->body_as_Hello(), nullptr);
+  ASSERT_NE(Frame->body_as_Heartbeat(), nullptr);
+  EXPECT_EQ(Frame->body_as_Heartbeat()->queue_depth(), 17u);
+}
+
+TEST(Schema, WorldFrameCarriesRegionAssignment) {
+  flatbuffers::FlatBufferBuilder Fbb;
+  const fbs::Vec2i MinXz(-256, 512);
+  const auto Assignment = fbs::CreateRegionAssignment(
+      Fbb, /*run=*/11, /*region_id=*/4, &MinXz, /*size=*/256, /*min_y=*/-64,
+      /*height=*/384, /*resume=*/true);
+  Fbb.Finish(fbs::CreateWorldFrame(Fbb, fbs::WorldMsg::RegionAssignment,
+                                   Assignment.Union()));
+
+  const auto *Decoded =
+      fbs::GetWorldFrame(Fbb.GetBufferPointer())->body_as_RegionAssignment();
+  ASSERT_NE(Decoded, nullptr);
+  EXPECT_EQ(Decoded->run(), 11u);
+  EXPECT_EQ(Decoded->region_id(), 4u);
+  EXPECT_EQ(Decoded->min_xz()->x(), -256);
+  EXPECT_EQ(Decoded->min_xz()->z(), 512);
+  EXPECT_EQ(Decoded->size(), 256u);
+  EXPECT_EQ(Decoded->min_y(), -64);
+  EXPECT_EQ(Decoded->height(), 384u);
+  EXPECT_TRUE(Decoded->resume());
+}
