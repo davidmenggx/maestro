@@ -61,14 +61,10 @@ public sealed interface WorldEvent {
     }
   }
 
-  /** {@code classId} indexes the mob class table; a mob's class never changes. */
-  record MobSpawned(long tick, int mobId, short classId, Pos pos) implements WorldEvent {
+  record MobSpawned(long tick, int mobId, Pos pos) implements WorldEvent {
     public MobSpawned {
       requireTick(tick);
       Objects.requireNonNull(pos, "pos");
-      if (classId < 0) {
-        throw new IllegalArgumentException("class id must not be negative: " + classId);
-      }
     }
   }
 
@@ -87,7 +83,7 @@ public sealed interface WorldEvent {
       if (reachRange < 0) {
         throw new IllegalArgumentException("reach range must not be negative: " + reachRange);
       }
-      if (!(maxPathLength > 0)) {
+      if (Float.isNaN(maxPathLength) || maxPathLength <= 0) {
         throw new IllegalArgumentException("path length bound must be positive: " + maxPathLength);
       }
       if (maxVisitedNodes < 1) {
@@ -98,16 +94,20 @@ public sealed interface WorldEvent {
 
   /**
    * One A* request. {@code start} is the start node the evaluator resolved on the server, not the
-   * mob's position. The controller mints the request id, so a repeat for the same mob supersedes
+   * mob's position, and {@code classId} names the profile the mob has right now rather than one
+   * fixed at spawn. The controller mints the request id, so a repeat for the same mob supersedes
    * the outstanding one rather than racing it.
    */
-  record PathRequested(long tick, int mobId, Pos start, Pos target, Search search)
+  record PathRequested(long tick, int mobId, short classId, Pos start, Pos target, Search search)
       implements WorldEvent {
     public PathRequested {
       requireTick(tick);
       Objects.requireNonNull(start, "start");
       Objects.requireNonNull(target, "target");
       Objects.requireNonNull(search, "search");
+      if (classId < 0) {
+        throw new IllegalArgumentException("class id must not be negative: " + classId);
+      }
     }
   }
 

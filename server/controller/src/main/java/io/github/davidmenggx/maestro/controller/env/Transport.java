@@ -53,8 +53,6 @@ public interface Transport {
 
   void connect(NodeId node, String endpoint);
 
-  void disconnect(NodeId node);
-
   /** Installed once, before any {@link #connect}. */
   void listen(Listener listener);
 }

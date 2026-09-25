@@ -2,9 +2,11 @@ include "common.fbs";
 
 namespace maestro.fbs;
 
-// Which search answers a request. `VANILLA` reproduces `PathFinder` and
+// Which search a node runs. `VANILLA` reproduces `PathFinder` and
 // `WalkNodeEvaluator` decision for decision; any other entry is an
-// alternative measured against it on identical inputs.
+// alternative measured against it. A node reports its own in `Hello`, so a
+// fleet is uniform and the controller attributes results to the search that
+// produced them.
 enum Pathfinder : ubyte {
   VANILLA
 }
@@ -31,7 +33,6 @@ table PathRequest {
   reach_range:ubyte;
   max_path_length:float;
   max_visited_nodes:ushort;
-  pathfinder:Pathfinder = VANILLA;
 }
 
 // Requests ride UDP, one frame per datagram, so a batch is bounded by the
@@ -56,8 +57,4 @@ table PathResponse {
   nodes:[PathNode];
   cost:float;
   world_sequence:ulong;
-}
-
-table PathResponseBatch {
-  responses:[PathResponse];
 }

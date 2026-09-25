@@ -78,8 +78,14 @@ public final class SimWorld implements WorldSource {
   }
 
   @Override
-  public List<MobClass> mobClasses() {
-    return mobClasses;
+  public MobClass mobClass(short classId) {
+    int index = classId - 1;
+    return index >= 0 && index < mobClasses.size() ? mobClasses.get(index) : null;
+  }
+
+  /** Profiles this world can hand out, which a workload draws a request's class from. */
+  public int mobClassCount() {
+    return mobClasses.size();
   }
 
   /** Block extent along both axes. */
@@ -119,8 +125,9 @@ public final class SimWorld implements WorldSource {
     if (floor < 0 || floor > Cells.MAX_FLOOR) {
       throw new IllegalArgumentException("floor out of range: " + floor);
     }
-    overrides[index(x, y, z)] = pathType;
-    overrideFloors[index(x, y, z)] = (byte) floor;
+    int index = index(x, y, z);
+    overrides[index] = pathType;
+    overrideFloors[index] = (byte) floor;
   }
 
   /**
@@ -146,10 +153,7 @@ public final class SimWorld implements WorldSource {
 
   @Override
   public byte pathTypeAt(int x, int y, int z) {
-    if (!inside(x, y, z)) {
-      return (byte) PathType.BLOCKED;
-    }
-    if (!loadedChunks[chunkIndex(Chunks.of(x), Chunks.of(z))]) {
+    if (!inside(x, y, z) || !loadedChunks[chunkIndex(Chunks.of(x), Chunks.of(z))]) {
       return (byte) PathType.BLOCKED;
     }
     byte override = overrides[index(x, y, z)];
@@ -164,8 +168,9 @@ public final class SimWorld implements WorldSource {
     if (!inside(x, y, z) || !loadedChunks[chunkIndex(Chunks.of(x), Chunks.of(z))]) {
       return Cells.FULL_FLOOR;
     }
-    if (overrides[index(x, y, z)] != NO_OVERRIDE) {
-      return overrideFloors[index(x, y, z)] & 0xFF;
+    int index = index(x, y, z);
+    if (overrides[index] != NO_OVERRIDE) {
+      return overrideFloors[index] & 0xFF;
     }
     int column = x * size + z;
     if (y > ground[column]) {

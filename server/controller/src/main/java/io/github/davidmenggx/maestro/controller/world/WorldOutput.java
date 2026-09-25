@@ -15,6 +15,8 @@ public interface WorldOutput {
     QUEUE_DEPTH,
     /** No node owns the region. */
     NO_NODE,
+    /** The owning node had not been told this mob profile yet; it is registered on the way out. */
+    CLASS_UNREGISTERED,
     /** The owner died before answering. */
     NODE_LOST,
     /** The mob was removed while the request was in flight. */

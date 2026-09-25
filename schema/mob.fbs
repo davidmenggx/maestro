@@ -16,7 +16,3 @@ table MobClass {
   can_float:bool;
   can_walk_over_fences:bool;
 }
-
-table MobClassTable {
-  classes:[MobClass];
-}

@@ -28,18 +28,23 @@ struct CellRun {
   floor:ubyte;
 }
 
-// Full region state at `sequence`, sent on node join or when a node has fallen
-// too far behind to resume. Uses run-length encoding.
+// Full state of one chunk at `sequence`, run-length encoded. An empty
+// `run_counts` means the chunk is not resident on the server, which reads as
+// air: the same answer vanilla's `PathNavigationRegion` gives for a chunk it
+// could not fetch. A node therefore starts its whole area as air and fills it
+// in as chunks arrive, rather than waiting for a region to be complete.
 //
-// Columns are implicit and cover the region densely, indexed
-// `(x - min_x) * width + (z - min_z)` against the bounds in `RegionAssignment`.
-// `run_counts` holds each column's run count in that order, and `runs` is every
-// column's runs concatenated in the same order, so a column's slice starts at
-// the prefix sum of the counts before it. Runs within a column go upward from
-// `base_y` and their lengths sum to the region height.
-table WorldSnapshot {
+// `chunk_xz` is the chunk's index within the assigned area rather than its world
+// chunk coordinate, so it is relative like every other position on the wire.
+// Columns cover the chunk densely, indexed `(x - min_x) * 16 + (z - min_z)`
+// against the chunk's own origin. `run_counts` holds each column's run count in
+// that order, and `runs` is every column's runs concatenated in the same order,
+// so a column's slice starts at the prefix sum of the counts before it. Runs
+// within a column go upward from the `min_y` in `RegionAssignment` and their
+// lengths sum to its `height`.
+table ChunkSnapshot {
   sequence:ulong;
-  base_y:int;
+  chunk_xz:Vec2i;
   run_counts:[ushort];
   runs:[CellRun];
 }

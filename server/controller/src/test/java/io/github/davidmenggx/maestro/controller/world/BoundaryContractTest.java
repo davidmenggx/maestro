@@ -32,7 +32,9 @@ class BoundaryContractTest {
 
     int matching = 0;
     for (int ordinal = 0; ordinal < PathTypes.count(); ordinal++) {
-      matching += PathTypes.isPerBlock((byte) ordinal) ? 1 : 0;
+      if (PathTypes.isPerBlock((byte) ordinal)) {
+        matching++;
+      }
     }
     assertEquals(PER_BLOCK_TYPES, matching);
     assertEquals(PER_BLOCK_TYPES, enumerated.size());
@@ -78,15 +80,16 @@ class BoundaryContractTest {
   void eventsRejectImpossibleFields() {
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldEvent.PathRequested(-1, 1, SOMEWHERE, SOMEWHERE, SEARCH));
+        () -> new WorldEvent.PathRequested(-1, 1, (short) 1, SOMEWHERE, SOMEWHERE, SEARCH));
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldEvent.MobSpawned(0, 1, (short) -1, SOMEWHERE));
+        () -> new WorldEvent.PathRequested(0, 1, (short) -1, SOMEWHERE, SOMEWHERE, SEARCH));
     assertThrows(
         NullPointerException.class,
-        () -> new WorldEvent.PathRequested(0, 1, null, SOMEWHERE, SEARCH));
+        () -> new WorldEvent.PathRequested(0, 1, (short) 1, null, SOMEWHERE, SEARCH));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(-1, 16f, 256));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 0f, 256));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, Float.NaN, 256));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 16f, 0));
   }
 

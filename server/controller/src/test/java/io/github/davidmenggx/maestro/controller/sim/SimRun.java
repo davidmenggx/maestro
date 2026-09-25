@@ -135,6 +135,11 @@ public final class SimRun {
     return Invariants.check(this, tickBudget);
   }
 
+  /** Chunks the fleet covers, which is how many frames one full send of the world costs. */
+  public int chunkCount() {
+    return topology.chunksPerSide() * topology.chunksPerSide();
+  }
+
   /** Transport counters are per node and per channel, so a whole-fleet total has to be summed. */
   public long fleetCounter(String name, Channel channel) {
     long total = 0;

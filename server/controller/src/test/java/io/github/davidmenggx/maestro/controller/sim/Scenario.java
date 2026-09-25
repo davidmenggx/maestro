@@ -74,7 +74,7 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     }
     for (Chance setting : Chance.values()) {
       double value = chances.get(setting);
-      if (!(value >= 0 && value <= 1)) {
+      if (Double.isNaN(value) || value < 0 || value > 1) {
         throw new IllegalArgumentException(setting + " must be in [0, 1]: " + value);
       }
     }

@@ -86,12 +86,6 @@ public final class SimTransport implements Transport {
   }
 
   @Override
-  public void disconnect(NodeId node) {
-    connected.remove(node);
-    bumpEpoch(node);
-  }
-
-  @Override
   public void send(NodeId node, Channel channel, ByteBuffer frame) {
     transmit(node, channel, frame, Direction.TO_NODE);
   }

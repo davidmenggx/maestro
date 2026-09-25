@@ -5,58 +5,58 @@ include "pathfinding.fbs";
 
 namespace maestro.fbs;
 
-// Assigns a square, full-height area: the region plus its halo, since the
-// node has no use for the boundary between them. `run` identifies the
-// controller process; region ids and sequence numbers are only meaningful
-// within one. `resume` means the node keeps what it holds and deltas continue
-// after the `last_sequence` it reported; otherwise its state is dropped and a
-// full snapshot follows.
+// Assigns a square, full-height area: the region plus its halo, since the node
+// has no use for the boundary between them. `run` identifies the controller
+// process; region ids and sequence numbers are only meaningful within one.
+// `min_y` and `height` size the columns, so a node can allocate the whole area
+// as air before any chunk arrives. `resume` means the node keeps what it holds
+// and deltas continue after the `last_sequence` it reported; otherwise its
+// state is dropped and every resident chunk is sent again.
 table RegionAssignment {
   run:ulong;
   region_id:uint;
   min_xz:Vec2i;
   size:ushort;
+  min_y:int;
+  height:ushort;
   resume:bool;
 }
 
-// A node's opening frame on a new connection: which region it still holds,
-// from which controller run, and how far its world stream got. `last_sequence`
-// is 0 when the node holds no state, which is what a restarted process
-// reports. The controller replies with a `RegionAssignment` that says whether
-// the stream resumes.
+// A node's opening frame on a new connection: which search it runs, which
+// region it still holds, from which controller run, and how far its world
+// stream got. `last_sequence` is 0 when the node holds no state, which is what
+// a restarted process reports. The controller replies with a
+// `RegionAssignment` that says whether the stream resumes.
 table Hello {
   run:ulong;
   region_id:uint;
   last_sequence:ulong;
+  pathfinder:Pathfinder = VANILLA;
 }
 
-table Ping {
-  sequence:ulong;
-  send_micros:ulong; // For phi accrual.
-}
-
-table Pong {
-  sequence:ulong;
-  send_micros:ulong;
+// Pushed by the node on its own timer, unsolicited. Phi accrual reads the
+// intervals between arrivals, timed by the controller's own clock, so the node
+// sends no timestamp and the two clocks are never compared.
+table Heartbeat {
   queue_depth:uint; // For load management.
 }
 
 // One union per channel per direction, so a reader dispatches on a single
 // root type once it knows which channel a frame arrived on. The world and
 // control channels are TCP, the request channel is UDP.
-union WorldMsg { WorldDelta, RegionAssignment, WorldSnapshot }
+union WorldMsg { WorldDelta, RegionAssignment, ChunkSnapshot }
 table WorldFrame { body:WorldMsg; }
 
-union RequestMsg { PathRequest, PathRequestBatch }
+union RequestMsg { PathRequestBatch }
 table RequestFrame { body:RequestMsg; }
 
-union ResponseMsg { PathResponse, PathResponseBatch }
+union ResponseMsg { PathResponse }
 table ResponseFrame { body:ResponseMsg; }
 
-union ControlMsg { Ping, MobClassTable }
+union ControlMsg { MobClass }
 table ControlFrame { body:ControlMsg; }
 
-union ControlReplyMsg { Hello, Pong }
+union ControlReplyMsg { Hello, Heartbeat }
 table ControlReplyFrame { body:ControlReplyMsg; }
 
 // flatc allows one root_type. Other frames are read via GetRoot<T>() in code.
