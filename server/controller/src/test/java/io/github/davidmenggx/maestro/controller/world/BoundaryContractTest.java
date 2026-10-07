@@ -17,7 +17,7 @@ import org.junit.jupiter.api.function.Executable;
 class BoundaryContractTest {
 
   private static final Pos SOMEWHERE = new Pos(1, 2, 3);
-  private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256);
+  private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256, 3);
 
   /** The number of types `getPathTypeFromState` can return, pinned against vanilla. */
   private static final int PER_BLOCK_TYPES = 17;
@@ -90,10 +90,14 @@ class BoundaryContractTest {
     assertThrows(
         NullPointerException.class,
         () -> new WorldEvent.PathRequested(0, 1, (short) 1, null, SOMEWHERE, SEARCH));
-    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(-1, 16f, 256));
-    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 0f, 256));
-    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, Float.NaN, 256));
-    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 16f, 0));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(-1, 16f, 256, 3));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 0f, 256, 3));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, Float.NaN, 256, 3));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 16f, 0, 3));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 16f, 256, -1));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new WorldEvent.Search(0, 16f, 256, WorldEvent.Search.MAX_FALL_DISTANCE + 1));
   }
 
   @Test

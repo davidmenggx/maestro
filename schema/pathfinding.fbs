@@ -16,7 +16,13 @@ enum Pathfinder : ubyte {
 // `WalkNodeEvaluator.getStart` resolved on the server (it reads live entity
 // state), `reach_range` is the Manhattan distance that counts as arrival, and
 // `max_path_length` and `max_visited_nodes` (already multiplied) bound the
-// search. Everything else about the mob comes from its `MobClass`.
+// search. `max_fall_distance` is `Mob.getMaxFallDistance`, which reads the
+// mob's target, health and the difficulty, so it varies from call to call.
+// Everything else about the mob comes from its `MobClass`.
+//
+// The node never sees the mob's exact position. The two evaluator branches
+// that read it, the collision sweep off a fence or closed door and the check
+// for standing on a rail, use `start` in its place.
 //
 // Tracing carries nothing. A request's trace id is `(run, mix(request_id))`
 // and its span id is `request_id`, where `run` arrives with the
@@ -33,6 +39,7 @@ table PathRequest {
   reach_range:ubyte;
   max_path_length:float;
   max_visited_nodes:ushort;
+  max_fall_distance:ushort;
 }
 
 // Requests ride UDP, one frame per datagram, so a batch is bounded by the

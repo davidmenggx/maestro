@@ -22,7 +22,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import maestro.fbs.PathRequest;
+import maestro.fbs.PathRequestBatch;
 import maestro.fbs.PathType;
+import maestro.fbs.RequestFrame;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -282,6 +285,26 @@ class HarnessGuardsTest {
       }
     }
     assertTrue(shapes.size() > DRAWS, "mob profiles did not vary across seeds");
+  }
+
+  @Test
+  void everySearchInputIsCarriedOnTheWire() {
+    // Distinct values, so a field written into its neighbour's slot is caught.
+    WorldEvent.Search search = new WorldEvent.Search(6, 40.5f, 640, 300);
+    Frames.Request request =
+        new Frames.Request(9, (short) 2, new Pos(3, 40, 5), new Pos(7, 41, 11), search);
+    ByteBuffer frame = ByteBuffer.wrap(Frames.requests(List.of(request), ONE_REGION, 0));
+
+    PathRequestBatch batch =
+        (PathRequestBatch) RequestFrame.getRootAsRequestFrame(frame).body(new PathRequestBatch());
+    assertEquals(1, batch.requestsLength());
+    PathRequest decoded = batch.requests(0);
+    assertEquals(9, decoded.requestId());
+    assertEquals(2, decoded.classId());
+    assertEquals(search.reachRange(), decoded.reachRange());
+    assertEquals(search.maxPathLength(), decoded.maxPathLength());
+    assertEquals(search.maxVisitedNodes(), decoded.maxVisitedNodes());
+    assertEquals(search.maxFallDistance(), decoded.maxFallDistance());
   }
 
   @Test

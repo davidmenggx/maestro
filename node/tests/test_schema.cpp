@@ -161,7 +161,7 @@ TEST(Schema, RequestFrameCarriesABatch) {
   const auto Request = fbs::CreatePathRequest(
       Fbb, /*request_id=*/42, /*class_id=*/3, &Start, &Target,
       /*reach_range=*/1, /*max_path_length=*/32.5f,
-      /*max_visited_nodes=*/560);
+      /*max_visited_nodes=*/560, /*max_fall_distance=*/16);
   const auto Batch =
       fbs::CreatePathRequestBatch(Fbb, Fbb.CreateVector(std::vector{Request}));
   Fbb.Finish(fbs::CreateRequestFrame(Fbb, fbs::RequestMsg::PathRequestBatch,
@@ -183,6 +183,7 @@ TEST(Schema, RequestFrameCarriesABatch) {
   EXPECT_EQ(Req->reach_range(), 1u);
   EXPECT_FLOAT_EQ(Req->max_path_length(), 32.5f);
   EXPECT_EQ(Req->max_visited_nodes(), 560u);
+  EXPECT_EQ(Req->max_fall_distance(), 16u);
 }
 
 TEST(Schema, ResponseFrameCarriesResolvedNodes) {

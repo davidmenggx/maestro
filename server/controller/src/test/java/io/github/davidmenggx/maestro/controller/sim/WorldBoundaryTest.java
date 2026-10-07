@@ -26,7 +26,7 @@ class WorldBoundaryTest {
   private static final short OTHER_CLASS = 2;
   private static final Pos HERE = new Pos(4, 40, 4);
   private static final Pos THERE = new Pos(20, 40, 20);
-  private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256);
+  private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256, 3);
 
   @Test
   void aMobRemovedWhileWaitingIsDroppedExactlyOnce() {

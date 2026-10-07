@@ -50,6 +50,15 @@ public final class SyntheticWorkload implements Workload {
   /** `maxVisitedNodes` is sixteen times the bound in force when the navigation last updated it. */
   private static final int VISITED_NODES_PER_BLOCK = 16;
 
+  /** `getMaxFallDistance` for a mob with no target. */
+  private static final int CALM_FALL_DISTANCE = 3;
+
+  /**
+   * Extra fall a mob with a target accepts: its health above a third of the maximum, less a
+   * difficulty allowance. A 100-health mob on hard reaches 67.
+   */
+  private static final int MAX_EXTRA_FALL_DISTANCE = 67;
+
   private final SimWorld world;
   private final Rng rng;
   private final long quietAfter;
@@ -197,10 +206,15 @@ public final class SyntheticWorkload implements Workload {
   private WorldEvent.Search randomSearch() {
     int followRange = MIN_PATH_LENGTH + rng.nextInt(MAX_EXTRA_PATH_LENGTH + 1);
     float maxPathLength = rng.nextInt(16) == 0 ? SHORT_PATH_LENGTH : followRange;
+    int maxFallDistance =
+        rng.nextBoolean()
+            ? CALM_FALL_DISTANCE
+            : CALM_FALL_DISTANCE + rng.nextInt(MAX_EXTRA_FALL_DISTANCE + 1);
     return new WorldEvent.Search(
         REACH_RANGES[rng.nextInt(REACH_RANGES.length)],
         maxPathLength,
-        followRange * VISITED_NODES_PER_BLOCK);
+        followRange * VISITED_NODES_PER_BLOCK,
+        maxFallDistance);
   }
 
   /** The chosen mob may have nothing outstanding, in which case the cancel must do nothing. */

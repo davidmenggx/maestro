@@ -3,9 +3,9 @@ package io.github.davidmenggx.maestro.controller.world;
 import java.util.Objects;
 
 /**
- * One land-mob pathfinding profile, the {@code WalkNodeEvaluator} input set. Registered once per
- * mob type and referenced by {@code classId} in every request, so the count is bounded by the
- * number of mob types rather than the number of mobs.
+ * One land-mob pathfinding profile, the {@code WalkNodeEvaluator} input set. These inputs are live
+ * per-mob state, so a profile is interned by content and {@code classId} names that content rather
+ * than a mob type. A request names the profile its mob has at that moment.
  *
  * <p>{@code malus} is indexed by {@code PathType} ordinal and covers every ordinal, including the
  * ones a cell can never carry, because the node resolves those before charging a malus.

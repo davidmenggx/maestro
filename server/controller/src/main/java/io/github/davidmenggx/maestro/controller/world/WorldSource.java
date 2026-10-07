@@ -1,12 +1,13 @@
 package io.github.davidmenggx.maestro.controller.world;
 
 /**
- * Pull side of the world boundary, read on the main thread when a region snapshot is built.
+ * Pull side of the world boundary, read on the main thread when a chunk's state is built.
  * Production reads loaded chunks; the simulator reads its own terrain model.
  *
  * <p>Chunk residency is not asked for here. It arrives as {@link WorldEvent.ChunkLoaded} and {@link
- * WorldEvent.ChunkUnloaded}, so the controller already knows which regions are readable and there
- * is no second answer to disagree with.
+ * WorldEvent.ChunkUnloaded}, so the controller already knows which chunks are readable and there is
+ * no second answer to disagree with. Cells are only read inside a loaded chunk: one that is not
+ * loaded is sent as cleared, and the node reads it as air.
  */
 public interface WorldSource {
 
@@ -25,13 +26,13 @@ public interface WorldSource {
 
   /**
    * Per-block {@code PathType} ordinal at the position, matching what a {@link
-   * WorldEvent.BlockChanged} would carry. Positions outside a loaded chunk read as {@code BLOCKED}.
+   * WorldEvent.BlockChanged} would carry.
    */
   byte pathTypeAt(int x, int y, int z);
 
   /**
    * Top of the block's collision shape in sixteenths, matching what a {@link
-   * WorldEvent.BlockChanged} would carry. Positions outside a loaded chunk read as a full cube.
+   * WorldEvent.BlockChanged} would carry.
    */
   int floorAt(int x, int y, int z);
 }

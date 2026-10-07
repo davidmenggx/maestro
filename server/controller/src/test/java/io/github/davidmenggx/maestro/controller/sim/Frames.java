@@ -169,6 +169,7 @@ public final class Frames {
       PathRequest.addReachRange(builder, search.reachRange());
       PathRequest.addMaxPathLength(builder, search.maxPathLength());
       PathRequest.addMaxVisitedNodes(builder, search.maxVisitedNodes());
+      PathRequest.addMaxFallDistance(builder, search.maxFallDistance());
       offsets[i] = PathRequest.endPathRequest(builder);
     }
     int requestsVector = PathRequestBatch.createRequestsVector(builder, offsets);

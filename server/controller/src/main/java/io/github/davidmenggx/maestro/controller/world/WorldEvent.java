@@ -47,14 +47,14 @@ public sealed interface WorldEvent {
     }
   }
 
-  /** A region is only snapshottable once its chunks are resident. */
+  /** The chunk's state is sent to the node that owns it at the end of the tick. */
   record ChunkLoaded(long tick, int chunkX, int chunkZ) implements WorldEvent {
     public ChunkLoaded {
       requireTick(tick);
     }
   }
 
-  /** Its region's state is unknown from here until the chunk comes back. */
+  /** The owning node is sent the chunk as cleared, and reads it as air until it comes back. */
   record ChunkUnloaded(long tick, int chunkX, int chunkZ) implements WorldEvent {
     public ChunkUnloaded {
       requireTick(tick);
@@ -76,9 +76,14 @@ public sealed interface WorldEvent {
 
   /**
    * The inputs of one {@code PathFinder.findPath} call that vary per call rather than per mob: how
-   * close counts as arrival, and the two bounds on the search.
+   * close counts as arrival, the two bounds on the search, and {@code Mob.getMaxFallDistance},
+   * which reads the mob's target, health and the difficulty.
    */
-  record Search(int reachRange, float maxPathLength, int maxVisitedNodes) {
+  record Search(int reachRange, float maxPathLength, int maxVisitedNodes, int maxFallDistance) {
+
+    /** Largest fall distance the wire carries. */
+    public static final int MAX_FALL_DISTANCE = 0xFFFF;
+
     public Search {
       if (reachRange < 0) {
         throw new IllegalArgumentException("reach range must not be negative: " + reachRange);
@@ -88,6 +93,9 @@ public sealed interface WorldEvent {
       }
       if (maxVisitedNodes < 1) {
         throw new IllegalArgumentException("a search visits at least one node: " + maxVisitedNodes);
+      }
+      if (maxFallDistance < 0 || maxFallDistance > MAX_FALL_DISTANCE) {
+        throw new IllegalArgumentException("fall distance out of range: " + maxFallDistance);
       }
     }
   }
