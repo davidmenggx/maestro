@@ -128,7 +128,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private final List<WorldEvent.BlockChanged> pendingCells = new ArrayList<>();
   private final List<String> selfViolations = new ArrayList<>();
 
-  /** Identifies this controller process to the fleet; nothing from another run is resumed. */
+  /** Identifies this controller process to the fleet. */
   final long run;
 
   private long nextRequestId = 1;

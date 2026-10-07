@@ -39,8 +39,7 @@ enum PathType : ubyte {
 }
 
 // Block position with `x` and `z` relative to the `min_xz` of the node's
-// `RegionAssignment` and `y` absolute. Relative so a coordinate fits a short;
-// a target beyond the node's area is still representable.
+// `RegionAssignment` and `y` absolute.
 struct Vec3s {
   x:short;
   y:short;
