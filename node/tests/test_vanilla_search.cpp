@@ -509,6 +509,57 @@ TEST(Search, AResultEncodesAsAResponseFrame) {
   EXPECT_EQ(Response->nodes()->Get(1)->type(), PathType::WALKABLE_DOOR);
 }
 
+TEST(Search, OneBuilderServesEveryResponse) {
+  // A reused builder is cleared each time, so the second frame holds only
+  // its own response and a node can keep one builder per thread.
+  Result Long;
+  for (int X = 0; X < 40; ++X)
+    Long.Nodes.push_back({{X, 1, -X}, PathType::WALKABLE});
+  Result Short;
+  Short.Nodes = {{{-5, -64, 5}, PathType::OPEN}};
+  flatbuffers::FlatBufferBuilder Builder;
+  encodeResponse(Builder, 1, Long, 3);
+  encodeResponse(Builder, 2, Short, 4);
+
+  flatbuffers::Verifier Verifier(Builder.GetBufferPointer(), Builder.GetSize());
+  ASSERT_TRUE(Verifier.VerifyBuffer<fbs::ResponseFrame>(nullptr));
+  const auto *Response =
+      flatbuffers::GetRoot<fbs::ResponseFrame>(Builder.GetBufferPointer())
+          ->body_as_PathResponse();
+  ASSERT_NE(Response, nullptr);
+  EXPECT_EQ(Response->request_id(), 2u);
+  ASSERT_EQ(Response->nodes()->size(), 1u);
+  EXPECT_EQ(Response->nodes()->Get(0)->pos().x(), -5);
+  EXPECT_EQ(Response->nodes()->Get(0)->pos().y(), -64);
+  EXPECT_EQ(Response->nodes()->Get(0)->pos().z(), 5);
+  EXPECT_EQ(Response->nodes()->Get(0)->type(), PathType::OPEN);
+
+  encodeResponse(Builder, 1, Long, 3);
+  const auto *Again =
+      flatbuffers::GetRoot<fbs::ResponseFrame>(Builder.GetBufferPointer())
+          ->body_as_PathResponse();
+  ASSERT_EQ(Again->nodes()->size(), Long.Nodes.size());
+  for (std::size_t I = 0; I < Long.Nodes.size(); ++I) {
+    EXPECT_EQ(Again->nodes()->Get(I)->pos().x(), Long.Nodes[I].Pos.X);
+    EXPECT_EQ(Again->nodes()->Get(I)->pos().z(), Long.Nodes[I].Pos.Z);
+  }
+}
+
+TEST(Search, AnUnknownProfileEncodesAsAResponseFrame) {
+  flatbuffers::FlatBufferBuilder Builder;
+  encodeResponse(Builder, 1, Result{}, 3);
+  encodeUnknownProfile(Builder, 8, 41);
+
+  flatbuffers::Verifier Verifier(Builder.GetBufferPointer(), Builder.GetSize());
+  ASSERT_TRUE(Verifier.VerifyBuffer<fbs::ResponseFrame>(nullptr));
+  const auto *Frame =
+      flatbuffers::GetRoot<fbs::ResponseFrame>(Builder.GetBufferPointer());
+  EXPECT_EQ(Frame->body_as_PathResponse(), nullptr);
+  ASSERT_NE(Frame->body_as_UnknownProfile(), nullptr);
+  EXPECT_EQ(Frame->body_as_UnknownProfile()->request_id(), 8u);
+  EXPECT_EQ(Frame->body_as_UnknownProfile()->class_id(), 41u);
+}
+
 TEST(Profile, DecodesAMobClass) {
   flatbuffers::FlatBufferBuilder Builder;
   std::vector<float> Malus(world::PathTypeCount, 0.0F);

@@ -38,8 +38,8 @@ enum PathType : ubyte {
   BIG_MOBS_CLOSE_TO_DANGER
 }
 
-// Block position with `x` and `z` relative to the `min_xz` of the node's
-// `RegionAssignment` and `y` absolute.
+// Block position with `x` and `z` relative to the corner of the node's
+// assigned area and `y` absolute.
 struct Vec3s {
   x:short;
   y:short;

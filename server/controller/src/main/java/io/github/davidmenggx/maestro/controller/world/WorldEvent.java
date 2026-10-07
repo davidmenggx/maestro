@@ -31,7 +31,8 @@ public sealed interface WorldEvent {
   /**
    * {@code pathType} is {@code getPathTypeFromState} for the new block state: the per-block layer
    * only, as an ordinal of the shared {@code PathType} enum. {@code floor} is the top of the
-   * block's collision shape in sixteenths, 0 when it has none. Exactly one event per block change.
+   * block's collision shape in sixteenths rounded up, 0 when it has none. Exactly one event per
+   * block change.
    */
   record BlockChanged(long tick, Pos pos, byte pathType, int floor) implements WorldEvent {
     public BlockChanged {
@@ -81,18 +82,24 @@ public sealed interface WorldEvent {
    */
   record Search(int reachRange, float maxPathLength, int maxVisitedNodes, int maxFallDistance) {
 
+    /** Largest reach range the wire carries. */
+    public static final int MAX_REACH_RANGE = 0xFF;
+
+    /** Largest visit budget the wire carries. */
+    public static final int MAX_VISITED_NODES = 0xFFFF;
+
     /** Largest fall distance the wire carries. */
     public static final int MAX_FALL_DISTANCE = 0xFFFF;
 
     public Search {
-      if (reachRange < 0) {
-        throw new IllegalArgumentException("reach range must not be negative: " + reachRange);
+      if (reachRange < 0 || reachRange > MAX_REACH_RANGE) {
+        throw new IllegalArgumentException("reach range out of range: " + reachRange);
       }
       if (Float.isNaN(maxPathLength) || maxPathLength <= 0) {
         throw new IllegalArgumentException("path length bound must be positive: " + maxPathLength);
       }
-      if (maxVisitedNodes < 1) {
-        throw new IllegalArgumentException("a search visits at least one node: " + maxVisitedNodes);
+      if (maxVisitedNodes < 1 || maxVisitedNodes > MAX_VISITED_NODES) {
+        throw new IllegalArgumentException("visit budget out of range: " + maxVisitedNodes);
       }
       if (maxFallDistance < 0 || maxFallDistance > MAX_FALL_DISTANCE) {
         throw new IllegalArgumentException("fall distance out of range: " + maxFallDistance);

@@ -5,9 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.util.List;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
 /** Fixed-seed runs, each pinning one behavior to an exact count that a sweep cannot state. */
@@ -27,6 +29,12 @@ class SimulationTest {
 
   /** Quiet ticks after the partition lifts, for the resnapshot to land and the run to settle. */
   private static final long TAIL_TICKS = 50;
+
+  /** Tick the control channel stalls at: after the fleet is greeted, before profiles settle. */
+  private static final long STALL_TICK = 2;
+
+  /** Long enough for several requests to name a profile still held behind the stall. */
+  private static final long STALL_TICKS = 15;
 
   /** Changes a tick, enough that every region sees one most ticks rather than only some of them. */
   private static final int CHANGES_PER_TICK = 2 * Topology.DEFAULT.nodeCount();
@@ -75,13 +83,63 @@ class SimulationTest {
   void everyNodeIsToldAProfileBeforeItIsAskedToUseIt() {
     SimRun run = SimRun.of(17L, FaultPlan.reliable(), TICKS).go();
 
-    // The node reports a violation for a request naming a profile it was never sent, so a clean
-    // run is the claim. Registration costs one request per profile, which the drop count shows.
+    // With nothing holding the control channel back, no request ever overtakes its profile.
+    // Registration costs one request per profile, which the drop count shows.
     assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(0, run.sim.metrics().total("path.profile.unknown"), run.describe());
     assertTrue(run.out.dropped(DropReason.CLASS_UNREGISTERED) > 0, run.describe());
     for (ModeledNode node : run.sim.nodes()) {
       assertTrue(node.knownClassCount() > 0, run.describe());
       assertTrue(node.knownClassCount() <= run.world.mobClassCount(), run.describe());
+    }
+  }
+
+  @Test
+  void aRequestThatOvertakesItsProfileIsDroppedAtOnce() {
+    // The control channel stalls just after the fleet is greeted, so profiles registered in the
+    // first ticks sit behind it while requests naming them arrive over UDP.
+    FaultPlan plan = FaultPlan.reliable();
+    for (NodeId node : nodeIds()) {
+      plan =
+          plan.with(
+              new FaultPlan.Stalled(STALL_TICK, node, true),
+              new FaultPlan.Stalled(STALL_TICK + STALL_TICKS, node, false));
+    }
+    SimRun run =
+        SimRun.of(
+                37L,
+                plan,
+                TICKS,
+                Scenario.DEFAULT.with(Count.MOB_CLASSES, 4).with(Chance.REQUEST, 0.3))
+            .go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    long unknown = run.sim.metrics().total("path.profile.unknown");
+    assertTrue(unknown > 0, run.describe());
+    // Each one was dropped on the spot, under the same reason as the registering request, and
+    // none was left to time out.
+    assertTrue(run.out.dropped(DropReason.CLASS_UNREGISTERED) >= unknown, run.describe());
+    assertEquals(0, run.out.dropped(DropReason.SHED), run.describe());
+    assertTrue(run.fleetCounter("transport.held", Channel.CONTROL) > 0, run.describe());
+    assertTrue(run.out.answered() > 0, run.describe());
+  }
+
+  @Test
+  void aFailedEncodeIsRetriedUnderTheSameSequence() {
+    SimRun run = SimRun.of(41L, FaultPlan.reliable().withOffloadFailureRate(0.3), TICKS).go();
+
+    // A retry builds the same frame under the same number, so the stream has no gap and every
+    // node ends holding what a fresh snapshot holds.
+    assertEquals(List.of(), run.violations(ProbeController.MAX_TICKS_LATE), run.describe());
+    assertTrue(run.sim.metrics().total("offload.failed") > 0, run.describe());
+    assertEquals(
+        run.sim.metrics().total("offload.failed"),
+        run.sim.metrics().total("offload.retried"),
+        run.describe());
+    assertTrue(run.sim.metrics().counter("offload.retried", "job", "chunk") > 0, run.describe());
+    assertTrue(run.sim.metrics().counter("offload.retried", "job", "delta") > 0, run.describe());
+    for (ModeledNode node : run.sim.nodes()) {
+      assertTrue(Invariants.caughtUp(run.controller, node), node.id() + " " + run.describe());
     }
   }
 
@@ -213,5 +271,9 @@ class SimulationTest {
     // Held rather than lost, so the stream has no gap once the partition lifts.
     assertTrue(run.fleetCounter("transport.held", Channel.WORLD) > 0, run.describe());
     assertTrue(run.sim.node(victim).lastSequence() > 1, run.describe());
+  }
+
+  private static List<NodeId> nodeIds() {
+    return IntStream.range(0, Topology.DEFAULT.nodeCount()).mapToObj(NodeId::of).toList();
   }
 }

@@ -91,6 +91,15 @@ class BoundaryContractTest {
         NullPointerException.class,
         () -> new WorldEvent.PathRequested(0, 1, (short) 1, null, SOMEWHERE, SEARCH));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(-1, 16f, 256, 3));
+    // Each bound is the widest value its wire field holds, which a silent cast would wrap.
+    new WorldEvent.Search(
+        WorldEvent.Search.MAX_REACH_RANGE, 16f, WorldEvent.Search.MAX_VISITED_NODES, 3);
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new WorldEvent.Search(WorldEvent.Search.MAX_REACH_RANGE + 1, 16f, 256, 3));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new WorldEvent.Search(0, 16f, WorldEvent.Search.MAX_VISITED_NODES + 1, 3));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 0f, 256, 3));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, Float.NaN, 256, 3));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 16f, 0, 3));

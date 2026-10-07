@@ -5,9 +5,11 @@ namespace maestro.fbs;
 // One block as the node needs it: the per-block `PathType` (Minecraft's
 // `getPathTypeFromState`, a pure function of that block state) and `floor`,
 // the top of the block's collision shape in sixteenths, which is what
-// `getFloorLevel` reads from the block below a node. Neighbor-dependent and
-// mob-dependent types are derived on the node at query time, so a block change
-// produces exactly one `CellDelta`.
+// `getFloorLevel` reads from the block below a node. `floor` is rounded up to
+// a whole sixteenth on purpose: nearly every collision shape already ends on
+// one, and the few that do not, such as the lily pad at 1.5, move by less than
+// a sixteenth. Neighbor-dependent and mob-dependent types are derived on the
+// node at query time, so a block change produces exactly one `CellDelta`.
 struct CellDelta {
   pos:Vec3s;
   node_type:PathType;

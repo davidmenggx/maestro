@@ -8,7 +8,9 @@ namespace maestro.fbs;
 // Assigns a square, full-height area: the region plus its halo, since the node
 // has no use for the boundary between them. `run` identifies the controller
 // process; region ids and sequence numbers are only meaningful within one.
-// `min_xz` and `size` are multiples of 16, so whole chunks tile the area.
+// Every position the node sees is relative to the area's corner, so the node
+// is never told where that corner is. `size` is a multiple of 16, so whole
+// chunks tile the area.
 // `min_y` and `height` size the columns, so a node can allocate the whole area
 // as air before any chunk arrives. `resume` means the node keeps what it holds
 // and deltas continue after the `last_sequence` it reported; otherwise its
@@ -16,7 +18,6 @@ namespace maestro.fbs;
 table RegionAssignment {
   run:ulong;
   region_id:uint;
-  min_xz:Vec2i;
   size:ushort;
   min_y:int;
   height:ushort;
@@ -51,7 +52,7 @@ table WorldFrame { body:WorldMsg; }
 union RequestMsg { PathRequestBatch }
 table RequestFrame { body:RequestMsg; }
 
-union ResponseMsg { PathResponse }
+union ResponseMsg { PathResponse, UnknownProfile }
 table ResponseFrame { body:ResponseMsg; }
 
 union ControlMsg { MobClass }

@@ -55,6 +55,7 @@ public final class Simulation {
   private final Digest digest = new Digest();
   private final SimTransport transport;
   private final ControllerEnv env;
+  private final double offloadFailureRate;
 
   private long now;
   private long order;
@@ -64,6 +65,7 @@ public final class Simulation {
     this.rng = SeededRng.of(seed);
     this.offloadRng = rng.derive("offload");
     this.transport = new SimTransport(this, faults, rng.derive("transport"), nodes);
+    this.offloadFailureRate = faults.offloadFailureRate();
     this.env =
         new ControllerEnv(
             new SimClock(), rng.derive("controller"), new SimOffload(), transport, metrics);
@@ -167,6 +169,7 @@ public final class Simulation {
         case FaultPlan.NodeRecovered recovered -> transport.revive(recovered.node());
         case FaultPlan.Partitioned partitioned ->
             transport.partition(partitioned.node(), partitioned.active());
+        case FaultPlan.Stalled stalled -> transport.stall(stalled.node(), stalled.active());
       }
     }
   }
@@ -202,7 +205,8 @@ public final class Simulation {
   /**
    * Work runs immediately, but its completion waits for the end of whichever tick it finishes in,
    * because that is where production drains finished jobs. A result therefore never reaches the
-   * controller inside the call that submitted it.
+   * controller inside the call that submitted it. A job the fault plan fails reports its failure at
+   * the same point instead.
    */
   private final class SimOffload implements Offload {
 
@@ -210,11 +214,18 @@ public final class Simulation {
     private static final int MAX_WORK_STEPS = 40;
 
     @Override
-    public <T> void submit(String name, Supplier<T> work, Consumer<T> completion) {
-      T result = work.get();
+    public <T> void submit(
+        String name, Supplier<T> work, Consumer<T> completion, Runnable failure) {
       long ready = now + 1 + offloadRng.nextInt(MAX_WORK_STEPS);
       long drainAt = (ready / STEPS_PER_TICK) * STEPS_PER_TICK + STEPS_PER_TICK - 1;
       metrics.count("offload.submitted", 1, "job", name);
+      // Drawn only when failures are possible, so a plan without them replays as before.
+      if (offloadFailureRate > 0 && offloadRng.nextDouble() < offloadFailureRate) {
+        metrics.count("offload.failed", 1, "job", name);
+        scheduleAt(drainAt, "offload-failed:" + name, failure);
+        return;
+      }
+      T result = work.get();
       scheduleAt(drainAt, "offload:" + name, () -> completion.accept(result));
     }
   }

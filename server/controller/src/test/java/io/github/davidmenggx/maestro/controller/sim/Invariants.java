@@ -26,8 +26,9 @@ public final class Invariants {
   public static List<String> check(SimRun run, double tickBudget) {
     List<String> violations = new ArrayList<>();
 
-    // Per-region sequence monotonicity with no gaps, snapshot well-formedness, the
-    // per-block cell contract, and requests naming a registered mob class.
+    // Every world frame the real node would refuse: a sequence gap, a malformed
+    // snapshot, a cell outside the area or carrying a derived type, and a resume
+    // of a stream the node does not hold.
     for (ModeledNode node : run.sim.nodes()) {
       violations.addAll(node.violations());
     }

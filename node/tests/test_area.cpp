@@ -64,7 +64,7 @@ TEST(Column, EditsAtTheEndsKeepTheHeight) {
 }
 
 TEST(Area, IsAirUntilAChunkArrives) {
-  const Area Empty(SmallArea, 0);
+  const Area Empty(SmallArea, 1, 0);
   EXPECT_EQ(Empty.sequence(), 0u);
   EXPECT_EQ(Empty.at(0, -16, 0), Air);
   EXPECT_EQ(Empty.at(31, 31, 31), Air);
@@ -101,13 +101,73 @@ TEST(Area, ANewVersionSharesWhatItDidNotChange) {
 }
 
 TEST(Area, AnEditToAnAirChunkMaterializesIt) {
-  const auto Empty = std::make_shared<const Area>(SmallArea, 0);
+  const auto Empty = std::make_shared<const Area>(SmallArea, 1, 0);
   const CellEdit Edit{17, 5, 2, Stone};
   const auto After = Empty->withCells({&Edit, 1}, 1);
   EXPECT_EQ(After->at(17, 5, 2), Stone);
   EXPECT_EQ(After->at(17, 4, 2), Air);
   EXPECT_EQ(After->at(18, 5, 2), Air);
   EXPECT_EQ(Empty->column(17, 2), nullptr);
+}
+
+TEST(Area, ANewVersionKeepsItsStreamAndTakesTheFramesSequence) {
+  const auto Empty = std::make_shared<const Area>(SmallArea, 9, 4);
+  const CellEdit Edit{1, 0, 1, Stone};
+  const auto Edited = Empty->withCells({&Edit, 1}, 7);
+  const auto Cleared = Edited->withChunk(0, 0, nullptr, 8);
+  for (const auto &Version : {Edited, Cleared}) {
+    EXPECT_EQ(Version->run(), 9u);
+    EXPECT_EQ(Version->regionId(), 4u);
+  }
+  EXPECT_EQ(Edited->sequence(), 7u);
+  EXPECT_EQ(Cleared->sequence(), 8u);
+}
+
+TEST(Area, AnEditSharesTheRestOfItsRowAndEveryOtherRow) {
+  // Three chunks a side, so the edited chunk has neighbours both in its own
+  // row and in other rows.
+  maestro::test::DenseWorld World(48, -16, 48);
+  for (int X = 0; X < 48; ++X)
+    for (int Z = 0; Z < 48; ++Z)
+      World.fill(X, -16, Z, X, -16 + (X + Z) % 5, Z, Stone);
+  const auto Before = World.load();
+
+  const CellEdit Edit{20, 10, 20, Water};
+  const auto After = Before->withCells({&Edit, 1}, Before->sequence() + 1);
+
+  EXPECT_NE(After->column(20, 20), Before->column(20, 20));
+  // Same chunk, same row of chunks, and another row of chunks.
+  EXPECT_EQ(After->column(21, 20), Before->column(21, 20));
+  EXPECT_EQ(After->column(20, 40), Before->column(20, 40));
+  EXPECT_EQ(After->column(40, 20), Before->column(40, 20));
+}
+
+TEST(Area, ReplacingAChunkSharesEveryOtherChunk) {
+  maestro::test::DenseWorld World(48, -16, 48);
+  World.fill(0, -16, 0, 47, -1, 47, Stone);
+  World.set(40, 0, 40, Water);
+  const auto Before = World.load();
+  const auto After = Before->withChunk(1, 1, nullptr, Before->sequence() + 1);
+  EXPECT_EQ(After->column(20, 20), nullptr);
+  EXPECT_EQ(After->column(20, 40), Before->column(20, 40));
+  EXPECT_EQ(After->column(40, 40), Before->column(40, 40));
+  EXPECT_EQ(After->at(40, 0, 40), Water);
+}
+
+TEST(Area, OneDeltaCanEditSeveralChunksAndRows) {
+  const auto Empty = std::make_shared<const Area>(SmallArea, 1, 0);
+  const std::vector<CellEdit> Edits = {{1, 0, 1, Stone},
+                                       {1, 0, 20, Water},
+                                       {20, 0, 1, Stone},
+                                       {20, 0, 20, Water},
+                                       {1, 1, 1, Water}};
+  const auto After = Empty->withCells(Edits, 1);
+  EXPECT_EQ(After->at(1, 0, 1), Stone);
+  EXPECT_EQ(After->at(1, 1, 1), Water);
+  EXPECT_EQ(After->at(1, 0, 20), Water);
+  EXPECT_EQ(After->at(20, 0, 1), Stone);
+  EXPECT_EQ(After->at(20, 0, 20), Water);
+  EXPECT_EQ(Empty->at(20, 0, 20), Air);
 }
 
 TEST(Area, ClearingAChunkLeavesTheOthers) {

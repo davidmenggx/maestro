@@ -1,9 +1,23 @@
 #include "maestro/search/search.hpp"
 
+#include <cassert>
+#include <limits>
+
 #include "control_generated.h"
 #include "maestro/search/vanilla_search.hpp"
 
 namespace maestro::search {
+
+namespace {
+
+std::int16_t toWire(int Coordinate) {
+  assert(Coordinate >= std::numeric_limits<std::int16_t>::min() &&
+         Coordinate <= std::numeric_limits<std::int16_t>::max() &&
+         "position does not fit the wire");
+  return static_cast<std::int16_t>(Coordinate);
+}
+
+} // namespace
 
 std::optional<Request> Request::decode(const fbs::PathRequest &Wire) {
   if (!Wire.start() || !Wire.target())
@@ -21,18 +35,27 @@ std::optional<Request> Request::decode(const fbs::PathRequest &Wire) {
 void encodeResponse(flatbuffers::FlatBufferBuilder &Builder,
                     std::uint64_t RequestId, const Result &Path,
                     std::uint64_t WorldSequence) {
-  std::vector<fbs::PathNode> Nodes;
-  Nodes.reserve(Path.Nodes.size());
+  Builder.Clear();
+  fbs::PathNode *Nodes = nullptr;
+  const auto NodesVec =
+      Builder.CreateUninitializedVectorOfStructs(Path.Nodes.size(), &Nodes);
   for (const PathPoint &Point : Path.Nodes)
-    Nodes.emplace_back(fbs::Vec3s(static_cast<std::int16_t>(Point.Pos.X),
-                                  static_cast<std::int16_t>(Point.Pos.Y),
-                                  static_cast<std::int16_t>(Point.Pos.Z)),
-                       Point.Type);
-  const auto NodesVec = Builder.CreateVectorOfStructs(Nodes);
+    *Nodes++ =
+        fbs::PathNode(fbs::Vec3s(toWire(Point.Pos.X), toWire(Point.Pos.Y),
+                                 toWire(Point.Pos.Z)),
+                      Point.Type);
   const auto Response = fbs::CreatePathResponse(
       Builder, RequestId, Path.Reached, NodesVec, Path.Cost, WorldSequence);
   Builder.Finish(fbs::CreateResponseFrame(
       Builder, fbs::ResponseMsg::PathResponse, Response.Union()));
+}
+
+void encodeUnknownProfile(flatbuffers::FlatBufferBuilder &Builder,
+                          std::uint64_t RequestId, std::uint16_t ClassId) {
+  Builder.Clear();
+  const auto Body = fbs::CreateUnknownProfile(Builder, RequestId, ClassId);
+  Builder.Finish(fbs::CreateResponseFrame(
+      Builder, fbs::ResponseMsg::UnknownProfile, Body.Union()));
 }
 
 std::unique_ptr<Search> makeSearch(fbs::Pathfinder Kind) {

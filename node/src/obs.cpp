@@ -8,7 +8,8 @@
 #include "opentelemetry/exporters/otlp/otlp_grpc_exporter_factory.h"
 #include "opentelemetry/exporters/otlp/otlp_grpc_exporter_options.h"
 #include "opentelemetry/sdk/resource/resource.h"
-#include "opentelemetry/sdk/trace/simple_processor_factory.h"
+#include "opentelemetry/sdk/trace/batch_span_processor_factory.h"
+#include "opentelemetry/sdk/trace/batch_span_processor_options.h"
 #include "opentelemetry/sdk/trace/tracer_provider_factory.h"
 #include "opentelemetry/trace/provider.h"
 
@@ -27,8 +28,8 @@ void init(std::string_view ServiceName, std::string_view OtlpEndpoint) {
   otlp::OtlpGrpcExporterOptions Opts;
   Opts.endpoint = std::string(OtlpEndpoint);
   auto Exporter = otlp::OtlpGrpcExporterFactory::Create(Opts);
-  auto Processor =
-      trace_sdk::SimpleSpanProcessorFactory::Create(std::move(Exporter));
+  auto Processor = trace_sdk::BatchSpanProcessorFactory::Create(
+      std::move(Exporter), trace_sdk::BatchSpanProcessorOptions{});
 
   auto ServiceResource = resource::Resource::Create({
       {"service.name", std::string(ServiceName)},

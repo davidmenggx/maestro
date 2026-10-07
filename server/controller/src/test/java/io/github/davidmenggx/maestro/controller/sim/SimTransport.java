@@ -18,7 +18,8 @@ import java.util.Set;
  * to survive that.
  *
  * <p>Process death resets the connection, so the controller sees it happen. A partition does not,
- * so only a failure detector can find one.
+ * so only a failure detector can find one. A stall holds only the ordered channels, the way TCP
+ * holds a stream while it retransmits, so unordered frames overtake what it holds.
  */
 public final class SimTransport implements Transport {
 
@@ -37,6 +38,7 @@ public final class SimTransport implements Transport {
   private final Set<NodeId> connected = new LinkedHashSet<>();
   private final Set<NodeId> dead = new LinkedHashSet<>();
   private final Set<NodeId> partitioned = new LinkedHashSet<>();
+  private final Set<NodeId> stalled = new LinkedHashSet<>();
   private final Map<NodeId, Integer> epoch = new LinkedHashMap<>();
   private final Map<Link, Long> lastDelivery = new LinkedHashMap<>();
   private final Map<Link, List<byte[]>> backlog = new LinkedHashMap<>();
@@ -133,11 +135,21 @@ public final class SimTransport implements Transport {
 
   /** Ordered frames are held and replayed when the partition lifts; unordered ones are lost. */
   public void partition(NodeId node, boolean active) {
+    hold(partitioned, node, active);
+  }
+
+  /** Ordered frames are held and replayed when the stall ends; unordered ones still flow. */
+  public void stall(NodeId node, boolean active) {
+    hold(stalled, node, active);
+  }
+
+  /** Held frames are released once neither a partition nor a stall holds the node. */
+  private void hold(Set<NodeId> holding, NodeId node, boolean active) {
     if (active) {
-      partitioned.add(node);
+      holding.add(node);
       return;
     }
-    if (!partitioned.remove(node)) {
+    if (!holding.remove(node) || partitioned.contains(node) || stalled.contains(node)) {
       return;
     }
     int sentEpoch = epoch.getOrDefault(node, 0);
@@ -179,7 +191,13 @@ public final class SimTransport implements Transport {
     }
 
     if (channel.ordered()) {
-      deliverInOrder(new Link(node, channel, direction), bytes, sentEpoch, "frame:" + channel);
+      Link link = new Link(node, channel, direction);
+      if (stalled.contains(node)) {
+        backlog.computeIfAbsent(link, held -> new ArrayList<>()).add(bytes);
+        sim.metrics().count("transport.held", 1, "node", nodeLabel, "channel", channel.name());
+        return;
+      }
+      deliverInOrder(link, bytes, sentEpoch, "frame:" + channel);
       return;
     }
 

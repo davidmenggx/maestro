@@ -78,12 +78,21 @@ struct CellEdit {
 /// A new version shares every chunk and column it did not change, so a search
 /// can hold a version for as long as it runs while newer ones are published.
 /// A chunk with no state reads as air, as does anything outside the area.
+///
+/// A version also names the stream it belongs to, so `run`, `regionId` and
+/// `sequence` read from one version always describe the same stream position.
 class Area {
 public:
-  /// An area that is air throughout.
-  Area(Geometry Geo, std::uint64_t Sequence);
+  /// An area that is air throughout, before the first frame of the stream
+  /// `ControllerRun` and `RegionId` name.
+  Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId);
 
   const Geometry &geometry() const { return Geo; }
+
+  /// Controller run the area was assigned by.
+  std::uint64_t run() const { return ControllerRun; }
+
+  std::uint32_t regionId() const { return RegionId; }
 
   /// Sequence of the last world frame applied, or 0 before the first.
   std::uint64_t sequence() const { return Sequence; }
@@ -105,10 +114,24 @@ public:
                                         std::uint64_t Sequence) const;
 
 private:
+  /// The chunks at one `ChunkX`, indexed by `ChunkZ`. A null chunk reads as
+  /// air.
+  using ChunkRow = std::vector<ChunkPtr>;
+  using RowPtr = std::shared_ptr<const ChunkRow>;
+
+  /// A writable copy of the row at `ChunkX`, or a row of air if it has none.
+  std::shared_ptr<ChunkRow> copyRow(int ChunkX) const;
+
+  const ChunkPtr *chunkAt(int X, int Z) const;
+
   Geometry Geo;
-  std::uint64_t Sequence;
-  /// Indexed `ChunkX * chunksPerSide() + ChunkZ`.
-  std::vector<ChunkPtr> Chunks;
+  std::uint64_t ControllerRun;
+  std::uint32_t RegionId;
+  std::uint64_t Sequence = 0;
+  /// Indexed by `ChunkX`. A frame copies this table and the rows it touches,
+  /// so a one-chunk change copies about two rows of pointers rather than one
+  /// pointer per chunk in the area. A null row reads as air.
+  std::vector<RowPtr> Rows;
   /// Shared by every chunk that is materialized from air.
   ColumnPtr AirColumn;
 };

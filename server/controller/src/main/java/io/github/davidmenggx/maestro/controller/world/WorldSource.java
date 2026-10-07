@@ -31,7 +31,7 @@ public interface WorldSource {
   byte pathTypeAt(int x, int y, int z);
 
   /**
-   * Top of the block's collision shape in sixteenths, matching what a {@link
+   * Top of the block's collision shape in sixteenths rounded up, matching what a {@link
    * WorldEvent.BlockChanged} would carry.
    */
   int floorAt(int x, int y, int z);

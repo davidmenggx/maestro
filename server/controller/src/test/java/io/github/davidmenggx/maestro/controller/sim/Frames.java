@@ -28,6 +28,10 @@ import maestro.fbs.WorldMsg;
  * Everything the controller puts on the wire, encoded with the generated bindings. Kept apart from
  * the controller so a test can build the frames a run would build, and so the encoding reads as one
  * piece.
+ *
+ * <p>The generated setters take an {@code int} and cast it to the field's width without a check, so
+ * every value that has not already been range checked at the boundary goes through {@link #int16}
+ * or {@link #uint16} first.
  */
 public final class Frames {
 
@@ -55,7 +59,7 @@ public final class Frames {
       if (runCount == packedRuns.length) {
         packedRuns = Arrays.copyOf(packedRuns, runCount * 2);
       }
-      packedRuns[runCount++] = (length << 16) | cell;
+      packedRuns[runCount++] = (uint16(length) << 16) | cell;
     }
   }
 
@@ -141,9 +145,9 @@ public final class Frames {
       Pos pos = cell.pos();
       CellDelta.createCellDelta(
           builder,
-          (short) (pos.x() - originX),
-          (short) pos.y(),
-          (short) (pos.z() - originZ),
+          int16(pos.x() - originX),
+          int16(pos.y()),
+          int16(pos.z() - originZ),
           cell.pathType(),
           cell.floor());
     }
@@ -187,11 +191,9 @@ public final class Frames {
     RegionAssignment.startRegionAssignment(builder);
     RegionAssignment.addRun(builder, run);
     RegionAssignment.addRegionId(builder, region);
-    RegionAssignment.addMinXz(
-        builder, Vec2i.createVec2i(builder, regions.minX(region), regions.minZ(region)));
-    RegionAssignment.addSize(builder, regions.topology().regionSize());
+    RegionAssignment.addSize(builder, uint16(regions.topology().regionSize()));
     RegionAssignment.addMinY(builder, world.minY());
-    RegionAssignment.addHeight(builder, world.height());
+    RegionAssignment.addHeight(builder, uint16(world.height()));
     RegionAssignment.addResume(builder, resume);
     int assignment = RegionAssignment.endRegionAssignment(builder);
     builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.RegionAssignment, assignment));
@@ -224,6 +226,22 @@ public final class Frames {
 
   private static int vec3(FlatBufferBuilder builder, Pos pos, int originX, int originZ) {
     return Vec3s.createVec3s(
-        builder, (short) (pos.x() - originX), (short) pos.y(), (short) (pos.z() - originZ));
+        builder, int16(pos.x() - originX), int16(pos.y()), int16(pos.z() - originZ));
+  }
+
+  /** {@code value} for a wire {@code short}, refused rather than wrapped if it does not fit. */
+  static short int16(int value) {
+    if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
+      throw new IllegalArgumentException("does not fit a 16-bit wire field: " + value);
+    }
+    return (short) value;
+  }
+
+  /** {@code value} for a wire {@code ushort}, refused rather than wrapped if it does not fit. */
+  static int uint16(int value) {
+    if (value < 0 || value > 0xFFFF) {
+      throw new IllegalArgumentException("does not fit an unsigned 16-bit wire field: " + value);
+    }
+    return value;
   }
 }

@@ -17,7 +17,9 @@ namespace maestro::search {
 ///
 /// Two inputs vanilla reads are not on the wire. The mob's position is taken
 /// to be the bottom centre of the start node, and "in water" means the cell's
-/// type is `WATER` rather than that its fluid is water.
+/// type is `WATER` rather than that its fluid is water. Block shapes are
+/// approximated on purpose: each is a full-width box up to its collision
+/// height, which arrives rounded up to a sixteenth.
 class WalkNodeEvaluator {
 public:
   /// Readies the evaluator for one search. All three must outlive `done`.
@@ -52,7 +54,8 @@ public:
   /// `getPathType`: the static type at one position, cached for the search.
   world::PathType getPathType(int X, int Y, int Z);
 
-  /// `getFloorLevel`: the height a mob at the position stands at.
+  /// `getFloorLevel`: the height a mob at the position stands at, to the
+  /// sixteenth the wire carries.
   double getFloorLevel(int X, int Y, int Z) const;
 
 private:

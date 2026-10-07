@@ -9,14 +9,22 @@
 namespace maestro::search {
 
 /// Open-addressed map from a block position to a small value. Clearing keeps
-/// the slots, so a map reused across searches stops allocating once it has
-/// grown to the largest search. Coordinates must lie in [-2^20, 2^20).
+/// the slots and costs nothing, so a map reused across searches stops
+/// allocating once it has grown to the largest search, and a small search
+/// after a large one does not pay for the large one's slots. Coordinates must
+/// lie in [-2^20, 2^20).
 template <typename V> class CoordMap {
 public:
   void clear() {
-    for (Slot &S : Slots)
-      S.Key = EmptyKey;
     Size = 0;
+    // A slot is live only if it carries the current generation, so moving to
+    // the next one empties every slot at once. Once the counter wraps, stale
+    // slots could carry it again, so they are wiped first.
+    if (++Generation == 0) {
+      for (Slot &S : Slots)
+        S.Generation = 0;
+      Generation = 1;
+    }
   }
 
   /// The value at the position, or null if there is none.
@@ -24,7 +32,7 @@ public:
     if (Slots.empty())
       return nullptr;
     const Slot &S = slotFor(pack(X, Y, Z));
-    return S.Key == EmptyKey ? nullptr : &S.Value;
+    return live(S) ? &S.Value : nullptr;
   }
 
   /// The value at the position, inserting `Fallback` first if there is none.
@@ -35,23 +43,26 @@ public:
       grow();
     const std::uint64_t Key = pack(X, Y, Z);
     Slot &S = slotFor(Key);
-    if (S.Key == Key)
+    if (live(S))
       return {&S.Value, false};
     S.Key = Key;
+    S.Generation = Generation;
     S.Value = Fallback;
     ++Size;
     return {&S.Value, true};
   }
 
 private:
-  /// Packing never sets the top bit, so no position packs to this.
-  static constexpr std::uint64_t EmptyKey = ~std::uint64_t{0};
   static constexpr std::size_t MinSlots = 64;
 
   struct Slot {
-    std::uint64_t Key = EmptyKey;
+    std::uint64_t Key = 0;
+    /// 0 is never current, so a slot starts out empty.
+    std::uint16_t Generation = 0;
     V Value{};
   };
+
+  bool live(const Slot &S) const { return S.Generation == Generation; }
 
   static std::uint64_t pack(int X, int Y, int Z) {
     constexpr std::uint64_t Mask = (std::uint64_t{1} << 21) - 1;
@@ -71,11 +82,11 @@ private:
     return Z ^ (Z >> 31);
   }
 
-  /// The slot holding `Key`, or the empty slot where it would go.
+  /// The live slot holding `Key`, or the empty slot where it would go.
   Slot &slotFor(std::uint64_t Key) {
     const std::size_t Mask = Slots.size() - 1;
     for (std::size_t I = mix(Key) & Mask;; I = (I + 1) & Mask)
-      if (Slots[I].Key == Key || Slots[I].Key == EmptyKey)
+      if (!live(Slots[I]) || Slots[I].Key == Key)
         return Slots[I];
   }
 
@@ -87,12 +98,13 @@ private:
     std::vector<Slot> Old = std::move(Slots);
     Slots.assign(std::max(MinSlots, Old.size() * 2), Slot{});
     for (const Slot &S : Old)
-      if (S.Key != EmptyKey)
+      if (live(S))
         slotFor(S.Key) = S;
   }
 
   std::vector<Slot> Slots;
   std::size_t Size = 0;
+  std::uint16_t Generation = 1;
 };
 
 } // namespace maestro::search

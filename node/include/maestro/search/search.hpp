@@ -53,10 +53,18 @@ struct Result {
   float Cost = 0.0F;
 };
 
-/// Encodes `Path` as a finished `ResponseFrame` in `Builder`.
+/// Encodes `Path` as a finished `ResponseFrame` in `Builder`, which is cleared
+/// first so one builder can be reused for every response. Every position must
+/// fit the wire's 16 bits, which holds for any search of an area the
+/// controller admitted.
 void encodeResponse(flatbuffers::FlatBufferBuilder &Builder,
                     std::uint64_t RequestId, const Result &Path,
                     std::uint64_t WorldSequence);
+
+/// Encodes the answer to a request naming a profile this node has not been
+/// sent, as a finished `ResponseFrame` in `Builder`, which is cleared first.
+void encodeUnknownProfile(flatbuffers::FlatBufferBuilder &Builder,
+                          std::uint64_t RequestId, std::uint16_t ClassId);
 
 /// One pathfinding algorithm. A node picks one at startup and reports it in
 /// `Hello`, so a fleet runs a single search. An instance keeps scratch state

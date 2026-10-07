@@ -37,6 +37,8 @@ import maestro.fbs.RequestFrame;
 import maestro.fbs.RequestMsg;
 import maestro.fbs.ResponseFrame;
 import maestro.fbs.ResponseMsg;
+import maestro.fbs.UnknownProfile;
+import maestro.fbs.Vec2i;
 import maestro.fbs.Vec3s;
 import maestro.fbs.WorldDelta;
 import maestro.fbs.WorldFrame;
@@ -47,8 +49,11 @@ import maestro.fbs.WorldMsg;
  * region state a stateful node would hold, and answers requests at a fixed rate. Paths are straight
  * lines, because what is under test here is the controller and the wire, not A*.
  *
- * <p>Everything it refuses to accept is recorded in {@link #violations()} rather than thrown, so
- * one run reports every problem it hit.
+ * <p>It refuses exactly the world frames the real node's {@code WorldStore} refuses, and reacts the
+ * same way: nothing in the frame is applied, everything held is dropped, and the link is reset so
+ * the node reconnects reporting nothing held. A correct controller never sends such a frame, so
+ * each refusal is also recorded in {@link #violations()} rather than thrown, and one run reports
+ * every problem it hit.
  */
 public final class ModeledNode {
 
@@ -75,13 +80,11 @@ public final class ModeledNode {
   private final Set<Short> knownClasses = new LinkedHashSet<>();
   private final List<String> violations = new ArrayList<>();
 
-  private boolean assigned;
-
   /** Set by a fresh assignment: the next frame's sequence is whatever the controller is up to. */
   private boolean awaitingBaseline;
 
   private long run;
-  private int regionId;
+  private long regionId;
   private int size;
   private int baseY;
   private int height;
@@ -140,8 +143,8 @@ public final class ModeledNode {
         .value();
   }
 
+  /** Process death, or a full reset after a refused frame: nothing the node held survives. */
   void kill() {
-    assigned = false;
     awaitingBaseline = false;
     run = 0;
     regionId = 0;
@@ -195,15 +198,25 @@ public final class ModeledNode {
   }
 
   private void onWorld(ByteBuffer frame) {
-    WorldFrame world = WorldFrame.getRootAsWorldFrame(frame);
-    switch (world.bodyType()) {
+    String refusal = applyWorld(WorldFrame.getRootAsWorldFrame(frame));
+    if (refusal == null) {
+      return;
+    }
+    violations.add(id + ": " + refusal);
+    kill();
+    transport.resetLink(id);
+  }
+
+  /** Applies one world frame, or returns why the real node would refuse it. */
+  private String applyWorld(WorldFrame world) {
+    return switch (world.bodyType()) {
       case WorldMsg.ChunkSnapshot ->
           applyChunkSnapshot((ChunkSnapshot) world.body(new ChunkSnapshot()));
       case WorldMsg.WorldDelta -> applyDelta((WorldDelta) world.body(new WorldDelta()));
       case WorldMsg.RegionAssignment ->
           assign((RegionAssignment) world.body(new RegionAssignment()));
-      default -> violations.add(id + ": unknown world body " + world.bodyType());
-    }
+      default -> "unknown world body " + world.bodyType();
+    };
   }
 
   private void onRequest(ByteBuffer frame) {
@@ -236,80 +249,107 @@ public final class ModeledNode {
     knownClasses.add((short) profile.classId());
   }
 
-  private void assign(RegionAssignment assignment) {
-    if (assignment.resume() && (!hasState() || assignment.run() != run)) {
-      violations.add(id + ": told to resume a stream it does not hold");
-      return;
+  private String assign(RegionAssignment assignment) {
+    int newSize = assignment.size();
+    int newBaseY = assignment.minY();
+    int newHeight = assignment.height();
+    // Positions on the wire are shorts, so the whole area has to fit in one.
+    if (newSize <= 0
+        || newSize % Chunks.SIZE != 0
+        || newSize > Short.MAX_VALUE
+        || newHeight <= 0
+        || newBaseY < Short.MIN_VALUE
+        || (long) newBaseY + newHeight - 1 > Short.MAX_VALUE) {
+      return "assigned an area the wire cannot address: size "
+          + newSize
+          + ", y "
+          + newBaseY
+          + " + "
+          + newHeight;
     }
-    run = assignment.run();
-    regionId = (int) assignment.regionId();
-    assigned = true;
+
     if (assignment.resume()) {
-      return;
+      // Resuming keeps what is held, so it has to be the stream the controller
+      // thinks it is continuing.
+      if (!hasState()
+          || assignment.run() != run
+          || assignment.regionId() != regionId
+          || newSize != size
+          || newBaseY != baseY
+          || newHeight != height) {
+        return "told to resume a stream it does not hold";
+      }
+      return null;
     }
+
     // Everything the node holds is air until a chunk says otherwise, which is what
     // vanilla reads for a chunk the server is not holding.
-    size = assignment.size();
-    baseY = assignment.minY();
-    height = assignment.height();
+    run = assignment.run();
+    regionId = assignment.regionId();
+    size = newSize;
+    baseY = newBaseY;
+    height = newHeight;
     cells = new byte[size * size * height];
     floors = new byte[cells.length];
     Arrays.fill(cells, (byte) PathType.OPEN);
     lastSequence = 0;
     awaitingBaseline = true;
+    return null;
   }
 
   /**
-   * Records a gap if the frame is not the one expected next. The first frame after a fresh
-   * assignment sets the baseline, since the controller's sequence carries on across a reset and the
-   * node cannot know where it got to.
+   * Why {@code sequence} may not follow what is held, or null if it may. The first frame after a
+   * fresh assignment sets the baseline, since the controller's sequence carries on across a reset
+   * and the node cannot know where it got to.
    */
-  private void advanceSequence(long sequence) {
-    if (awaitingBaseline) {
-      awaitingBaseline = false;
-      lastSequence = sequence;
-      return;
+  private String admit(long sequence) {
+    if (sequence == 0) {
+      return "world frame with sequence 0";
     }
-    if (sequence != lastSequence + 1) {
-      violations.add(
-          id + ": world sequence gap, expected " + (lastSequence + 1) + " got " + sequence);
+    if (!awaitingBaseline && sequence != lastSequence + 1) {
+      return "world sequence gap, expected " + (lastSequence + 1) + " got " + sequence;
     }
-    lastSequence = Math.max(lastSequence, sequence);
+    return null;
   }
 
-  private void applyChunkSnapshot(ChunkSnapshot snapshot) {
-    if (!assigned || cells.length == 0) {
-      violations.add(id + ": chunk before region assignment");
-      return;
-    }
-    advanceSequence(snapshot.sequence());
+  private void advance(long sequence) {
+    awaitingBaseline = false;
+    lastSequence = sequence;
+  }
 
-    int originX = snapshot.chunkXz().x() * Chunks.SIZE;
-    int originZ = snapshot.chunkXz().z() * Chunks.SIZE;
-    if (originX < 0
-        || originZ < 0
-        || originX + Chunks.SIZE > size
-        || originZ + Chunks.SIZE > size) {
-      violations.add(
-          id
-              + ": chunk "
-              + snapshot.chunkXz().x()
-              + ","
-              + snapshot.chunkXz().z()
-              + " falls outside the assigned area");
-      return;
+  private String applyChunkSnapshot(ChunkSnapshot snapshot) {
+    if (cells.length == 0) {
+      return "chunk before region assignment";
+    }
+    Vec2i position = snapshot.chunkXz();
+    int perSide = size / Chunks.SIZE;
+    if (position == null
+        || position.x() < 0
+        || position.x() >= perSide
+        || position.z() < 0
+        || position.z() >= perSide) {
+      return "chunk "
+          + (position == null ? "without a position" : position.x() + "," + position.z())
+          + " falls outside the assigned area";
     }
 
+    String broken = checkChunkContract(snapshot);
+    if (broken != null) {
+      return broken;
+    }
+    String refused = admit(snapshot.sequence());
+    if (refused != null) {
+      return refused;
+    }
+    advance(snapshot.sequence());
+
+    int originX = position.x() * Chunks.SIZE;
+    int originZ = position.z() * Chunks.SIZE;
     // No columns means the server is not holding the chunk, so it reads as air.
     if (snapshot.runCountsLength() == 0) {
       fillChunk(originX, originZ, (byte) PathType.OPEN, (byte) 0);
-      return;
+      return null;
     }
-    if (snapshot.runCountsLength() != Chunks.SIZE * Chunks.SIZE) {
-      violations.add(id + ": chunk covers " + snapshot.runCountsLength() + " columns");
-      return;
-    }
-
     CellRun cellRun = new CellRun();
     int runIndex = 0;
     for (int column = 0; column < snapshot.runCountsLength(); column++) {
@@ -317,27 +357,52 @@ public final class ModeledNode {
       int y = 0;
       for (int r = snapshot.runCounts(column); r > 0; r--) {
         snapshot.runs(cellRun, runIndex++);
-        byte type = (byte) cellRun.nodeType();
-        if (!PathTypes.isPerBlock(type)) {
-          violations.add(id + ": chunk run carries derived type " + PathTypes.name(type));
-          return;
-        }
-        byte floor = (byte) cellRun.floor();
         for (int i = 0; i < cellRun.length(); i++) {
-          if (y >= height) {
-            violations.add(id + ": column " + column + " overflows the region height");
-            return;
-          }
-          cells[base + y] = type;
-          floors[base + y] = floor;
+          cells[base + y] = (byte) cellRun.nodeType();
+          floors[base + y] = (byte) cellRun.floor();
           y++;
         }
       }
+    }
+    return null;
+  }
+
+  /**
+   * Why a chunk's runs break the contract, or null if they keep it: exactly one column per
+   * position, every column at full height in runs of at least one block, only per-block types, and
+   * no runs left over. A chunk with no columns is cleared, and carries no runs either.
+   */
+  private String checkChunkContract(ChunkSnapshot snapshot) {
+    int columns = snapshot.runCountsLength();
+    if (columns == 0) {
+      return snapshot.runsLength() == 0 ? null : "cleared chunk carries runs";
+    }
+    if (columns != Chunks.SIZE * Chunks.SIZE) {
+      return "chunk covers " + columns + " columns";
+    }
+    CellRun cellRun = new CellRun();
+    int runIndex = 0;
+    for (int column = 0; column < columns; column++) {
+      int count = snapshot.runCounts(column);
+      if (count == 0 || runIndex + count > snapshot.runsLength()) {
+        return "column " + column + " has " + count + " runs";
+      }
+      int y = 0;
+      for (int r = 0; r < count; r++) {
+        snapshot.runs(cellRun, runIndex++);
+        y += cellRun.length();
+        if (cellRun.length() == 0 || y > height) {
+          return "column " + column + " overflows the region height";
+        }
+        if (!PathTypes.isPerBlock((byte) cellRun.nodeType())) {
+          return "chunk run carries derived type " + PathTypes.name((byte) cellRun.nodeType());
+        }
+      }
       if (y != height) {
-        violations.add(id + ": column " + column + " tiles " + y + " of " + height + " blocks");
-        return;
+        return "column " + column + " tiles " + y + " of " + height + " blocks";
       }
     }
+    return runIndex == snapshot.runsLength() ? null : "chunk carries runs past its last column";
   }
 
   private void fillChunk(int originX, int originZ, byte type, byte floor) {
@@ -352,34 +417,46 @@ public final class ModeledNode {
     }
   }
 
-  private void applyDelta(WorldDelta delta) {
+  private String applyDelta(WorldDelta delta) {
     if (cells.length == 0) {
-      violations.add(id + ": delta " + delta.sequence() + " before any assignment");
-      return;
+      return "delta " + delta.sequence() + " before any assignment";
     }
-    advanceSequence(delta.sequence());
-
     CellDelta cell = new CellDelta();
     for (int i = 0; i < delta.cellsLength(); i++) {
       delta.cells(cell, i);
       byte type = (byte) cell.nodeType();
       if (!PathTypes.isPerBlock(type)) {
-        violations.add(id + ": delta cell carries derived type " + PathTypes.name(type));
-        continue;
+        return "delta cell carries derived type " + PathTypes.name(type);
       }
       Vec3s pos = cell.pos();
-      int index = index(pos.x(), pos.y(), pos.z());
-      if (index >= 0) {
-        cells[index] = type;
-        floors[index] = (byte) cell.floor();
+      if (index(pos.x(), pos.y(), pos.z()) < 0) {
+        return "delta cell " + pos.x() + "," + pos.y() + "," + pos.z() + " outside the area";
       }
     }
+    String refused = admit(delta.sequence());
+    if (refused != null) {
+      return refused;
+    }
+    advance(delta.sequence());
+
+    for (int i = 0; i < delta.cellsLength(); i++) {
+      delta.cells(cell, i);
+      Vec3s pos = cell.pos();
+      int index = index(pos.x(), pos.y(), pos.z());
+      cells[index] = (byte) cell.nodeType();
+      floors[index] = (byte) cell.floor();
+    }
+    return null;
   }
 
   private void enqueue(PathRequest request) {
     long requestId = request.requestId();
     if (!knownClasses.contains((short) request.classId())) {
-      violations.add(id + ": request " + requestId + " names unknown class " + request.classId());
+      // The profile is still on its way, so the controller is told at once rather than
+      // left to time the request out.
+      transport.toController(
+          id, Channel.REQUEST, ByteBuffer.wrap(unknownProfile(requestId, request.classId())));
+      return;
     }
     byte[] prior = answered.get(requestId);
     if (prior != null) {
@@ -405,6 +482,13 @@ public final class ModeledNode {
     builder.finish(
         ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Heartbeat, heartbeat));
     transport.toController(id, Channel.CONTROL, ByteBuffer.wrap(builder.sizedByteArray()));
+  }
+
+  private static byte[] unknownProfile(long requestId, int classId) {
+    FlatBufferBuilder builder = new FlatBufferBuilder(64);
+    int reply = UnknownProfile.createUnknownProfile(builder, requestId, classId);
+    builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.UnknownProfile, reply));
+    return builder.sizedByteArray();
   }
 
   private byte[] buildResponse(Pending pending) {

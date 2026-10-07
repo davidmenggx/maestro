@@ -69,6 +69,8 @@ class FuzzTest {
       assertTrue(run.out.answered() > 0, run.describe());
       assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
       assertEquals(0, run.out.dropped(DropReason.SHED), run.describe());
+      // Nothing holds the control channel back, so every profile lands before a request names it.
+      assertEquals(0, run.sim.metrics().total("path.profile.unknown"), run.describe());
     }
   }
 
@@ -89,6 +91,8 @@ class FuzzTest {
           run.fleetCounter("transport.received", Channel.WORLD),
           run.describe());
       assertEquals(0, run.fleetCounter("transport.dropped", Channel.WORLD), run.describe());
+      // Loss on the request stream never reorders it ahead of a profile.
+      assertEquals(0, run.sim.metrics().total("path.profile.unknown"), run.describe());
     }
 
     assertTrue(duplicatesSeen > 0, "expected the request stream to duplicate at least once");
@@ -153,6 +157,8 @@ class FuzzTest {
     long duplicates = 0;
     long framesHeld = 0;
     long linkResets = 0;
+    long overtakenProfiles = 0;
+    long encodeRetries = 0;
     long nodesCompared = 0;
     long deepWorlds = 0;
     long slowFleets = 0;
@@ -176,6 +182,8 @@ class FuzzTest {
       resnapshots += run.sim.metrics().total("world.resnapshot");
       duplicates += run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum();
       linkResets += run.sim.metrics().total("transport.link.reset");
+      overtakenProfiles += run.sim.metrics().total("path.profile.unknown");
+      encodeRetries += run.sim.metrics().total("offload.retried");
       framesHeld += run.fleetCounter("transport.held", Channel.WORLD);
       for (ModeledNode node : run.sim.nodes()) {
         nodesCompared += Invariants.caughtUp(run.controller, node) ? 1 : 0;
@@ -193,6 +201,8 @@ class FuzzTest {
     assertTrue(duplicates > 0, "no request was ever delivered twice");
     assertTrue(framesHeld > 0, "no world frame was ever held behind a partition");
     assertTrue(linkResets > 0, "no connection was ever reset with the process alive");
+    assertTrue(overtakenProfiles > 0, "no request ever overtook the profile it names");
+    assertTrue(encodeRetries > 0, "no failed encode was ever retried");
     assertTrue(nodesCompared > 0, "no node ever caught up far enough to compare its state");
   }
 }

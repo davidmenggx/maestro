@@ -213,6 +213,22 @@ TEST(Schema, ResponseFrameCarriesResolvedNodes) {
   EXPECT_EQ(Decoded->nodes()->Get(1)->pos().x(), 1);
 }
 
+TEST(Schema, ResponseFrameCarriesAnUnknownProfile) {
+  flatbuffers::FlatBufferBuilder Fbb;
+  const auto Body =
+      fbs::CreateUnknownProfile(Fbb, /*request_id=*/12, /*class_id=*/700);
+  Fbb.Finish(fbs::CreateResponseFrame(Fbb, fbs::ResponseMsg::UnknownProfile,
+                                      Body.Union()));
+
+  const auto *Frame =
+      flatbuffers::GetRoot<fbs::ResponseFrame>(Fbb.GetBufferPointer());
+  EXPECT_EQ(Frame->body_as_PathResponse(), nullptr);
+  const auto *Decoded = Frame->body_as_UnknownProfile();
+  ASSERT_NE(Decoded, nullptr);
+  EXPECT_EQ(Decoded->request_id(), 12u);
+  EXPECT_EQ(Decoded->class_id(), 700u);
+}
+
 TEST(Schema, ControlFrameCarriesAFullMalusTable) {
   flatbuffers::FlatBufferBuilder Fbb;
   std::vector<float> Malus(static_cast<int>(fbs::PathType::MAX) + 1, 0.f);
@@ -279,9 +295,8 @@ TEST(Schema, HeartbeatCarriesQueueDepth) {
 
 TEST(Schema, WorldFrameCarriesRegionAssignment) {
   flatbuffers::FlatBufferBuilder Fbb;
-  const fbs::Vec2i MinXz(-256, 512);
   const auto Assignment = fbs::CreateRegionAssignment(
-      Fbb, /*run=*/11, /*region_id=*/4, &MinXz, /*size=*/256, /*min_y=*/-64,
+      Fbb, /*run=*/11, /*region_id=*/4, /*size=*/256, /*min_y=*/-64,
       /*height=*/384, /*resume=*/true);
   Fbb.Finish(fbs::CreateWorldFrame(Fbb, fbs::WorldMsg::RegionAssignment,
                                    Assignment.Union()));
@@ -291,8 +306,6 @@ TEST(Schema, WorldFrameCarriesRegionAssignment) {
   ASSERT_NE(Decoded, nullptr);
   EXPECT_EQ(Decoded->run(), 11u);
   EXPECT_EQ(Decoded->region_id(), 4u);
-  EXPECT_EQ(Decoded->min_xz()->x(), -256);
-  EXPECT_EQ(Decoded->min_xz()->z(), 512);
   EXPECT_EQ(Decoded->size(), 256u);
   EXPECT_EQ(Decoded->min_y(), -64);
   EXPECT_EQ(Decoded->height(), 384u);

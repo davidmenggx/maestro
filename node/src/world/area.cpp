@@ -17,10 +17,6 @@ void appendMerged(std::vector<Run> &Runs, Run R) {
     Runs.push_back(R);
 }
 
-int chunkIndex(const Geometry &Geo, int X, int Z) {
-  return (X / ChunkSize) * Geo.chunksPerSide() + Z / ChunkSize;
-}
-
 int columnIndex(int X, int Z) {
   return (X % ChunkSize) * ChunkSize + Z % ChunkSize;
 }
@@ -54,28 +50,39 @@ std::shared_ptr<const Column> Column::with(int Offset, Cell Value) const {
   return std::make_shared<const Column>(std::move(Out));
 }
 
-Area::Area(Geometry Geo, std::uint64_t Sequence)
-    : Geo(Geo), Sequence(Sequence),
-      Chunks(static_cast<std::size_t>(Geo.chunksPerSide()) *
-             Geo.chunksPerSide()),
+Area::Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId)
+    : Geo(Geo), ControllerRun(ControllerRun), RegionId(RegionId),
+      Rows(static_cast<std::size_t>(Geo.chunksPerSide())),
       AirColumn(std::make_shared<const Column>(
           std::vector<Run>{Run{static_cast<std::uint16_t>(Geo.Height), Air}})) {
+}
+
+const ChunkPtr *Area::chunkAt(int X, int Z) const {
+  const RowPtr &Row = Rows[X / ChunkSize];
+  return Row ? &(*Row)[Z / ChunkSize] : nullptr;
 }
 
 Cell Area::at(int X, int Y, int Z) const {
   if (!Geo.contains(X, Y, Z))
     return Air;
-  const ChunkPtr &Content = Chunks[chunkIndex(Geo, X, Z)];
-  if (!Content)
+  const ChunkPtr *Content = chunkAt(X, Z);
+  if (!Content || !*Content)
     return Air;
-  return (*Content)[columnIndex(X, Z)]->at(Y - Geo.MinY);
+  return (**Content)[columnIndex(X, Z)]->at(Y - Geo.MinY);
 }
 
 const Column *Area::column(int X, int Z) const {
   if (X < 0 || X >= Geo.Size || Z < 0 || Z >= Geo.Size)
     return nullptr;
-  const ChunkPtr &Content = Chunks[chunkIndex(Geo, X, Z)];
-  return Content ? (*Content)[columnIndex(X, Z)].get() : nullptr;
+  const ChunkPtr *Content = chunkAt(X, Z);
+  return Content && *Content ? (**Content)[columnIndex(X, Z)].get() : nullptr;
+}
+
+std::shared_ptr<Area::ChunkRow> Area::copyRow(int ChunkX) const {
+  const RowPtr &Old = Rows[ChunkX];
+  return Old ? std::make_shared<ChunkRow>(*Old)
+             : std::make_shared<ChunkRow>(
+                   static_cast<std::size_t>(Geo.chunksPerSide()));
 }
 
 std::shared_ptr<const Area> Area::withChunk(int ChunkX, int ChunkZ,
@@ -85,7 +92,9 @@ std::shared_ptr<const Area> Area::withChunk(int ChunkX, int ChunkZ,
          ChunkZ < Geo.chunksPerSide() && "chunk outside the area");
   auto Next = std::make_shared<Area>(*this);
   Next->Sequence = Sequence;
-  Next->Chunks[ChunkX * Geo.chunksPerSide() + ChunkZ] = std::move(Content);
+  auto Row = copyRow(ChunkX);
+  (*Row)[ChunkZ] = std::move(Content);
+  Next->Rows[ChunkX] = std::move(Row);
   return Next;
 }
 
@@ -94,27 +103,42 @@ std::shared_ptr<const Area> Area::withCells(std::span<const CellEdit> Edits,
   auto Next = std::make_shared<Area>(*this);
   Next->Sequence = Sequence;
 
-  // Chunks copied for this version so far. A delta touches few chunks, so a
+  // Rows and chunks copied for this version so far. A delta touches few, so a
   // linear scan beats a map.
-  std::vector<std::pair<int, std::shared_ptr<Chunk>>> Copied;
+  std::vector<std::pair<int, std::shared_ptr<ChunkRow>>> CopiedRows;
+  std::vector<std::pair<int, std::shared_ptr<Chunk>>> CopiedChunks;
   for (const CellEdit &Edit : Edits) {
     assert(Geo.contains(Edit.X, Edit.Y, Edit.Z) && "edit outside the area");
-    const int Index = chunkIndex(Geo, Edit.X, Edit.Z);
-    auto It =
-        std::find_if(Copied.begin(), Copied.end(),
+    const int ChunkX = Edit.X / ChunkSize;
+    const int ChunkZ = Edit.Z / ChunkSize;
+
+    auto RowIt =
+        std::find_if(CopiedRows.begin(), CopiedRows.end(),
+                     [&](const auto &Entry) { return Entry.first == ChunkX; });
+    if (RowIt == CopiedRows.end()) {
+      auto Row = copyRow(ChunkX);
+      Next->Rows[ChunkX] = Row;
+      RowIt = CopiedRows.emplace(CopiedRows.end(), ChunkX, std::move(Row));
+    }
+
+    const int Index = ChunkX * Geo.chunksPerSide() + ChunkZ;
+    auto ChunkIt =
+        std::find_if(CopiedChunks.begin(), CopiedChunks.end(),
                      [&](const auto &Entry) { return Entry.first == Index; });
-    if (It == Copied.end()) {
+    if (ChunkIt == CopiedChunks.end()) {
       // A cleared chunk is materialized as air, so an edit to it still lands.
-      const ChunkPtr &Old = Chunks[Index];
+      ChunkPtr &Slot = (*RowIt->second)[ChunkZ];
       auto Fresh = std::make_shared<Chunk>();
-      if (Old)
-        *Fresh = *Old;
+      if (Slot)
+        *Fresh = *Slot;
       else
         Fresh->fill(AirColumn);
-      Next->Chunks[Index] = Fresh;
-      It = Copied.emplace(Copied.end(), Index, std::move(Fresh));
+      Slot = Fresh;
+      ChunkIt =
+          CopiedChunks.emplace(CopiedChunks.end(), Index, std::move(Fresh));
     }
-    ColumnPtr &Target = (*It->second)[columnIndex(Edit.X, Edit.Z)];
+
+    ColumnPtr &Target = (*ChunkIt->second)[columnIndex(Edit.X, Edit.Z)];
     Target = Target->with(Edit.Y - Geo.MinY, Edit.Value);
   }
   return Next;

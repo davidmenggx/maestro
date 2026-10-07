@@ -28,7 +28,8 @@ class EnvContractTest {
   private static final Offload OFFLOAD =
       new Offload() {
         @Override
-        public <T> void submit(String name, Supplier<T> work, Consumer<T> completion) {}
+        public <T> void submit(
+            String name, Supplier<T> work, Consumer<T> completion, Runnable failure) {}
       };
 
   private static final Transport TRANSPORT =

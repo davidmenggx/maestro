@@ -65,3 +65,13 @@ table PathResponse {
   cost:float;
   world_sequence:ulong;
 }
+
+// The request named a `class_id` the node has not been sent. A profile leaves
+// on the control channel a tick before any request that names it, but that
+// channel is TCP and a retransmit can hold it back for several ticks while
+// requests still arrive over UDP. Answering at once lets the controller drop
+// the request instead of waiting for it to time out.
+table UnknownProfile {
+  request_id:ulong;
+  class_id:ushort;
+}

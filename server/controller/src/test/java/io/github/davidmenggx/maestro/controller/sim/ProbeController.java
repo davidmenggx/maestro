@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import maestro.fbs.ControlReplyFrame;
 import maestro.fbs.ControlReplyMsg;
@@ -31,6 +32,7 @@ import maestro.fbs.PathNode;
 import maestro.fbs.PathResponse;
 import maestro.fbs.ResponseFrame;
 import maestro.fbs.ResponseMsg;
+import maestro.fbs.UnknownProfile;
 
 /**
  * Minimal controller used to prove the seams carry a real workload: it assigns regions, snapshots
@@ -38,7 +40,8 @@ import maestro.fbs.ResponseMsg;
  * failover and the failure detector are absent: those are the logic this harness exists to test.
  *
  * <p>Encoding is offloaded and can finish out of order, but the world stream must still leave in
- * sequence order, so finished frames wait in an outbox until the gap ahead of them is filled.
+ * sequence order, so finished frames wait in an outbox until the gap ahead of them is filled. An
+ * encode that fails is run again under the same sequence, so a gap is always filled eventually.
  */
 public final class ProbeController implements WorldInput, Transport.Listener {
 
@@ -273,18 +276,39 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   @Override
   public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
     switch (channel) {
-      case REQUEST -> onResponse(frame);
+      case REQUEST -> onResponse(node, frame);
       case CONTROL -> onControlReply(node, frame);
       case WORLD -> selfViolations.add(node + " sent a frame on the world channel");
     }
   }
 
-  private void onResponse(ByteBuffer frame) {
+  private void onResponse(NodeId node, ByteBuffer frame) {
     ResponseFrame response = ResponseFrame.getRootAsResponseFrame(frame);
     switch (response.bodyType()) {
       case ResponseMsg.PathResponse ->
           onPathResponse((PathResponse) response.body(new PathResponse()));
+      case ResponseMsg.UnknownProfile ->
+          onUnknownProfile(node, (UnknownProfile) response.body(new UnknownProfile()));
       default -> env.metrics().count("controller.unknown.response", 1);
+    }
+  }
+
+  /**
+   * The request overtook the profile it names, which is still on the control channel. That channel
+   * delivers it or breaks the connection, so nothing is sent again: the request is only dropped,
+   * sooner than its timeout would drop it.
+   */
+  private void onUnknownProfile(NodeId node, UnknownProfile reply) {
+    env.metrics().count("path.profile.unknown", 1, "node", node.toString());
+    // Only a profile already sent on this connection can be overtaken. One never sent is a
+    // controller bug the node cannot tell apart from a delay.
+    if (!state(node).registeredClasses.contains((short) reply.classId())) {
+      selfViolations.add(node + " was asked to use profile " + reply.classId() + " never sent");
+    }
+    if (outstanding.containsKey(reply.requestId())) {
+      drop(reply.requestId(), DropReason.CLASS_UNREGISTERED);
+    } else {
+      env.metrics().count("path.response.stale", 1);
     }
   }
 
@@ -628,11 +652,10 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       }
       NodeId node = entry.getKey();
       int region = regions.indexOf(node);
-      env.offload()
-          .submit(
-              "requests",
-              () -> Frames.requests(batch, regions, region),
-              frame -> send(node, Channel.REQUEST, frame));
+      encode(
+          "requests",
+          () -> Frames.requests(batch, regions, region),
+          frame -> send(node, Channel.REQUEST, frame));
     }
   }
 
@@ -642,14 +665,31 @@ public final class ProbeController implements WorldInput, Transport.Listener {
    * finish out of order, so sending each frame as it finishes would leave gaps in the sequence.
    */
   private void offload(NodeId node, long sequence, String job, Supplier<byte[]> work) {
+    encode(
+        job,
+        work,
+        frame -> {
+          NodeState state = state(node);
+          state.outbox.put(sequence, frame);
+          drainOutbox(node, state);
+        });
+  }
+
+  /**
+   * Runs {@code work} off the controller thread, and runs it again at the next tick boundary if it
+   * fails. The work captured everything it reads, so a retry builds the same bytes, and a world
+   * frame keeps the sequence it was given: a number already spent cannot be skipped without leaving
+   * the node a gap.
+   */
+  private void encode(String job, Supplier<byte[]> work, Consumer<byte[]> completion) {
     env.offload()
         .submit(
             job,
             work,
-            frame -> {
-              NodeState state = state(node);
-              state.outbox.put(sequence, frame);
-              drainOutbox(node, state);
+            completion,
+            () -> {
+              env.metrics().count("offload.retried", 1, "job", job);
+              encode(job, work, completion);
             });
   }
 

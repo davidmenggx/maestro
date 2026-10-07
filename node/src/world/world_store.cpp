@@ -14,11 +14,6 @@ namespace maestro::world {
 
 namespace {
 
-/// A cell type read off the wire, which is a raw byte and may name no type.
-bool isValidPerBlock(PathType Type) {
-  return static_cast<int>(Type) < PathTypeCount && isPerBlock(Type);
-}
-
 /// Decodes one chunk's runs, or returns null if they break the contract:
 /// exactly one column per position, every column at full height, and only
 /// per-block types.
@@ -51,7 +46,7 @@ ChunkPtr decodeChunk(const fbs::ChunkSnapshot &Snapshot, int Height,
       const fbs::CellRun *Wire = Runs->Get(Offset + I);
       End += Wire->length();
       if (Wire->length() == 0 || End > Height ||
-          !isValidPerBlock(Wire->node_type())) {
+          !isPerBlock(Wire->node_type())) {
         Malformed = true;
         return nullptr;
       }
@@ -81,6 +76,15 @@ ChunkPtr decodeChunk(const fbs::ChunkSnapshot &Snapshot, int Height,
 } // namespace
 
 ApplyStatus WorldStore::apply(std::span<const std::uint8_t> Frame) {
+  const ApplyStatus Status = applyFrame(Frame);
+  if (Status != ApplyStatus::Applied) {
+    Current.store(nullptr);
+    AwaitingBaseline = false;
+  }
+  return Status;
+}
+
+ApplyStatus WorldStore::applyFrame(std::span<const std::uint8_t> Frame) {
   flatbuffers::Verifier Verifier(Frame.data(), Frame.size());
   if (!fbs::VerifyWorldFrameBuffer(Verifier))
     return ApplyStatus::Malformed;
@@ -105,11 +109,6 @@ ApplyStatus WorldStore::apply(std::span<const std::uint8_t> Frame) {
   return ApplyStatus::Malformed;
 }
 
-std::uint64_t WorldStore::lastSequence() const {
-  const auto Held = pin();
-  return Held ? Held->sequence() : 0;
-}
-
 ApplyStatus WorldStore::assign(const fbs::RegionAssignment &Assignment) {
   const Geometry Geo{Assignment.size(), Assignment.min_y(),
                      Assignment.height()};
@@ -125,16 +124,15 @@ ApplyStatus WorldStore::assign(const fbs::RegionAssignment &Assignment) {
     // Resuming keeps what is held, so it has to be the stream the controller
     // thinks it is continuing.
     const auto Held = pin();
-    if (!Held || Held->sequence() == 0 || Run != Assignment.run() ||
-        RegionId != Assignment.region_id() || Held->geometry() != Geo)
+    if (!Held || Held->sequence() == 0 || Held->run() != Assignment.run() ||
+        Held->regionId() != Assignment.region_id() || Held->geometry() != Geo)
       return ApplyStatus::CannotResume;
     return ApplyStatus::Applied;
   }
 
-  Run = Assignment.run();
-  RegionId = Assignment.region_id();
   AwaitingBaseline = true;
-  Current.store(std::make_shared<const Area>(Geo, 0));
+  Current.store(std::make_shared<const Area>(Geo, Assignment.run(),
+                                             Assignment.region_id()));
   return ApplyStatus::Applied;
 }
 
@@ -175,7 +173,7 @@ ApplyStatus WorldStore::applyDelta(const fbs::WorldDelta &Delta) {
       const CellEdit Edit{Wire->pos().x(), Wire->pos().y(), Wire->pos().z(),
                           Cell{Wire->node_type(), Wire->floor()}};
       if (!Held->geometry().contains(Edit.X, Edit.Y, Edit.Z) ||
-          !isValidPerBlock(Edit.Value.Type))
+          !isPerBlock(Edit.Value.Type))
         return ApplyStatus::Malformed;
       Edits.push_back(Edit);
     }

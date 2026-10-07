@@ -15,7 +15,8 @@ inline constexpr int PathTypeCount = static_cast<int>(PathType::MAX) + 1;
 inline constexpr std::uint8_t FullFloor = 16;
 
 /// One block as the node holds it: the per-block `PathType` and `Floor`, the
-/// top of the block's collision shape in sixteenths (0 when it has none).
+/// top of the block's collision shape in sixteenths (0 when it has none),
+/// rounded up to a whole sixteenth.
 struct Cell {
   PathType Type = PathType::OPEN;
   std::uint8_t Floor = 0;
@@ -27,7 +28,7 @@ struct Cell {
 inline constexpr Cell Air{};
 
 /// Whether `getPathTypeFromState` can return `Type`, which is the only kind of
-/// type a cell on the wire may carry.
+/// type a cell on the wire may carry. A raw byte naming no type is not one.
 constexpr bool isPerBlock(PathType Type) {
   switch (Type) {
   case PathType::BLOCKED:

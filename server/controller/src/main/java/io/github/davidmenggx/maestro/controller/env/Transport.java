@@ -15,11 +15,14 @@ public interface Transport {
    * unordered channel is UDP, one frame per datagram.
    */
   enum Channel {
-    /** World deltas and snapshots: strictly ordered, sequence numbered, resumable. */
+    /**
+     * Region assignments, then chunk state and deltas: strictly ordered, sequence numbered,
+     * resumable.
+     */
     WORLD(true),
     /** Path requests: at-least-once, idempotent, may arrive out of order or twice. */
     REQUEST(false),
-    /** Assignments and heartbeats. */
+    /** Mob profiles to the node; {@code Hello} and heartbeats back. */
     CONTROL(true);
 
     private final boolean ordered;
