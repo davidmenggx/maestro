@@ -98,15 +98,15 @@ class FuzzTest {
   @Test
   @Tag(DEEP)
   void chunkChurnHoldsTheInvariantsAndStaysDeterministic() {
-    long resnapshots = 0;
-    long unreadable = 0;
+    long chunkFrames = 0;
+    long baseline = 0;
 
     for (int i = 0; i < SimRun.runCount(); i++) {
       long seed = SimRun.baseSeed() + i;
       SimRun run = SimRun.of(seed, FaultPlan.reliable(), TICKS, Scenario.CHURN).go();
       assertEquals(List.of(), run.violations(), run.describe());
-      resnapshots += run.sim.metrics().counter("offload.submitted", "job", "snapshot");
-      unreadable += run.out.dropped(DropReason.NO_NODE);
+      chunkFrames += run.sim.metrics().counter("offload.submitted", "job", "chunk");
+      baseline += run.chunkCount();
 
       // Chunk churn adds event kinds and code paths; the run must still replay.
       SimRun again = SimRun.of(seed, FaultPlan.reliable(), TICKS, Scenario.CHURN).go();
@@ -114,8 +114,7 @@ class FuzzTest {
     }
 
     // Confirms chunks did leave and come back, so the assertions above were not vacuous.
-    assertTrue(resnapshots > SimRun.runCount() * 4L, "expected regions to be snapshotted again");
-    assertTrue(unreadable > 0, "expected some requests to find their region unreadable");
+    assertTrue(chunkFrames > baseline, "expected chunks to be cleared and sent again");
   }
 
   @Test

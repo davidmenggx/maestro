@@ -1,6 +1,7 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import com.google.flatbuffers.FlatBufferBuilder;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
@@ -9,21 +10,19 @@ import java.util.Arrays;
 import java.util.List;
 import maestro.fbs.CellDelta;
 import maestro.fbs.CellRun;
+import maestro.fbs.ChunkSnapshot;
 import maestro.fbs.ControlFrame;
 import maestro.fbs.ControlMsg;
-import maestro.fbs.MobClassTable;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
-import maestro.fbs.Ping;
 import maestro.fbs.RegionAssignment;
 import maestro.fbs.RequestFrame;
 import maestro.fbs.RequestMsg;
 import maestro.fbs.Vec2i;
-import maestro.fbs.Vec3i;
+import maestro.fbs.Vec3s;
 import maestro.fbs.WorldDelta;
 import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
-import maestro.fbs.WorldSnapshot;
 
 /**
  * Everything the controller puts on the wire, encoded with the generated bindings. Kept apart from
@@ -35,101 +34,118 @@ public final class Frames {
   private Frames() {}
 
   /** One path request as the controller holds it until the tick is flushed. */
-  public record Request(long requestId, int mobId, short classId, Pos start, Pos target) {}
+  public record Request(
+      long requestId, short classId, Pos start, Pos target, WorldEvent.Search search) {}
+
+  /** Columns in one chunk, indexed `(x - minX) * Chunks.SIZE + (z - minZ)`. */
+  static final int COLUMNS_PER_CHUNK = Chunks.SIZE * Chunks.SIZE;
 
   /**
-   * A region's columns, run-length encoded. Runs are packed one per int as {@code (length << 8) |
-   * pathType}, which keeps a full-height region's worth of runs out of the allocator.
+   * One chunk's columns, run-length encoded. Runs are packed one per int as {@code (length << 16) |
+   * (floor << 8) | pathType}, which keeps a full-height chunk's worth of runs out of the allocator.
    */
-  public static final class RegionRuns {
+  public static final class ChunkRuns {
 
-    private final int[] runsPerColumn;
-    private int[] packedRuns;
+    private final int[] runsPerColumn = new int[COLUMNS_PER_CHUNK];
+    // Flat terrain is two runs a column, so this is the size most chunks settle at.
+    private int[] packedRuns = new int[COLUMNS_PER_CHUNK * 2];
     private int runCount;
 
-    private RegionRuns(int columns) {
-      // Flat terrain is two runs a column, so this is the size most regions settle at.
-      this.runsPerColumn = new int[columns];
-      this.packedRuns = new int[columns * 2];
-    }
-
-    private void add(int length, byte pathType) {
+    private void add(int length, int cell) {
       if (runCount == packedRuns.length) {
         packedRuns = Arrays.copyOf(packedRuns, runCount * 2);
       }
-      packedRuns[runCount++] = (length << 8) | (pathType & 0xFF);
+      packedRuns[runCount++] = (length << 16) | cell;
     }
   }
 
   /**
-   * Reads a region out of the world. The world may only be read on the main thread, so this is
+   * Reads one chunk out of the world. The world may only be read on the main thread, so this is
    * separate from the encoding, which runs off it.
    */
-  public static RegionRuns readRegion(WorldSource world, RegionMap regions, int region) {
-    int regionSize = regions.topology().regionSize();
-    int minX = regions.minX(region);
-    int minZ = regions.minZ(region);
+  public static ChunkRuns readChunk(WorldSource world, int chunkX, int chunkZ) {
+    int minX = chunkX * Chunks.SIZE;
+    int minZ = chunkZ * Chunks.SIZE;
     int minY = world.minY();
     int height = world.height();
-    RegionRuns runs = new RegionRuns(regionSize * regionSize);
-    for (int dx = 0; dx < regionSize; dx++) {
-      for (int dz = 0; dz < regionSize; dz++) {
+    ChunkRuns runs = new ChunkRuns();
+    for (int dx = 0; dx < Chunks.SIZE; dx++) {
+      for (int dz = 0; dz < Chunks.SIZE; dz++) {
         int closedRuns = 0;
         int runLength = 0;
-        byte runType = 0;
+        int runCell = 0;
         for (int dy = 0; dy < height; dy++) {
-          byte type = world.pathTypeAt(minX + dx, minY + dy, minZ + dz);
-          if (runLength > 0 && type == runType) {
+          int x = minX + dx;
+          int y = minY + dy;
+          int z = minZ + dz;
+          int cell = (world.floorAt(x, y, z) << 8) | (world.pathTypeAt(x, y, z) & 0xFF);
+          if (runLength > 0 && cell == runCell) {
             runLength++;
             continue;
           }
           if (runLength > 0) {
-            runs.add(runLength, runType);
+            runs.add(runLength, runCell);
             closedRuns++;
           }
-          runType = type;
+          runCell = cell;
           runLength = 1;
         }
-        runs.add(runLength, runType);
-        runs.runsPerColumn[dx * regionSize + dz] = closedRuns + 1;
+        runs.add(runLength, runCell);
+        runs.runsPerColumn[dx * Chunks.SIZE + dz] = closedRuns + 1;
       }
     }
     return runs;
   }
 
-  public static byte[] snapshot(long sequence, int baseY, RegionRuns runs) {
+  /** {@code chunkX} and {@code chunkZ} are indices within the region, not world coordinates. */
+  public static byte[] chunkSnapshot(long sequence, int chunkX, int chunkZ, ChunkRuns runs) {
     FlatBufferBuilder builder = new FlatBufferBuilder(4096);
-    int runCountsVector = WorldSnapshot.createRunCountsVector(builder, runs.runsPerColumn);
-    WorldSnapshot.startRunsVector(builder, runs.runCount);
+    int runCountsVector = ChunkSnapshot.createRunCountsVector(builder, runs.runsPerColumn);
+    ChunkSnapshot.startRunsVector(builder, runs.runCount);
     for (int i = runs.runCount - 1; i >= 0; i--) {
       int run = runs.packedRuns[i];
-      CellRun.createCellRun(builder, run >>> 8, run & 0xFF);
+      CellRun.createCellRun(builder, run >>> 16, run & 0xFF, (run >>> 8) & 0xFF);
     }
     int runsVector = builder.endVector();
+    return chunkFrame(builder, sequence, chunkX, chunkZ, runCountsVector, runsVector);
+  }
 
-    WorldSnapshot.startWorldSnapshot(builder);
-    WorldSnapshot.addSequence(builder, sequence);
-    WorldSnapshot.addBaseY(builder, baseY);
-    WorldSnapshot.addRunCounts(builder, runCountsVector);
-    WorldSnapshot.addRuns(builder, runsVector);
-    int snapshot = WorldSnapshot.endWorldSnapshot(builder);
+  /** A chunk the server no longer holds. The node reads it as air, as vanilla does. */
+  public static byte[] chunkCleared(long sequence, int chunkX, int chunkZ) {
+    FlatBufferBuilder builder = new FlatBufferBuilder(64);
+    return chunkFrame(builder, sequence, chunkX, chunkZ, 0, 0);
+  }
 
-    builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.WorldSnapshot, snapshot));
+  private static byte[] chunkFrame(
+      FlatBufferBuilder builder, long sequence, int chunkX, int chunkZ, int runCounts, int runs) {
+    ChunkSnapshot.startChunkSnapshot(builder);
+    ChunkSnapshot.addSequence(builder, sequence);
+    ChunkSnapshot.addChunkXz(builder, Vec2i.createVec2i(builder, chunkX, chunkZ));
+    if (runCounts != 0) {
+      ChunkSnapshot.addRunCounts(builder, runCounts);
+      ChunkSnapshot.addRuns(builder, runs);
+    }
+    int snapshot = ChunkSnapshot.endChunkSnapshot(builder);
+    builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.ChunkSnapshot, snapshot));
     return builder.sizedByteArray();
   }
 
-  /** Region snapshot as the controller would build it, for a test that recomputes one. */
-  public static byte[] snapshot(WorldSource world, RegionMap regions, int region, long sequence) {
-    return snapshot(sequence, world.minY(), readRegion(world, regions, region));
-  }
-
-  public static byte[] delta(long sequence, List<WorldEvent.BlockChanged> cells) {
+  public static byte[] delta(
+      long sequence, List<WorldEvent.BlockChanged> cells, RegionMap regions, int region) {
+    int originX = regions.minX(region);
+    int originZ = regions.minZ(region);
     FlatBufferBuilder builder = new FlatBufferBuilder(256);
     WorldDelta.startCellsVector(builder, cells.size());
     for (int i = cells.size() - 1; i >= 0; i--) {
       WorldEvent.BlockChanged cell = cells.get(i);
+      Pos pos = cell.pos();
       CellDelta.createCellDelta(
-          builder, cell.pos().x(), cell.pos().y(), cell.pos().z(), cell.pathType());
+          builder,
+          (short) (pos.x() - originX),
+          (short) pos.y(),
+          (short) (pos.z() - originZ),
+          cell.pathType(),
+          cell.floor());
     }
     int vector = builder.endVector();
     int delta = WorldDelta.createWorldDelta(builder, sequence, vector);
@@ -137,18 +153,22 @@ public final class Frames {
     return builder.sizedByteArray();
   }
 
-  public static byte[] requests(List<Request> batch, long worldSequence) {
+  public static byte[] requests(List<Request> batch, RegionMap regions, int region) {
+    int originX = regions.minX(region);
+    int originZ = regions.minZ(region);
     FlatBufferBuilder builder = new FlatBufferBuilder(512);
     int[] offsets = new int[batch.size()];
     for (int i = 0; i < batch.size(); i++) {
       Request request = batch.get(i);
+      WorldEvent.Search search = request.search();
       PathRequest.startPathRequest(builder);
       PathRequest.addRequestId(builder, request.requestId());
-      PathRequest.addMobId(builder, request.mobId());
       PathRequest.addClassId(builder, request.classId());
-      PathRequest.addStart(builder, vec3(builder, request.start()));
-      PathRequest.addTarget(builder, vec3(builder, request.target()));
-      PathRequest.addWorldSequence(builder, worldSequence);
+      PathRequest.addStart(builder, vec3(builder, request.start(), originX, originZ));
+      PathRequest.addTarget(builder, vec3(builder, request.target(), originX, originZ));
+      PathRequest.addReachRange(builder, search.reachRange());
+      PathRequest.addMaxPathLength(builder, search.maxPathLength());
+      PathRequest.addMaxVisitedNodes(builder, search.maxVisitedNodes());
       offsets[i] = PathRequest.endPathRequest(builder);
     }
     int requestsVector = PathRequestBatch.createRequestsVector(builder, offsets);
@@ -160,44 +180,27 @@ public final class Frames {
     return builder.sizedByteArray();
   }
 
-  public static byte[] assignment(RegionMap regions, int region, long resumeFrom) {
+  public static byte[] assignment(
+      RegionMap regions, int region, boolean resume, long run, WorldSource world) {
     FlatBufferBuilder builder = new FlatBufferBuilder(128);
-    int regionSize = regions.topology().regionSize();
     RegionAssignment.startRegionAssignment(builder);
+    RegionAssignment.addRun(builder, run);
     RegionAssignment.addRegionId(builder, region);
     RegionAssignment.addMinXz(
         builder, Vec2i.createVec2i(builder, regions.minX(region), regions.minZ(region)));
-    RegionAssignment.addMaxXz(
-        builder,
-        Vec2i.createVec2i(
-            builder, regions.minX(region) + regionSize - 1, regions.minZ(region) + regionSize - 1));
-    RegionAssignment.addResumeFromSequence(builder, resumeFrom);
+    RegionAssignment.addSize(builder, regions.topology().regionSize());
+    RegionAssignment.addMinY(builder, world.minY());
+    RegionAssignment.addHeight(builder, world.height());
+    RegionAssignment.addResume(builder, resume);
     int assignment = RegionAssignment.endRegionAssignment(builder);
     builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.RegionAssignment, assignment));
     return builder.sizedByteArray();
   }
 
-  public static byte[] mobClasses(List<MobClass> classes) {
+  public static byte[] mobClass(MobClass profile) {
     FlatBufferBuilder builder = new FlatBufferBuilder(512);
-    int[] offsets = new int[classes.size()];
-    for (int i = 0; i < classes.size(); i++) {
-      offsets[i] = mobClass(builder, classes.get(i));
-    }
-    int classesVector = MobClassTable.createClassesVector(builder, offsets);
-    MobClassTable.startMobClassTable(builder);
-    MobClassTable.addClasses(builder, classesVector);
-    int table = MobClassTable.endMobClassTable(builder);
-    builder.finish(ControlFrame.createControlFrame(builder, ControlMsg.MobClassTable, table));
-    return builder.sizedByteArray();
-  }
-
-  public static byte[] ping(long sequence, long sendMicros) {
-    FlatBufferBuilder builder = new FlatBufferBuilder(64);
-    Ping.startPing(builder);
-    Ping.addSequence(builder, sequence);
-    Ping.addSendMicros(builder, sendMicros);
-    int ping = Ping.endPing(builder);
-    builder.finish(ControlFrame.createControlFrame(builder, ControlMsg.Ping, ping));
+    builder.finish(
+        ControlFrame.createControlFrame(builder, ControlMsg.MobClass, mobClass(builder, profile)));
     return builder.sizedByteArray();
   }
 
@@ -215,11 +218,11 @@ public final class Frames {
     maestro.fbs.MobClass.addCanOpenDoors(builder, abilities.canOpenDoors());
     maestro.fbs.MobClass.addCanFloat(builder, abilities.canFloat());
     maestro.fbs.MobClass.addCanWalkOverFences(builder, abilities.canWalkOverFences());
-    maestro.fbs.MobClass.addMaxFollowRange(builder, profile.maxFollowRange());
     return maestro.fbs.MobClass.endMobClass(builder);
   }
 
-  private static int vec3(FlatBufferBuilder builder, Pos pos) {
-    return Vec3i.createVec3i(builder, pos.x(), pos.y(), pos.z());
+  private static int vec3(FlatBufferBuilder builder, Pos pos, int originX, int originZ) {
+    return Vec3s.createVec3s(
+        builder, (short) (pos.x() - originX), (short) pos.y(), (short) (pos.z() - originZ));
   }
 }

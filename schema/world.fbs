@@ -2,13 +2,16 @@ include "common.fbs";
 
 namespace maestro.fbs;
 
-// The per-block `PathType` at a cell: Minecraft's `getPathTypeFromState`, which
-// is a pure function of that one block state, not a block id. The
-// neighbor-dependent and mob-dependent types are derived on the node at query
-// time, so a block change produces exactly one `CellDelta`.
+// One block as the node needs it: the per-block `PathType` (Minecraft's
+// `getPathTypeFromState`, a pure function of that block state) and `floor`,
+// the top of the block's collision shape in sixteenths, which is what
+// `getFloorLevel` reads from the block below a node. Neighbor-dependent and
+// mob-dependent types are derived on the node at query time, so a block change
+// produces exactly one `CellDelta`.
 struct CellDelta {
-  pos:Vec3i;
+  pos:Vec3s;
   node_type:PathType;
+  floor:ubyte;
 }
 
 // One frame of the ordered world stream, applied on the immediately preceding
@@ -18,24 +21,30 @@ table WorldDelta {
   cells:[CellDelta];
 }
 
-// A run of vertically contiguous cells sharing one `PathType`.
+// A run of vertically contiguous cells sharing one `PathType` and `floor`.
 struct CellRun {
   length:ushort;
   node_type:PathType;
+  floor:ubyte;
 }
 
-// Full region state at `sequence`, sent on node join or when a node has fallen
-// too far behind to resume. Uses run-length encoding.
+// Full state of one chunk at `sequence`, run-length encoded. An empty
+// `run_counts` means the chunk is not resident on the server, which reads as
+// air: the same answer vanilla's `PathNavigationRegion` gives for a chunk it
+// could not fetch. A node therefore starts its whole area as air and fills it
+// in as chunks arrive, rather than waiting for a region to be complete.
 //
-// Columns are implicit and cover the region densely, indexed
-// `(x - min_x) * width + (z - min_z)` against the bounds in `RegionAssignment`.
-// `run_counts` holds each column's run count in that order, and `runs` is every
-// column's runs concatenated in the same order, so a column's slice starts at
-// the prefix sum of the counts before it. Runs within a column go upward from
-// `base_y` and their lengths sum to the region height.
-table WorldSnapshot {
+// `chunk_xz` is the chunk's index within the assigned area rather than its world
+// chunk coordinate, so it is relative like every other position on the wire.
+// Columns cover the chunk densely, indexed `(x - min_x) * 16 + (z - min_z)`
+// against the chunk's own origin. `run_counts` holds each column's run count in
+// that order, and `runs` is every column's runs concatenated in the same order,
+// so a column's slice starts at the prefix sum of the counts before it. Runs
+// within a column go upward from the `min_y` in `RegionAssignment` and their
+// lengths sum to its `height`.
+table ChunkSnapshot {
   sequence:ulong;
-  base_y:int;
+  chunk_xz:Vec2i;
   run_counts:[ushort];
   runs:[CellRun];
 }

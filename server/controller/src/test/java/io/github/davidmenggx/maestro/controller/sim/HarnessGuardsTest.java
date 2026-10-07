@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
+import io.github.davidmenggx.maestro.controller.env.Transport;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
@@ -32,6 +33,9 @@ import org.junit.jupiter.api.Test;
 class HarnessGuardsTest {
 
   private static final int DRAWS = 300;
+
+  /** Any value works for a node built outside a controller. */
+  private static final long RUN = 7;
 
   private static final RegionMap ONE_REGION =
       new RegionMap(Topology.DEFAULT.withRegionsPerSide(1), List.of(NodeId.of(0)));
@@ -109,8 +113,11 @@ class HarnessGuardsTest {
       for (FaultPlan.Fault fault : plan.faults()) {
         kinds.add(fault.getClass().getSimpleName());
         assertTrue(fault.tick() >= 1 && fault.tick() < active, "fault at tick " + fault.tick());
-        died += fault instanceof FaultPlan.NodeDied ? 1 : 0;
-        recovered += fault instanceof FaultPlan.NodeRecovered ? 1 : 0;
+        if (fault instanceof FaultPlan.NodeDied) {
+          died++;
+        } else if (fault instanceof FaultPlan.NodeRecovered) {
+          recovered++;
+        }
       }
       sawPermanentLoss |= died > recovered;
     }
@@ -134,11 +141,13 @@ class HarnessGuardsTest {
     Simulation sim = new Simulation(5L, FaultPlan.reliable());
     ModeledNode node = sim.addNode(NodeId.of(0), 4);
 
-    // The node holds nothing, so a resume point is a claim it cannot honor.
-    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(ONE_REGION, 0, 7)));
+    // The node holds nothing, so a resume is a claim it cannot honor.
+    SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
+    node.receive(
+        Channel.WORLD, ByteBuffer.wrap(Frames.assignment(ONE_REGION, 0, true, RUN, world)));
 
     assertEquals(1, node.violations().size(), node.violations().toString());
-    assertTrue(node.violations().get(0).contains("resume from 7"), node.violations().toString());
+    assertTrue(node.violations().get(0).contains("resume"), node.violations().toString());
   }
 
   @Test
@@ -148,17 +157,20 @@ class HarnessGuardsTest {
     SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
     world.loadChunk(0, 0);
 
-    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(ONE_REGION, 0, 0)));
-    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.snapshot(world, ONE_REGION, 0, 1)));
+    node.receive(
+        Channel.WORLD, ByteBuffer.wrap(Frames.assignment(ONE_REGION, 0, false, RUN, world)));
+    node.receive(
+        Channel.WORLD,
+        ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
     assertEquals(List.of(), node.violations());
     assertEquals(1, node.lastSequence());
 
     List<WorldEvent.BlockChanged> cells =
-        List.of(new WorldEvent.BlockChanged(0, new Pos(1, 40, 1), (byte) PathType.WATER));
-    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.delta(2, cells)));
+        List.of(new WorldEvent.BlockChanged(0, new Pos(1, 40, 1), (byte) PathType.WATER, 0));
+    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.delta(2, cells, ONE_REGION, 0)));
     assertEquals(List.of(), node.violations());
 
-    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.delta(4, cells)));
+    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.delta(4, cells, ONE_REGION, 0)));
     assertFalse(node.violations().isEmpty(), "a skipped sequence went unreported");
   }
 
@@ -247,14 +259,14 @@ class HarnessGuardsTest {
     SimWorld world = new SimWorld(topology, 2, SeededRng.of(1L));
 
     assertEquals(-64, world.minY());
-    assertThrows(IllegalArgumentException.class, () -> world.set(-1, -60, 0, (byte) 0));
-    assertThrows(IllegalArgumentException.class, () -> world.set(0, 0, 0, (byte) 0));
-    assertThrows(IllegalArgumentException.class, () -> world.set(0, -65, 0, (byte) 0));
+    assertThrows(IllegalArgumentException.class, () -> world.set(-1, -60, 0, (byte) 0, 16));
+    assertThrows(IllegalArgumentException.class, () -> world.set(0, 0, 0, (byte) 0, 16));
+    assertThrows(IllegalArgumentException.class, () -> world.set(0, -65, 0, (byte) 0, 16));
     assertThrows(IllegalArgumentException.class, () -> world.chunkLoaded(9, 9));
     assertThrows(IllegalArgumentException.class, () -> new SimWorld(topology, 0, SeededRng.of(1L)));
     // Derived types cannot be a block's own type.
     assertThrows(
-        IllegalArgumentException.class, () -> world.set(0, -60, 0, (byte) PathType.WALKABLE));
+        IllegalArgumentException.class, () -> world.set(0, -60, 0, (byte) PathType.WALKABLE, 16));
   }
 
   @Test
@@ -264,8 +276,10 @@ class HarnessGuardsTest {
     Set<String> shapes = new LinkedHashSet<>();
     for (int seed = 0; seed < DRAWS; seed++) {
       SimWorld world = new SimWorld(Topology.DEFAULT, 3, SeededRng.of(seed).derive("terrain"));
-      assertEquals(3, world.mobClasses().size());
-      world.mobClasses().forEach(profile -> shapes.add(profile.shape().toString()));
+      assertEquals(3, world.mobClassCount());
+      for (short classId = 1; classId <= world.mobClassCount(); classId++) {
+        shapes.add(world.mobClass(classId).shape().toString());
+      }
     }
     assertTrue(shapes.size() > DRAWS, "mob profiles did not vary across seeds");
   }
@@ -328,8 +342,7 @@ class HarnessGuardsTest {
     }
   }
 
-  private static final class NoopListener
-      implements io.github.davidmenggx.maestro.controller.env.Transport.Listener {
+  private static final class NoopListener implements Transport.Listener {
 
     @Override
     public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {}

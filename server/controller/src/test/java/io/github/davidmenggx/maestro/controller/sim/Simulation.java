@@ -149,7 +149,7 @@ public final class Simulation {
 
       drainUntil(now + SERVICE_STEP);
       for (ModeledNode node : nodes.values()) {
-        node.service(tick);
+        node.service();
       }
       drainUntil(tickEnd - 1);
 

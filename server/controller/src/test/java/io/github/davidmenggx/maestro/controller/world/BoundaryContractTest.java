@@ -5,16 +5,19 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import maestro.fbs.PathType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 /** The boundary rejects values the wire contract forbids, rather than passing them to a node. */
 class BoundaryContractTest {
 
   private static final Pos SOMEWHERE = new Pos(1, 2, 3);
+  private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256);
 
   /** The number of types `getPathTypeFromState` can return, pinned against vanilla. */
   private static final int PER_BLOCK_TYPES = 17;
@@ -32,7 +35,9 @@ class BoundaryContractTest {
 
     int matching = 0;
     for (int ordinal = 0; ordinal < PathTypes.count(); ordinal++) {
-      matching += PathTypes.isPerBlock((byte) ordinal) ? 1 : 0;
+      if (PathTypes.isPerBlock((byte) ordinal)) {
+        matching++;
+      }
     }
     assertEquals(PER_BLOCK_TYPES, matching);
     assertEquals(PER_BLOCK_TYPES, enumerated.size());
@@ -62,24 +67,33 @@ class BoundaryContractTest {
   void aBlockChangeCarryingADerivedTypeIsRejected() {
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathType.WALKABLE));
+        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathType.WALKABLE, 16));
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathTypes.count()));
+        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathTypes.count(), 16));
     assertThrows(
-        IllegalArgumentException.class, () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) -1));
+        IllegalArgumentException.class,
+        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) -1, 16));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathType.BLOCKED, 256));
   }
 
   @Test
   void eventsRejectImpossibleFields() {
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldEvent.PathRequested(-1, 1, SOMEWHERE, SOMEWHERE));
+        () -> new WorldEvent.PathRequested(-1, 1, (short) 1, SOMEWHERE, SOMEWHERE, SEARCH));
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldEvent.MobSpawned(0, 1, (short) -1, SOMEWHERE));
+        () -> new WorldEvent.PathRequested(0, 1, (short) -1, SOMEWHERE, SOMEWHERE, SEARCH));
     assertThrows(
-        NullPointerException.class, () -> new WorldEvent.PathRequested(0, 1, null, SOMEWHERE));
+        NullPointerException.class,
+        () -> new WorldEvent.PathRequested(0, 1, (short) 1, null, SOMEWHERE, SEARCH));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(-1, 16f, 256));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 0f, 256));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, Float.NaN, 256));
+    assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 16f, 0));
   }
 
   @Test
@@ -102,10 +116,73 @@ class BoundaryContractTest {
   }
 
   @Test
-  void aResultCannotPredateItsRequest() {
+  void aPathNodeCarriesAKnownPathType() {
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldOutput.PathResult(1, true, List.of(), 1f, 5, 9));
+        () -> new WorldOutput.Node(SOMEWHERE, (byte) PathTypes.count()));
+    assertThrows(IllegalArgumentException.class, () -> new WorldOutput.Node(SOMEWHERE, (byte) -1));
+  }
+
+  @Test
+  void floorSpansOneByte() {
+    new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathType.OPEN, 0);
+    new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathType.FENCE, Cells.MAX_FLOOR);
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new WorldEvent.BlockChanged(0, SOMEWHERE, (byte) PathType.OPEN, -1));
+  }
+
+  @Test
+  void everyEventRejectsANegativeTickOrMissingPosition() {
+    List<Executable> rejected =
+        List.of(
+            () -> new WorldEvent.TickBegan(-1),
+            () -> new WorldEvent.TickEnded(-1),
+            () -> new WorldEvent.BlockChanged(-1, SOMEWHERE, (byte) PathType.OPEN, 0),
+            () -> new WorldEvent.ChunkLoaded(-1, 0, 0),
+            () -> new WorldEvent.ChunkUnloaded(-1, 0, 0),
+            () -> new WorldEvent.MobSpawned(-1, 1, SOMEWHERE),
+            () -> new WorldEvent.MobRemoved(-1, 1),
+            () -> new WorldEvent.PathCanceled(-1, 1),
+            () -> new WorldEvent.PlayerMoved(-1, 1, SOMEWHERE),
+            () -> new WorldEvent.PlayerLeft(-1, 1));
+    for (Executable event : rejected) {
+      assertThrows(IllegalArgumentException.class, event);
+    }
+
+    List<Executable> missing =
+        List.of(
+            () -> new WorldEvent.BlockChanged(0, null, (byte) PathType.OPEN, 0),
+            () -> new WorldEvent.MobSpawned(0, 1, null),
+            () -> new WorldEvent.PlayerMoved(0, 1, null),
+            () -> new WorldEvent.PathRequested(0, 1, (short) 1, SOMEWHERE, null, SEARCH),
+            () -> new WorldEvent.PathRequested(0, 1, (short) 1, SOMEWHERE, SOMEWHERE, null));
+    for (Executable event : missing) {
+      assertThrows(NullPointerException.class, event);
+    }
+  }
+
+  @Test
+  void aPathResultOwnsItsNodes() {
+    List<WorldOutput.Node> nodes = new ArrayList<>();
+    nodes.add(new WorldOutput.Node(SOMEWHERE, (byte) PathType.WALKABLE));
+    WorldOutput.PathResult result = new WorldOutput.PathResult(1, SOMEWHERE, true, nodes, 1f, 0);
+
+    nodes.clear();
+    assertEquals(1, result.nodes().size());
+    assertThrows(
+        UnsupportedOperationException.class,
+        () -> result.nodes().add(new WorldOutput.Node(SOMEWHERE, (byte) PathType.OPEN)));
+    assertThrows(
+        NullPointerException.class,
+        () -> new WorldOutput.PathResult(1, null, false, List.of(), 0f, 0));
+  }
+
+  @Test
+  void anOutOfRangeOrdinalHasAPrintableName() {
+    assertEquals("OPEN", PathTypes.name((byte) PathType.OPEN));
+    assertEquals("invalid(-1)", PathTypes.name((byte) -1));
+    assertEquals("invalid(" + PathTypes.count() + ")", PathTypes.name((byte) PathTypes.count()));
   }
 
   private static MobClass profile(float[] malus) {
@@ -113,7 +190,6 @@ class BoundaryContractTest {
         (short) 1,
         new MobClass.Shape(0.6f, 1.9f, 0.5f),
         new MobClass.Abilities(true, false, false, false),
-        malus,
-        16);
+        malus);
   }
 }

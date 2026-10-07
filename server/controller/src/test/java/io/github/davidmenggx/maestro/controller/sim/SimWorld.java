@@ -1,6 +1,7 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.Rng;
+import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.PathTypes;
@@ -23,14 +24,17 @@ public final class SimWorld implements WorldSource {
   /** Marks a cell whose type still comes from the terrain rule rather than a block change. */
   private static final byte NO_OVERRIDE = -1;
 
+  /** A bottom slab, so a column's top block can differ from the ones below it by floor alone. */
+  private static final int SLAB_FLOOR = Cells.FULL_FLOOR / 2;
+
+  private static final int FENCE_FLOOR = Cells.FULL_FLOOR * 3 / 2;
+
   private static final float MIN_WIDTH = 0.3f;
   private static final float MAX_EXTRA_WIDTH = 1.2f;
   private static final float MIN_MOB_HEIGHT = 0.5f;
   private static final float MAX_EXTRA_MOB_HEIGHT = 2.5f;
   private static final float MIN_UP_STEP = 0.5f;
   private static final float MAX_EXTRA_UP_STEP = 1.0f;
-  private static final int MIN_FOLLOW_RANGE = 8;
-  private static final int MAX_EXTRA_FOLLOW_RANGE = 40;
   private static final float MAX_MALUS = 16.0f;
 
   /** Fraction of ordinals a profile refuses outright, which vanilla spells as a negative malus. */
@@ -40,7 +44,9 @@ public final class SimWorld implements WorldSource {
   private final int size;
   private final int chunksPerSide;
   private final int[] ground;
+  private final boolean[] slabTopped;
   private final byte[] overrides;
+  private final byte[] overrideFloors;
   private final boolean[] loadedChunks;
   private final List<MobClass> mobClasses;
 
@@ -52,13 +58,16 @@ public final class SimWorld implements WorldSource {
     this.size = topology.extent();
     this.chunksPerSide = topology.chunksPerSide();
     this.ground = new int[size * size];
+    this.slabTopped = new boolean[size * size];
     this.overrides = new byte[size * size * topology.height()];
+    this.overrideFloors = new byte[overrides.length];
     this.loadedChunks = new boolean[chunksPerSide * chunksPerSide];
     Arrays.fill(overrides, NO_OVERRIDE);
 
     int lowestGround = topology.minY() + topology.height() / 2;
     for (int i = 0; i < ground.length; i++) {
       ground[i] = lowestGround + rng.nextInt(topology.relief() + 1);
+      slabTopped[i] = rng.nextInt(4) == 0;
     }
 
     List<MobClass> profiles = new ArrayList<>(mobClassCount);
@@ -69,8 +78,14 @@ public final class SimWorld implements WorldSource {
   }
 
   @Override
-  public List<MobClass> mobClasses() {
-    return mobClasses;
+  public MobClass mobClass(short classId) {
+    int index = classId - 1;
+    return index >= 0 && index < mobClasses.size() ? mobClasses.get(index) : null;
+  }
+
+  /** Profiles this world can hand out, which a workload draws a request's class from. */
+  public int mobClassCount() {
+    return mobClasses.size();
   }
 
   /** Block extent along both axes. */
@@ -100,14 +115,30 @@ public final class SimWorld implements WorldSource {
   }
 
   /** Applies a block change. The workload emits the matching event. */
-  public void set(int x, int y, int z, byte pathType) {
+  public void set(int x, int y, int z, byte pathType, int floor) {
     if (!inside(x, y, z)) {
       throw new IllegalArgumentException("block outside the world: " + x + "," + y + "," + z);
     }
     if (!PathTypes.isPerBlock(pathType)) {
       throw new IllegalArgumentException("not a per-block type: " + PathTypes.name(pathType));
     }
-    overrides[index(x, y, z)] = pathType;
+    if (floor < 0 || floor > Cells.MAX_FLOOR) {
+      throw new IllegalArgumentException("floor out of range: " + floor);
+    }
+    int index = index(x, y, z);
+    overrides[index] = pathType;
+    overrideFloors[index] = (byte) floor;
+  }
+
+  /**
+   * A collision height that goes with the type, as a placed block would have: solid blocks are full
+   * or slabs, fences stand a block and a half, and everything else has no collision.
+   */
+  public static int floorFor(byte pathType, Rng rng) {
+    if (pathType == (byte) PathType.BLOCKED) {
+      return rng.nextBoolean() ? Cells.FULL_FLOOR : SLAB_FLOOR;
+    }
+    return pathType == (byte) PathType.FENCE ? FENCE_FLOOR : 0;
   }
 
   @Override
@@ -122,10 +153,7 @@ public final class SimWorld implements WorldSource {
 
   @Override
   public byte pathTypeAt(int x, int y, int z) {
-    if (!inside(x, y, z)) {
-      return (byte) PathType.BLOCKED;
-    }
-    if (!loadedChunks[chunkIndex(Chunks.of(x), Chunks.of(z))]) {
+    if (!inside(x, y, z) || !loadedChunks[chunkIndex(Chunks.of(x), Chunks.of(z))]) {
       return (byte) PathType.BLOCKED;
     }
     byte override = overrides[index(x, y, z)];
@@ -133,6 +161,22 @@ public final class SimWorld implements WorldSource {
       return override;
     }
     return y <= ground[x * size + z] ? (byte) PathType.BLOCKED : (byte) PathType.OPEN;
+  }
+
+  @Override
+  public int floorAt(int x, int y, int z) {
+    if (!inside(x, y, z) || !loadedChunks[chunkIndex(Chunks.of(x), Chunks.of(z))]) {
+      return Cells.FULL_FLOOR;
+    }
+    int index = index(x, y, z);
+    if (overrides[index] != NO_OVERRIDE) {
+      return overrideFloors[index] & 0xFF;
+    }
+    int column = x * size + z;
+    if (y > ground[column]) {
+      return 0;
+    }
+    return y == ground[column] && slabTopped[column] ? SLAB_FLOOR : Cells.FULL_FLOOR;
   }
 
   /**
@@ -154,12 +198,7 @@ public final class SimWorld implements WorldSource {
     MobClass.Abilities abilities =
         new MobClass.Abilities(
             rng.nextBoolean(), rng.nextBoolean(), rng.nextBoolean(), rng.nextBoolean());
-    return new MobClass(
-        classId,
-        shape,
-        abilities,
-        malus,
-        MIN_FOLLOW_RANGE + rng.nextInt(MAX_EXTRA_FOLLOW_RANGE + 1));
+    return new MobClass(classId, shape, abilities, malus);
   }
 
   private boolean inside(int x, int y, int z) {

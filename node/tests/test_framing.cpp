@@ -41,3 +41,13 @@ TEST(Framing, EncodesLengthLittleEndian) {
   EXPECT_EQ(Framed[3], 0x00);
   EXPECT_EQ(peekLength(Framed), Payload.size());
 }
+
+TEST(Framing, PeekReadsOnlyTheHeader) {
+  const std::vector<std::uint8_t> Payload{0xFF, 0xFF, 0xFF, 0xFF};
+  EXPECT_EQ(peekLength(frame(Payload)), Payload.size());
+}
+
+TEST(Framing, PeekDecodesTheFullUnsignedRange) {
+  const std::vector<std::uint8_t> Header{0xFF, 0xFF, 0xFF, 0xFF};
+  EXPECT_EQ(peekLength(Header), UINT32_MAX);
+}

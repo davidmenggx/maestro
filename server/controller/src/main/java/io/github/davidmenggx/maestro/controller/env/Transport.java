@@ -11,7 +11,8 @@ public interface Transport {
   /**
    * Independent streams to one node. Ordering holds within a channel, never across them. {@link
    * #ordered} says whether a frame can be lost or reordered without the connection breaking. On an
-   * ordered channel it cannot, so a loss reaches the controller as a disconnect.
+   * ordered channel (TCP) it cannot, so a loss reaches the controller as a disconnect. The
+   * unordered channel is UDP, one frame per datagram.
    */
   enum Channel {
     /** World deltas and snapshots: strictly ordered, sequence numbered, resumable. */
@@ -51,8 +52,6 @@ public interface Transport {
   void send(NodeId node, Channel channel, ByteBuffer frame);
 
   void connect(NodeId node, String endpoint);
-
-  void disconnect(NodeId node);
 
   /** Installed once, before any {@link #connect}. */
   void listen(Listener listener);

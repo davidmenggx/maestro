@@ -44,12 +44,12 @@ class SimulationTest {
   }
 
   @Test
-  void eachRegionIsSnapshottedOnceThenStreamedAsDeltas() {
+  void eachChunkIsSentOnceThenStreamedAsDeltas() {
     SimRun run = SimRun.of(3L, FaultPlan.reliable(), TICKS).go();
 
     assertEquals(
-        run.regions.count(),
-        run.sim.metrics().counter("offload.submitted", "job", "snapshot"),
+        run.chunkCount(),
+        run.sim.metrics().counter("offload.submitted", "job", "chunk"),
         run.describe());
     assertTrue(
         run.sim.metrics().counter("offload.submitted", "job", "delta") > run.regions.count(),
@@ -72,12 +72,16 @@ class SimulationTest {
   }
 
   @Test
-  void everyNodeIsToldTheMobClassTableBeforeItIsAskedForAPath() {
+  void everyNodeIsToldAProfileBeforeItIsAskedToUseIt() {
     SimRun run = SimRun.of(17L, FaultPlan.reliable(), TICKS).go();
 
+    // The node reports a violation for a request naming a profile it was never sent, so a clean
+    // run is the claim. Registration costs one request per profile, which the drop count shows.
     assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(run.out.dropped(DropReason.CLASS_UNREGISTERED) > 0, run.describe());
     for (ModeledNode node : run.sim.nodes()) {
-      assertEquals(run.world.mobClasses().size(), node.knownClassCount(), run.describe());
+      assertTrue(node.knownClassCount() > 0, run.describe());
+      assertTrue(node.knownClassCount() <= run.world.mobClassCount(), run.describe());
     }
   }
 
@@ -108,11 +112,11 @@ class SimulationTest {
     assertTrue(
         first.out.dropped(DropReason.NODE_LOST) + first.out.dropped(DropReason.NO_NODE) > 0,
         first.describe());
-    // The world stream restarts from a fresh snapshot rather than resuming into a gap,
+    // The world stream restarts from a fresh send rather than resuming into a gap,
     // and what the node rebuilt has to equal a fresh recomputation of the same world.
     assertTrue(first.sim.node(victim).hasState(), first.describe());
     assertTrue(
-        first.sim.metrics().counter("offload.submitted", "job", "snapshot") > first.regions.count(),
+        first.sim.metrics().counter("offload.submitted", "job", "chunk") > first.chunkCount(),
         first.describe());
     assertEquals(
         List.of(),
@@ -130,10 +134,10 @@ class SimulationTest {
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(
         1, run.sim.metrics().counter("world.resume", "node", victim.toString()), run.describe());
-    // The node kept its state across the reset, so no region was snapshotted twice.
+    // The node kept its state across the reset, so no chunk was sent twice.
     assertEquals(
-        run.regions.count(),
-        run.sim.metrics().counter("offload.submitted", "job", "snapshot"),
+        run.chunkCount(),
+        run.sim.metrics().counter("offload.submitted", "job", "chunk"),
         run.describe());
     assertEquals(
         List.of(), Invariants.checkAgainstFreshSnapshot(run, run.sim.node(victim)), run.describe());
@@ -166,10 +170,28 @@ class SimulationTest {
         run.sim.metrics().counter("world.resnapshot", "node", victim.toString()),
         run.describe());
     assertTrue(
-        run.sim.metrics().counter("offload.submitted", "job", "snapshot") > run.regions.count(),
+        run.sim.metrics().counter("offload.submitted", "job", "chunk") > run.chunkCount(),
         run.describe());
     assertEquals(
         List.of(), Invariants.checkAgainstFreshSnapshot(run, run.sim.node(victim)), run.describe());
+  }
+
+  @Test
+  void aNodeReportsItsQueueDepthWithoutBeingAsked() {
+    SimRun run = SimRun.of(31L, FaultPlan.reliable(), TICKS, Scenario.SATURATED).go();
+
+    // Saturated, so the fleet is held to the admission bound rather than the SLO.
+    assertEquals(List.of(), run.violations(ProbeController.MAX_TICKS_LATE), run.describe());
+    // Nothing on the control channel asks for this, so a depth arriving at all is the claim.
+    assertTrue(
+        run.regions.nodes().stream()
+            .anyMatch(
+                node ->
+                    run.sim
+                            .metrics()
+                            .percentile("node.queue.reported", 1.0, "node", node.toString())
+                        > 0),
+        run.describe());
   }
 
   @Test

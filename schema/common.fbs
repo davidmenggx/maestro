@@ -38,11 +38,12 @@ enum PathType : ubyte {
   BIG_MOBS_CLOSE_TO_DANGER
 }
 
-// Positions are region-relative (stateful) or horizon-relative (stateless).
-struct Vec3i {
-  x:int;
-  y:int;
-  z:int;
+// Block position with `x` and `z` relative to the `min_xz` of the node's
+// `RegionAssignment` and `y` absolute.
+struct Vec3s {
+  x:short;
+  y:short;
+  z:short;
 }
 
 struct Vec2i {

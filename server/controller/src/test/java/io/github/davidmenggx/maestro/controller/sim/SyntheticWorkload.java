@@ -4,7 +4,6 @@ import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
-import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
@@ -12,7 +11,6 @@ import io.github.davidmenggx.maestro.controller.world.WorldInput;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -32,11 +30,31 @@ public final class SyntheticWorkload implements Workload {
   /** How far outside the region grid a stray request starts. */
   private static final int MAX_STRAY_DISTANCE = 8;
 
+  /**
+   * `reachRange` values vanilla passes: 0 and 1 at nearly every call site, and 6 for the one POI
+   * type whose `validRange` is not 1.
+   */
+  private static final int[] REACH_RANGES = {0, 0, 1, 6};
+
+  /**
+   * `maxPathLength` is `max(FOLLOW_RANGE, requiredPathLength)`, where the attribute runs from 12 to
+   * 64 over land mobs and `requiredPathLength` defaults to 16, so the bound lands between 16 and
+   * 64. One caller passes an explicit 8 instead.
+   */
+  private static final int MIN_PATH_LENGTH = 16;
+
+  private static final int MAX_EXTRA_PATH_LENGTH = 48;
+
+  private static final int SHORT_PATH_LENGTH = 8;
+
+  /** `maxVisitedNodes` is sixteen times the bound in force when the navigation last updated it. */
+  private static final int VISITED_NODES_PER_BLOCK = 16;
+
   private final SimWorld world;
   private final Rng rng;
   private final long quietAfter;
   private final Scenario scenario;
-  private final List<MobClass> classes;
+  private final int classCount;
   private final Map<Integer, Pos> mobs = new LinkedHashMap<>();
   private final Set<Integer> players = new LinkedHashSet<>();
 
@@ -47,7 +65,7 @@ public final class SyntheticWorkload implements Workload {
     this.rng = rng;
     this.quietAfter = quietAfter;
     this.scenario = scenario;
-    this.classes = world.mobClasses();
+    this.classCount = world.mobClassCount();
   }
 
   @Override
@@ -128,8 +146,9 @@ public final class SyntheticWorkload implements Workload {
               world.minY(),
               world.minY() + world.height() - 1);
       byte type = PathTypes.perBlock(rng.nextInt(PathTypes.perBlockCount()));
-      world.set(x, y, z, type);
-      input.accept(new WorldEvent.BlockChanged(tick, new Pos(x, y, z), type));
+      int floor = SimWorld.floorFor(type, rng);
+      world.set(x, y, z, type, floor);
+      input.accept(new WorldEvent.BlockChanged(tick, new Pos(x, y, z), type, floor));
     }
   }
 
@@ -164,8 +183,24 @@ public final class SyntheticWorkload implements Workload {
           rng.nextDouble() < scenario.chances().get(Chance.STRAY_REQUEST)
               ? outsideTheGrid()
               : mob.getValue();
-      input.accept(new WorldEvent.PathRequested(tick, mob.getKey(), start, randomStanding()));
+      input.accept(
+          new WorldEvent.PathRequested(
+              tick, mob.getKey(), randomClass(), start, randomStanding(), randomSearch()));
     }
+  }
+
+  /**
+   * The visit budget follows the follow range rather than the length bound, because the navigation
+   * updates it only when an attribute changes. A caller that passes a shorter bound therefore
+   * leaves the budget where it was, which is the case the two are drawn separately to reach.
+   */
+  private WorldEvent.Search randomSearch() {
+    int followRange = MIN_PATH_LENGTH + rng.nextInt(MAX_EXTRA_PATH_LENGTH + 1);
+    float maxPathLength = rng.nextInt(16) == 0 ? SHORT_PATH_LENGTH : followRange;
+    return new WorldEvent.Search(
+        REACH_RANGES[rng.nextInt(REACH_RANGES.length)],
+        maxPathLength,
+        followRange * VISITED_NODES_PER_BLOCK);
   }
 
   /** The chosen mob may have nothing outstanding, in which case the cancel must do nothing. */
@@ -202,9 +237,16 @@ public final class SyntheticWorkload implements Workload {
   private void spawn(long tick, WorldInput input) {
     int mobId = nextMobId++;
     Pos pos = randomStanding();
-    short classId = classes.get(rng.nextInt(classes.size())).classId();
     mobs.put(mobId, pos);
-    input.accept(new WorldEvent.MobSpawned(tick, mobId, classId, pos));
+    input.accept(new WorldEvent.MobSpawned(tick, mobId, pos));
+  }
+
+  /**
+   * Drawn per request rather than per mob, because a mob's profile is its live evaluator inputs: a
+   * goal that changes its water malus gives it a different one from one request to the next.
+   */
+  private short randomClass() {
+    return (short) (1 + rng.nextInt(classCount));
   }
 
   private int removeNth(int position) {

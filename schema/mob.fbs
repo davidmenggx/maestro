@@ -15,9 +15,4 @@ table MobClass {
   can_open_doors:bool;
   can_float:bool;
   can_walk_over_fences:bool;
-  max_follow_range:ushort;   // A* search bound, in blocks
-}
-
-table MobClassTable {
-  classes:[MobClass];
 }

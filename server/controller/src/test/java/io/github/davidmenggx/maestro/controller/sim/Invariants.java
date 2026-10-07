@@ -2,6 +2,7 @@ package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -121,9 +122,29 @@ public final class Invariants {
     // Built outside the fleet, so comparing does not change what `sim.nodes()` holds.
     ModeledNode fresh =
         new ModeledNode(run.sim, run.sim.transport(), NodeId.of(FRESH_NODE + region), 1);
-    fresh.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(run.regions, region, 0)));
     fresh.receive(
-        Channel.WORLD, ByteBuffer.wrap(Frames.snapshot(run.world, run.regions, region, 1)));
+        Channel.WORLD,
+        ByteBuffer.wrap(
+            Frames.assignment(run.regions, region, false, run.controller.run, run.world)));
+    // A chunk the server is not holding is never sent, and reads as air on both sides.
+    int chunksPerSide = run.regions.topology().regionSize() / Chunks.SIZE;
+    int originChunkX = Chunks.of(run.regions.minX(region));
+    int originChunkZ = Chunks.of(run.regions.minZ(region));
+    long sequence = 0;
+    for (int dx = 0; dx < chunksPerSide; dx++) {
+      for (int dz = 0; dz < chunksPerSide; dz++) {
+        int chunkX = originChunkX + dx;
+        int chunkZ = originChunkZ + dz;
+        if (!run.world.chunkLoaded(chunkX, chunkZ)) {
+          continue;
+        }
+        fresh.receive(
+            Channel.WORLD,
+            ByteBuffer.wrap(
+                Frames.chunkSnapshot(
+                    ++sequence, dx, dz, Frames.readChunk(run.world, chunkX, chunkZ))));
+      }
+    }
 
     if (!node.hasState() || !fresh.hasState()) {
       return List.of("cannot compare state: one node holds no region");
