@@ -70,6 +70,9 @@ public final class ProbeController implements WorldInput, Transport.Listener {
 
     private boolean connected;
 
+    /** Counts connections, so a request batch built for one is never sent on a later one. */
+    private long connection;
+
     /** Past the {@code Hello} handshake, so world frames may flow. */
     private boolean greeted;
 
@@ -259,6 +262,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   public void onConnected(NodeId node) {
     NodeState state = state(node);
     state.connected = true;
+    state.connection++;
     // Nothing is sent yet. Until the node says how far its world stream got,
     // the controller cannot tell a replay from a resnapshot.
     state.resetConnection();
@@ -652,10 +656,20 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       }
       NodeId node = entry.getKey();
       int region = regions.indexOf(node);
+      long connection = state.connection;
       encode(
           "requests",
           () -> Frames.requests(batch, regions, region),
-          frame -> send(node, Channel.REQUEST, frame));
+          frame -> {
+            // A retried encode can finish after the connection it was built for ended. Its
+            // requests were dropped with that connection, and the profiles they name may not be
+            // registered on this one.
+            if (state(node).connection != connection) {
+              env.metrics().count("requests.discarded", 1, "node", node.toString());
+              return;
+            }
+            send(node, Channel.REQUEST, frame);
+          });
     }
   }
 

@@ -30,6 +30,9 @@ class SimulationTest {
   /** Quiet ticks after the partition lifts, for the resnapshot to land and the run to settle. */
   private static final long TAIL_TICKS = 50;
 
+  /** Tick a node dies at, two ticks before the controller's next reconnect attempt. */
+  private static final long DEATH_TICK = 38;
+
   /** Tick the control channel stalls at: after the fleet is greeted, before profiles settle. */
   private static final long STALL_TICK = 2;
 
@@ -141,6 +144,26 @@ class SimulationTest {
     for (ModeledNode node : run.sim.nodes()) {
       assertTrue(Invariants.caughtUp(run.controller, node), node.id() + " " + run.describe());
     }
+  }
+
+  @Test
+  void aRequestBatchThatOutlivesItsConnectionIsNotSent() {
+    // Encodes fail often, so a batch built before the node dies is still being retried once it
+    // is back. Its requests were dropped with the old connection, and the profiles they name are
+    // not registered on the new one, so sending it would ask the node for profiles it never got.
+    NodeId victim = NodeId.of(0);
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .withOffloadFailureRate(0.5)
+            .with(
+                new FaultPlan.NodeDied(DEATH_TICK, victim),
+                new FaultPlan.NodeRecovered(DEATH_TICK + 1, victim));
+
+    SimRun run = SimRun.of(8L, plan, TICKS, Scenario.DEFAULT.with(Chance.REQUEST, 0.3)).go();
+
+    assertEquals(List.of(), run.violations(ProbeController.MAX_TICKS_LATE), run.describe());
+    assertTrue(run.sim.metrics().total("requests.discarded") > 0, run.describe());
+    assertEquals(0, run.sim.metrics().total("path.profile.unknown"), run.describe());
   }
 
   @Test
