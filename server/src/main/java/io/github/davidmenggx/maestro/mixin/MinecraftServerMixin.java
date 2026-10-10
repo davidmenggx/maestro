@@ -21,7 +21,7 @@ public abstract class MinecraftServerMixin {
 
   /**
    * `createLevels` builds the overworld directly, then iterates the `LEVEL_STEM` registry to create
-   * every other dimension. Emptying that iteration leaves `levels` holding the overworld alone.
+   * every other dimension. Emptying that iteration leaves only the overworld in `levels`.
    */
   @Redirect(
       method = "createLevels",

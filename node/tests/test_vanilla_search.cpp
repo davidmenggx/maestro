@@ -152,7 +152,7 @@ TEST(VanillaSearch, StopsWhenTheVisitBudgetRunsOut) {
   Call.MaxVisitedNodes = 3;
   const Result Path = find(flat(), Profile{}, Call);
   EXPECT_FALSE(Path.Reached);
-  // Two nodes are expanded, and the nearest node they found is the end.
+  // Two nodes are expanded, and the path ends at the nearest node found.
   const std::vector<BlockPos> Expected = {{2, 1, 2}, {3, 1, 2}, {4, 1, 2}};
   EXPECT_EQ(positions(Path), Expected);
 }
@@ -223,9 +223,9 @@ TEST(VanillaSearch, OpenDoorsPassOnlyMobsThatPassDoors) {
 }
 
 TEST(VanillaSearch, TheHeuristicIsWeighted) {
-  // A slightly costly cell straight ahead. Vanilla scales the distance to the
-  // target by 1.5, which favours it over the diagonal: unweighted, the
-  // diagonal's lower total would come out of the heap first.
+  // A slightly costly cell straight ahead. Vanilla weights the distance to the
+  // target by 1.5, which favours this cell over the diagonal. Unweighted, the
+  // diagonal would leave the heap first.
   DenseWorld World = flat();
   World.set(3, 0, 2, world::Cell{PathType::STICKY_HONEY, 15});
   Profile Mob;
@@ -268,8 +268,8 @@ TEST(WalkNodeEvaluator, ABigMobBesideDangerCapsItsMalus) {
   Big.Width = 1.4F;
   WalkNodeEvaluator Evaluator;
   Evaluator.prepare(*Area, Big, Call);
-  // The footprint reaches the cells beside the cactus, but the node itself is
-  // cheaper, so the cost is capped.
+  // The footprint covers the cells beside the cactus, but the node itself is
+  // cheaper, so the cost is capped at the node's.
   EXPECT_EQ(Evaluator.getPathTypeOfMob(8, 1, 8),
             PathType::BIG_MOBS_CLOSE_TO_DANGER);
 
@@ -287,7 +287,7 @@ TEST(WalkNodeEvaluator, ARailIsOnlyPassableFromARail) {
   const Profile Mob;
   WalkNodeEvaluator Evaluator;
 
-  // The start node stands in for the mob's position.
+  // The start node is used as the mob's position.
   const Request OffTheRail = walk({2, 1, 2}, {8, 1, 8});
   Evaluator.prepare(*Area, Mob, OffTheRail);
   EXPECT_EQ(Evaluator.getPathTypeOfMob(8, 1, 8), PathType::UNPASSABLE_RAIL);
@@ -320,10 +320,10 @@ bool offers(const std::vector<Node> &Neighbors, BlockPos Pos) {
 } // namespace
 
 TEST(WalkNodeEvaluator, ANodeCostIsOnlyEverRaised) {
-  // A mob that will not enter water, standing on honey, which stops it
-  // jumping. The water beside it is then sounded for a floor, and each water
-  // node found is updated to the larger of its cost so far and the water
-  // malus. A new node's cost so far is 0, so the -1 never lands.
+  // A mob that avoids water, standing on honey so it cannot jump. The water
+  // beside it is checked for a floor, and each water node found gets the
+  // larger of its current cost and the water malus. A new node's cost is 0,
+  // so the -1 malus is never applied.
   DenseWorld World(32, -4, 16);
   World.fill(0, -4, 0, 31, 0, 31, Stone);
   World.set(2, 0, 2, world::Cell{PathType::STICKY_HONEY, 15});
@@ -345,9 +345,9 @@ TEST(WalkNodeEvaluator, ANodeCostIsOnlyEverRaised) {
 }
 
 TEST(WalkNodeEvaluator, LeavingAFenceSweepsTheMobsBox) {
-  // A wide mob whose footprint takes in a fence, and which does not mind
-  // fences, so its node is a fence node. A step away clears the fence; a step
-  // towards it sweeps the mob's box through the post.
+  // A wide mob whose footprint includes a fence and which tolerates fences,
+  // so its node is a fence node. A step away clears the fence; a step towards
+  // it sweeps the mob's box through the post.
   DenseWorld World = flat();
   World.set(6, 1, 2, Fence);
   const auto Area = World.load();
@@ -375,8 +375,8 @@ TEST(WalkNodeEvaluator, AJumpNeedsHeadroomOverTheTakeOff) {
   Evaluator.prepare(*Open, Mob, Call);
   EXPECT_TRUE(offers(neighborsOf(Evaluator, Call.Start), {5, 2, 2}));
 
-  // A carpet at head height: passable, so it does not stop the mob trying,
-  // but its collision box is in the way of the jump.
+  // A carpet at head height is passable, so the mob still tries, but its
+  // collision box blocks the jump.
   World.set(4, 3, 2, world::Cell{PathType::OPEN, 1});
   const auto Covered = World.load();
   Evaluator.prepare(*Covered, Mob, Call);
@@ -424,8 +424,8 @@ TEST(WalkNodeEvaluator, ASmallMobInTheOpenIgnoresFreeTypesAboveIt) {
   WalkNodeEvaluator Evaluator;
   const Request Call = walk({2, 1, 2}, {3, 1, 2});
   Evaluator.prepare(*Area, Mob, Call);
-  // The footprint at y = 2 holds open air and the cocoa, both free; the node
-  // itself is open, so it stays open.
+  // The footprint at y = 2 contains open air and the cocoa, both free. The
+  // node itself is open, so it stays open.
   EXPECT_EQ(Evaluator.getPathTypeOfMob(8, 2, 8), PathType::OPEN);
 }
 
@@ -445,7 +445,7 @@ TEST(WalkNodeEvaluator, FloorLevelFollowsTheCollisionHeightBelow) {
   EXPECT_EQ(Evaluator.getFloorLevel(8, 1, 10), 1.5);
   EXPECT_EQ(Evaluator.getFloorLevel(8, 1, 11), 1.0);
 
-  // A mob that floats stands half way up a water cell.
+  // A mob that floats stands halfway up a water cell.
   Profile Floats;
   Floats.CanFloat = true;
   Evaluator.prepare(*Area, Floats, Call);
@@ -510,8 +510,8 @@ TEST(Search, AResultEncodesAsAResponseFrame) {
 }
 
 TEST(Search, OneBuilderServesEveryResponse) {
-  // A reused builder is cleared each time, so the second frame holds only
-  // its own response and a node can keep one builder per thread.
+  // A reused builder is cleared each time, so the second frame holds only its
+  // own response.
   Result Long;
   for (int X = 0; X < 40; ++X)
     Long.Nodes.push_back({{X, 1, -X}, PathType::WALKABLE});

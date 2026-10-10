@@ -11,18 +11,17 @@
 
 namespace maestro::search {
 
-/// Port of vanilla's `WalkNodeEvaluator`: which positions a land mob can move
-/// to from a node, and what each costs. Method names follow vanilla's so the
-/// two read side by side.
+/// Port of vanilla's `WalkNodeEvaluator`: the positions a land mob can move to
+/// from a node, and their costs. Method names match vanilla's.
 ///
-/// Two inputs vanilla reads are not on the wire. The mob's position is taken
-/// to be the bottom centre of the start node, and "in water" means the cell's
-/// type is `WATER` rather than that its fluid is water. Block shapes are
-/// approximated on purpose: each is a full-width box up to its collision
-/// height, which arrives rounded up to a sixteenth.
+/// Two inputs vanilla reads are not on the wire. The mob's position is the
+/// bottom centre of the start node, and "in water" means the cell type is
+/// `WATER`, not that its fluid is water. Block shapes are approximated on
+/// purpose: each is a full-width box up to its collision height, rounded up to
+/// a sixteenth.
 class WalkNodeEvaluator {
 public:
-  /// Readies the evaluator for one search. All three must outlive `done`.
+  /// Prepares for one search. All three arguments must outlive `done`.
   void prepare(const world::Area &Area, const Profile &Mob,
                const Request &Call);
   void done();
@@ -34,28 +33,28 @@ public:
   /// before the search starts.
   NodeId getTarget(BlockPos Pos);
 
-  /// Writes the neighbours of `Current` worth visiting to `Out`, which holds
-  /// at least eight, and returns how many there are.
+  /// Writes the neighbours of `Current` to visit into `Out`, which must hold
+  /// at least eight, and returns how many were written.
   int getNeighbors(std::span<NodeId> Out, NodeId Current);
 
   Node &node(NodeId Id) { return Nodes[Id]; }
   const Node &node(NodeId Id) const { return Nodes[Id]; }
 
-  /// The node table, which grows as the search reaches new positions.
+  /// The node table. It grows as the search reaches new positions.
   std::vector<Node> &nodes() { return Nodes; }
 
-  /// `getCachedPathType`: `getPathTypeOfMob`, cached for the search.
+  /// `getCachedPathType`: `getPathTypeOfMob`, cached per search.
   world::PathType getCachedPathType(int X, int Y, int Z);
 
-  /// `getPathTypeOfMob`: the type of the mob's whole footprint standing at
-  /// the position, with its door and rail abilities applied.
+  /// `getPathTypeOfMob`: the type of the mob's whole footprint at the
+  /// position, with its door and rail abilities applied.
   world::PathType getPathTypeOfMob(int X, int Y, int Z);
 
-  /// `getPathType`: the static type at one position, cached for the search.
+  /// `getPathType`: the static type at one position, cached per search.
   world::PathType getPathType(int X, int Y, int Z);
 
-  /// `getFloorLevel`: the height a mob at the position stands at, to the
-  /// sixteenth the wire carries.
+  /// `getFloorLevel`: the height a mob at the position stands at, accurate
+  /// to a sixteenth.
   double getFloorLevel(int X, int Y, int Z) const;
 
 private:

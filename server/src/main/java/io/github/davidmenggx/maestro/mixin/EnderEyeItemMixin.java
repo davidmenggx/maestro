@@ -12,8 +12,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 public abstract class EnderEyeItemMixin {
 
   /**
-   * `useOn` is what seats an eye in an end portal frame and completes the portal. Throwing eyes to
-   * locate strongholds still works; only the frame can no longer be filled.
+   * `useOn` places an eye in an end portal frame and completes the portal. Throwing eyes to locate
+   * strongholds still works; only filling the frame is blocked.
    */
   @Inject(method = "useOn", at = @At("HEAD"), cancellable = true)
   private void maestro$refuseEndPortals(

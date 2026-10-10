@@ -7,8 +7,8 @@
 
 namespace maestro::search::java {
 
-/// `(int) Value`: truncates, saturates at the `int` range and maps NaN to 0,
-/// where a plain C++ cast of an out-of-range value is undefined.
+/// Java's `(int) Value`: truncates, saturates at the `int` range and maps NaN
+/// to 0. A plain C++ cast is undefined for out-of-range values.
 inline int toInt(double Value) {
   if (std::isnan(Value))
     return 0;

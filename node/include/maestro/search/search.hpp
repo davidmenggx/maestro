@@ -22,8 +22,8 @@ struct BlockPos {
 
 /// The inputs of one `PathFinder.findPath` call that vary per call.
 struct Request {
-  /// The start node, resolved on the server. It also stands in for the mob's
-  /// position, which the node is never sent.
+  /// The start node, resolved on the server. Also used as the mob's
+  /// position, which the node is not sent.
   BlockPos Start;
   BlockPos Target;
   /// Manhattan distance from `Target` that counts as arrival.
@@ -32,7 +32,7 @@ struct Request {
   int MaxVisitedNodes = 256;
   int MaxFallDistance = 3;
 
-  /// The request `Wire` describes, or nothing without a start and a target.
+  /// The request `Wire` describes, or nothing if it lacks a start or target.
   static std::optional<Request> decode(const fbs::PathRequest &Wire);
 };
 
@@ -45,8 +45,8 @@ struct PathPoint {
 };
 
 /// What `PathFinder.findPath` returns: the nodes from the start to the node
-/// nearest the target, whether that node is within reach of it, and the A*
-/// cost of reaching it.
+/// nearest the target, whether that node is within reach of the target, and
+/// the A* cost of reaching it.
 struct Result {
   std::vector<PathPoint> Nodes;
   bool Reached = false;
@@ -54,34 +54,34 @@ struct Result {
 };
 
 /// Encodes `Path` as a finished `ResponseFrame` in `Builder`, which is cleared
-/// first so one builder can be reused for every response. Every position must
-/// fit the wire's 16 bits, which holds for any search of an area the
-/// controller admitted.
+/// first so one builder can be reused. Every position must fit the wire's 16
+/// bits, which holds for any area the controller admitted.
 void encodeResponse(flatbuffers::FlatBufferBuilder &Builder,
                     std::uint64_t RequestId, const Result &Path,
                     std::uint64_t WorldSequence);
 
-/// Encodes the answer to a request naming a profile this node has not been
-/// sent, as a finished `ResponseFrame` in `Builder`, which is cleared first.
+/// Encodes the answer to a request that names a profile this node has not
+/// received, as a finished `ResponseFrame` in `Builder`, which is cleared
+/// first.
 void encodeUnknownProfile(flatbuffers::FlatBufferBuilder &Builder,
                           std::uint64_t RequestId, std::uint16_t ClassId);
 
 /// One pathfinding algorithm. A node picks one at startup and reports it in
-/// `Hello`, so a fleet runs a single search. An instance keeps scratch state
-/// between calls to avoid allocating per search, so each thread needs its own.
+/// `Hello`. An instance reuses scratch state between calls to avoid
+/// allocating, so each thread needs its own.
 class Search {
 public:
   virtual ~Search() = default;
 
   virtual fbs::Pathfinder kind() const = 0;
 
-  /// Searches `Area`, which the caller keeps pinned for the duration, and
-  /// overwrites `Out`.
+  /// Searches `Area`, which the caller keeps pinned until the call returns,
+  /// and overwrites `Out`.
   virtual void find(const world::Area &Area, const Profile &Mob,
                     const Request &Call, Result &Out) = 0;
 };
 
-/// The search `Kind` names, or null if this build has none by that name.
+/// The search named by `Kind`, or null if this build does not have it.
 std::unique_ptr<Search> makeSearch(fbs::Pathfinder Kind);
 
 } // namespace maestro::search

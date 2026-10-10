@@ -20,8 +20,8 @@ import java.util.function.Supplier;
 
 /**
  * Tick-driven deterministic simulator. Time is a step counter: {@link #STEPS_PER_TICK} steps make
- * one tick, and every delay in the harness is expressed in steps. Events at the same step run in
- * insertion order, so two runs of one seed stay identical.
+ * one tick, and every delay in the harness is in steps. Events at the same step run in insertion
+ * order, so two runs of one seed are identical.
  */
 public final class Simulation {
 
@@ -33,7 +33,7 @@ public final class Simulation {
 
   static final long NANOS_PER_STEP = NANOS_PER_TICK / STEPS_PER_TICK;
 
-  /** Where in the tick the fleet works. Mid-tick, so serving does not spill into the next tick. */
+  /** When in the tick the fleet works. Mid-tick, so serving does not run into the next tick. */
   private static final int SERVICE_STEP = STEPS_PER_TICK / 2;
 
   private record Scheduled(long time, long order, String name, Runnable action)
@@ -130,9 +130,9 @@ public final class Simulation {
   }
 
   /**
-   * Runs {@code ticks} ticks. Each one applies its faults, opens the tick, lets the workload mutate
-   * the world, lets the fleet serve what it has, then closes the tick, draining queued work between
-   * every stage.
+   * Runs {@code ticks} ticks. Each tick applies its faults, opens the tick, lets the workload change
+   * the world, lets the fleet serve its requests, then closes the tick. Queued work is drained
+   * between stages.
    */
   public void run(WorldInput controller, Workload workload, long ticks) {
     if (ticks < 1) {
@@ -203,14 +203,14 @@ public final class Simulation {
   }
 
   /**
-   * Work runs immediately, but its completion waits for the end of whichever tick it finishes in,
-   * because that is where production drains finished jobs. A result therefore never reaches the
-   * controller inside the call that submitted it. A job the fault plan fails reports its failure at
-   * the same point instead.
+   * Work runs immediately, but its completion waits for the end of the tick it finishes in, because
+   * production drains finished jobs there. A result therefore never reaches the controller inside
+   * the call that submitted it. A job that the fault plan fails reports its failure at the same
+   * point.
    */
   private final class SimOffload implements Offload {
 
-    /** A frame encode is tens of microseconds, so at most a couple of milliseconds. */
+    /** A frame encode takes tens of microseconds, so at most a couple of milliseconds. */
     private static final int MAX_WORK_STEPS = 40;
 
     @Override
@@ -219,7 +219,7 @@ public final class Simulation {
       long ready = now + 1 + offloadRng.nextInt(MAX_WORK_STEPS);
       long drainAt = (ready / STEPS_PER_TICK) * STEPS_PER_TICK + STEPS_PER_TICK - 1;
       metrics.count("offload.submitted", 1, "job", name);
-      // Drawn only when failures are possible, so a plan without them replays as before.
+      // Drawn only when failures are possible, so a plan without them replays unchanged.
       if (offloadFailureRate > 0 && offloadRng.nextDouble() < offloadFailureRate) {
         metrics.count("offload.failed", 1, "job", name);
         scheduleAt(drainAt, "offload-failed:" + name, failure);

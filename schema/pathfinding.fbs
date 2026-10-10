@@ -3,34 +3,35 @@ include "common.fbs";
 namespace maestro.fbs;
 
 // Which search a node runs. `VANILLA` reproduces `PathFinder` and
-// `WalkNodeEvaluator` decision for decision; any other entry is an
-// alternative measured against it. A node reports its own in `Hello`, so a
-// fleet is uniform and the controller attributes results to the search that
-// produced them.
+// `WalkNodeEvaluator` decision for decision. Any other entry is an
+// alternative compared against it. A node reports its search in `Hello`, so
+// the whole fleet runs one search and the controller knows which search
+// produced each result.
 enum Pathfinder : ubyte {
   VANILLA
 }
 
-// At-least-once and idempotent, keyed by `request_id`. Carries exactly the
-// inputs of `PathFinder.findPath` that vary per call: `start` is the node
+// At-least-once and idempotent, keyed by `request_id`. Holds only the inputs
+// of `PathFinder.findPath` that vary per call. `start` is the node that
 // `WalkNodeEvaluator.getStart` resolved on the server (it reads live entity
-// state), `reach_range` is the Manhattan distance that counts as arrival, and
+// state). `reach_range` is the Manhattan distance that counts as arrival.
 // `max_path_length` and `max_visited_nodes` (already multiplied) bound the
-// search. `max_fall_distance` is `Mob.getMaxFallDistance`, which reads the
-// mob's target, health and the difficulty, so it varies from call to call.
+// search. `max_fall_distance` is `Mob.getMaxFallDistance`, which depends on
+// the mob's target, health and the difficulty, so it varies per call.
 // Everything else about the mob comes from its `MobClass`.
 //
-// The node never sees the mob's exact position. The two evaluator branches
-// that read it, the collision sweep off a fence or closed door and the check
-// for standing on a rail, use `start` in its place.
+// The node never receives the mob's exact position. The two evaluator
+// branches that read it, the collision sweep off a fence or closed door and
+// the rail check, use `start` instead.
 //
-// Tracing carries nothing. A request's trace id is `(run, mix(request_id))`
-// and its span id is `request_id`, where `run` arrives with the
+// There are no tracing fields. A request's trace id is `(run, mix(request_id))`
+// and its span id is `request_id`, where `run` comes from the
 // `RegionAssignment` and `mix` is the splitmix64 finalizer
 //   z ^= z >> 30; z *= 0xbf58476d1ce4e5b9;
 //   z ^= z >> 27; z *= 0x94d049bb133111eb;
 //   z ^= z >> 31;
-// so both sides name one trace and ratio sampling still sees random bits.
+// so both sides derive the same trace id, and ratio sampling still sees random
+// bits.
 table PathRequest {
   request_id:ulong;
   class_id:ushort;
@@ -42,8 +43,8 @@ table PathRequest {
   max_fall_distance:ushort;
 }
 
-// Requests ride UDP, one frame per datagram, so a batch is bounded by the
-// datagram size and a tick's requests may span several.
+// Requests use UDP, one frame per datagram, so a batch is limited by the
+// datagram size and a tick's requests may need several.
 table PathRequestBatch {
   requests:[PathRequest];
 }
@@ -66,11 +67,11 @@ table PathResponse {
   world_sequence:ulong;
 }
 
-// The request named a `class_id` the node has not been sent. A profile leaves
-// on the control channel a tick before any request that names it, but that
-// channel is TCP and a retransmit can hold it back for several ticks while
-// requests still arrive over UDP. Answering at once lets the controller drop
-// the request instead of waiting for it to time out.
+// The request named a `class_id` the node has not received. A profile is sent
+// on the control channel a tick before any request that uses it, but that
+// channel is TCP, and a retransmit can delay it for several ticks while
+// requests still arrive over UDP. Replying immediately lets the controller
+// drop the request instead of waiting for a timeout.
 table UnknownProfile {
   request_id:ulong;
   class_id:ushort;

@@ -17,8 +17,7 @@ constexpr std::uint32_t bit(PathType Type) {
   return std::uint32_t{1} << static_cast<unsigned>(Type);
 }
 
-/// Vanilla's `AABB`. The constructor orders each pair of bounds, as vanilla's
-/// does.
+/// Vanilla's `AABB`. Like vanilla, the constructor orders each pair of bounds.
 struct Box {
   double MinX, MinY, MinZ, MaxX, MaxY, MaxZ;
 
@@ -37,10 +36,10 @@ struct Box {
   }
 };
 
-/// Whether `Bounds` overlaps a block. A cell's shape is taken to be a
-/// full-width box from its base up to its collision height, so a shape only
-/// reaches past its own cell upward (a fence is 24 sixteenths), and only the
-/// layer below the box can reach into it. Touching faces do not collide.
+/// Whether `Bounds` overlaps a block. A cell is a full-width box from its base
+/// up to its collision height, so it only extends above its own cell (a fence
+/// is 24 sixteenths) and only the layer below `Bounds` can reach into it.
+/// Touching faces do not collide.
 bool hasCollisions(const world::Area &Area, const Box &Bounds) {
   constexpr double Epsilon = 1.0E-7;
   const int X0 = java::floor(Bounds.MinX - Epsilon);
@@ -138,7 +137,7 @@ int WalkNodeEvaluator::getNeighbors(std::span<NodeId> Out, NodeId Current) {
       Out[Count++] = Neighbor;
   }
 
-  // Each direction pairs with the one clockwise of it.
+  // Each direction is paired with the next one clockwise.
   for (std::size_t I = 0; I < Horizontal.size(); ++I) {
     const std::size_t Clockwise = (I + 1) % Horizontal.size();
     const Direction Travel = Horizontal[I];
@@ -189,8 +188,8 @@ bool WalkNodeEvaluator::isDiagonalValid(NodeId Diagonal) const {
 }
 
 bool WalkNodeEvaluator::canReachWithoutCollision(NodeId PosTo) const {
-  // Vanilla sweeps from the mob's actual position, which the node is never
-  // sent; the bottom centre of the start node stands in for it.
+  // Vanilla sweeps from the mob's position, which the node is not sent. Use
+  // the bottom centre of the start node instead.
   const double MobX = Call->Start.X + 0.5;
   const double MobY = Call->Start.Y;
   const double MobZ = Call->Start.Z + 0.5;
@@ -299,7 +298,7 @@ NodeId WalkNodeEvaluator::tryJumpOn(int X, int Y, int Z, int JumpSize,
   if (Landing.Type != PathType::OPEN && Landing.Type != PathType::WALKABLE)
     return Above;
 
-  // The box the mob sweeps while jumping from the cell it leaves.
+  // The box the mob sweeps when jumping from the cell it leaves.
   const double CenterX = X - Travel.StepX + 0.5;
   const double CenterZ = Z - Travel.StepZ + 0.5;
   const double HalfWidth = Mob->Width / 2.0;
@@ -358,8 +357,8 @@ PathType WalkNodeEvaluator::getPathTypeOfMob(int X, int Y, int Z) {
   if (Types & bit(PathType::UNPASSABLE_RAIL))
     return PathType::UNPASSABLE_RAIL;
 
-  // Vanilla walks an `EnumSet`, which is ordinal order, so a tie for the
-  // highest malus goes to the later ordinal.
+  // Vanilla iterates an `EnumSet` in ordinal order, so on a tie for the
+  // highest malus the later ordinal wins.
   PathType Highest = PathType::BLOCKED;
   float HighestMalus = Mob->malus(Highest);
   for (std::uint32_t Rest = Types; Rest != 0; Rest &= Rest - 1) {
@@ -388,8 +387,8 @@ PathType WalkNodeEvaluator::getPathTypeOfMob(int X, int Y, int Z) {
 }
 
 std::uint32_t WalkNodeEvaluator::getPathTypeWithinMobBB(int X, int Y, int Z) {
-  // Vanilla reads the mob's block position for the rail check; the start node
-  // stands in for it.
+  // Vanilla uses the mob's block position for the rail check. Use the start
+  // node instead.
   const BlockPos MobPos = Call->Start;
   std::uint32_t Types = 0;
   for (int Dx = 0; Dx < EntityWidth; ++Dx) {

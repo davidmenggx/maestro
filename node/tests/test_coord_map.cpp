@@ -66,9 +66,9 @@ TEST(CoordMap, ClearingEmptiesTheMap) {
 }
 
 TEST(CoordMap, StaysCorrectWhenTheGenerationWraps) {
-  // Every clear moves to the next generation. The counter starts at 1, so
-  // this many clears wrap it back to 1, where the slot written first would
-  // look live again unless the wrap wipes it.
+  // Each clear advances the generation. The counter starts at 1, so this many
+  // clears wrap it back to 1. The first slot written would look live again
+  // unless the wrap wipes it.
   constexpr int ClearsToWrap = (1 << 16) - 1;
   CoordMap<int> Map;
   Map.tryEmplace(5, 5, 5, 1);

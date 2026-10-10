@@ -16,7 +16,7 @@ public final class MaestroServer implements DedicatedServerModInitializer {
   public static final String MOD_ID = "maestro";
   public static final String VERSION = "0.1.0";
 
-  /** Serialization is the only offloaded work so far, so one worker is enough. */
+  /** Serialization is the only offloaded work, so one worker is enough. */
   private static final int OFFLOAD_THREADS = 1;
 
   private static final Logger LOG = LoggerFactory.getLogger(MOD_ID);
@@ -56,8 +56,8 @@ public final class MaestroServer implements DedicatedServerModInitializer {
     clock = new ServerClock();
     offload = new PoolOffload(OFFLOAD_THREADS);
     // Offloaded results are published on the server thread at the tick boundary,
-    // before the counter moves, so a completion is attributed to the tick that
-    // just ran rather than the one about to start.
+    // before the counter advances, so a completion counts toward the tick that
+    // just ran, not the next one.
     ServerTickEvents.END_SERVER_TICK.register(
         server -> {
           offload.drain();

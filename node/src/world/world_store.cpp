@@ -15,8 +15,8 @@ namespace maestro::world {
 namespace {
 
 /// Decodes one chunk's runs, or returns null if they break the contract:
-/// exactly one column per position, every column at full height, and only
-/// per-block types.
+/// one column per position, every column at full height, and only per-block
+/// types.
 ChunkPtr decodeChunk(const fbs::ChunkSnapshot &Snapshot, int Height,
                      bool &Malformed) {
   Malformed = false;
@@ -59,7 +59,7 @@ ChunkPtr decodeChunk(const fbs::ChunkSnapshot &Snapshot, int Height,
     }
     Offset += Count;
 
-    // Neighbouring columns are often identical, so they share one copy.
+    // Neighbouring columns are often identical, so share one copy.
     if (Index > 0 &&
         std::ranges::equal((*Content)[Index - 1]->runs(), ColumnRuns))
       (*Content)[Index] = (*Content)[Index - 1];
@@ -112,7 +112,7 @@ ApplyStatus WorldStore::applyFrame(std::span<const std::uint8_t> Frame) {
 ApplyStatus WorldStore::assign(const fbs::RegionAssignment &Assignment) {
   const Geometry Geo{Assignment.size(), Assignment.min_y(),
                      Assignment.height()};
-  // Positions on the wire are shorts, so the whole area has to fit in one.
+  // Wire positions are shorts, so the area must fit in one.
   constexpr int ShortMin = std::numeric_limits<std::int16_t>::min();
   constexpr int ShortMax = std::numeric_limits<std::int16_t>::max();
   if (Geo.Size <= 0 || Geo.Size % ChunkSize != 0 || Geo.Size > ShortMax ||
@@ -121,8 +121,8 @@ ApplyStatus WorldStore::assign(const fbs::RegionAssignment &Assignment) {
     return ApplyStatus::Malformed;
 
   if (Assignment.resume()) {
-    // Resuming keeps what is held, so it has to be the stream the controller
-    // thinks it is continuing.
+    // Resuming keeps the held state, so it must be the stream the controller
+    // is continuing.
     const auto Held = pin();
     if (!Held || Held->sequence() == 0 || Held->run() != Assignment.run() ||
         Held->regionId() != Assignment.region_id() || Held->geometry() != Geo)

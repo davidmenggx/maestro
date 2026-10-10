@@ -8,12 +8,12 @@
 namespace maestro::search {
 
 /// Vanilla's `BinaryHeap`: a min-heap on `Node::F` that keeps each node's
-/// `HeapIdx` current. Ported exactly, ties included, since the order in which
-/// equal-cost nodes leave the heap decides which of several equal paths is
-/// found.
+/// `HeapIdx` up to date. Ported exactly, ties included, because the order in
+/// which equal-cost nodes leave the heap decides which of several equal paths
+/// is found.
 class BinaryHeap {
 public:
-  /// Heap entries index into `Nodes`, which may grow while the heap is in use.
+  /// Heap entries are indices into `Nodes`, which may grow during use.
   explicit BinaryHeap(std::vector<Node> &Nodes) : Nodes(Nodes) {}
 
   /// `Id` must not already be in the heap.

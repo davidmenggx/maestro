@@ -19,13 +19,13 @@ public final class Telemetry {
 
   public static final String SERVICE_NAME = "maestro-server";
 
-  /** Kept short so a missing collector never stalls a shutdown or an export cycle. */
+  /** Short, so a missing collector does not stall shutdown or an export cycle. */
   private static final Duration EXPORT_TIMEOUT = Duration.ofSeconds(2);
 
   /**
-   * Held so the JUL level set below is not lost to garbage collection. OpenTelemetry logs export
-   * failures through JUL, which would otherwise repeat on every cycle whenever no collector is
-   * listening -- the normal case in development.
+   * Held so the JUL level set below is not garbage collected. OpenTelemetry logs export failures
+   * through JUL, which would otherwise log on every cycle when no collector is running (the
+   * normal case in development).
    */
   private static final Logger EXPORTER_LOGGER = Logger.getLogger("io.opentelemetry.exporter");
 

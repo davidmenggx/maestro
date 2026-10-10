@@ -23,7 +23,7 @@ using namespace maestro::world;
 
 namespace {
 
-/// Sequence of what `Store` holds, 0 when it holds nothing.
+/// Sequence of what `Store` holds, or 0 if it holds nothing.
 std::uint64_t sequenceOf(const WorldStore &Store) {
   const auto Held = Store.pin();
   return Held ? Held->sequence() : 0;
@@ -156,8 +156,8 @@ TEST(WorldStore, TheFirstFrameAfterAnAssignmentIsTheBaseline) {
   const DenseWorld World = flatWorld();
   WorldStore Store;
   ASSERT_EQ(Store.apply(World.assignment()), ApplyStatus::Applied);
-  // The controller's sequence carries on across a reassignment, so the
-  // first frame may start anywhere.
+  // The controller's sequence continues across a reassignment, so the first
+  // frame may have any sequence.
   EXPECT_EQ(Store.apply(World.chunk(41, 0, 0)), ApplyStatus::Applied);
   EXPECT_EQ(sequenceOf(Store), 41u);
   EXPECT_EQ(Store.pin()->at(0, 0, 16), Air);
@@ -167,7 +167,7 @@ TEST(WorldStore, TheFirstFrameAfterAnAssignmentIsTheBaseline) {
 
 TEST(WorldStore, AFrameOutOfSequenceDropsWhatIsHeld) {
   const DenseWorld World = flatWorld();
-  // A gap, and a frame already applied.
+  // A gap, and a frame that was already applied.
   expectRefusedAndReset(World.chunk(6, 0, 0), ApplyStatus::OutOfSequence);
   expectRefusedAndReset(World.chunk(4, 0, 0), ApplyStatus::OutOfSequence);
   const CellEdit Edit{0, 10, 0, Water};
@@ -277,7 +277,7 @@ TEST(WorldStore, RejectsAnAreaThatDoesNotTileIntoChunks) {
   expectRefusedAndReset(assignmentOf(24, 0, 24), ApplyStatus::Malformed);
   expectRefusedAndReset(assignmentOf(0, 0, 24), ApplyStatus::Malformed);
   expectRefusedAndReset(assignmentOf(32, 0, 0), ApplyStatus::Malformed);
-  // Positions on the wire are shorts, so the top of the area has to be one.
+  // Wire positions are shorts, so the top of the area must fit in one.
   expectRefusedAndReset(assignmentOf(32, 32700, 100), ApplyStatus::Malformed);
 }
 
@@ -285,7 +285,7 @@ TEST(WorldStore, RejectsChunksThatBreakTheContract) {
   const auto Stone4 = fbs::CellRun(4, fbs::PathType::BLOCKED, 16);
   const auto Air20 = fbs::CellRun(20, fbs::PathType::OPEN, 0);
 
-  // Columns that fall short of, or overrun, the height.
+  // Columns shorter or longer than the height.
   expectRefusedAndReset(uniformChunk(5, {Stone4}), ApplyStatus::Malformed);
   expectRefusedAndReset(uniformChunk(5, {Stone4, Air20, Stone4}),
                         ApplyStatus::Malformed);
@@ -297,11 +297,11 @@ TEST(WorldStore, RejectsChunksThatBreakTheContract) {
       uniformChunk(5,
                    {Stone4, fbs::CellRun(0, fbs::PathType::WATER, 0), Air20}),
       ApplyStatus::Malformed);
-  // A type only the node may derive.
+  // A type that only the node may derive.
   expectRefusedAndReset(
       uniformChunk(5, {fbs::CellRun(4, fbs::PathType::WALKABLE, 0), Air20}),
       ApplyStatus::Malformed);
-  // A type no ordinal names.
+  // A byte that is not a valid type.
   expectRefusedAndReset(
       uniformChunk(
           5, {fbs::CellRun(4, static_cast<fbs::PathType>(200), 0), Air20}),
@@ -319,7 +319,7 @@ TEST(WorldStore, RejectsAChunkOutsideTheArea) {
 }
 
 TEST(WorldStore, RejectsADeltaThatBreaksTheContract) {
-  // The valid first edit is not applied either: the whole frame is refused.
+  // The valid first edit is not applied either, because the whole frame is refused.
   const std::vector<CellEdit> Outside = {{1, 1, 1, Water}, {32, 1, 1, Water}};
   expectRefusedAndReset(test::delta(5, Outside), ApplyStatus::Malformed);
   const std::vector<CellEdit> AboveTheTop = {{1, 24, 1, Water}};
@@ -330,7 +330,7 @@ TEST(WorldStore, RejectsADeltaThatBreaksTheContract) {
 }
 
 TEST(WorldStore, MatchesADenseModelUnderRandomFrames) {
-  // `Server` is what the controller reads chunks from; `Expected` is what the
+  // `Server` is what the controller reads chunks from. `Expected` is what the
   // node should hold after each frame.
   constexpr int Size = 48;
   constexpr int MinY = -8;
@@ -419,7 +419,7 @@ TEST(WorldStore, MatchesADenseModelUnderRandomFrames) {
     }
   }
 
-  // A version pinned half way through still reads as it did then.
+  // A version pinned halfway through still reads as it did then.
   for (int X = 0; X < Size; ++X)
     for (int Y = MinY; Y < MinY + Height; ++Y)
       for (int Z = 0; Z < Size; ++Z)
@@ -428,11 +428,11 @@ TEST(WorldStore, MatchesADenseModelUnderRandomFrames) {
 }
 
 TEST(WorldStore, ReadersSeeWholeFramesWhileFramesAreApplied) {
-  // Every delta sets two cells in different rows of chunks to a value its
-  // sequence decides, so a reader that saw half a frame, or a version and a
-  // sequence that disagree, would notice. Searches run on the same pinned
-  // versions so the shared columns are read while new versions are built.
-  // Under ThreadSanitizer this is also the data race check.
+  // Every delta sets two cells in different rows of chunks to a value derived
+  // from its sequence, so a reader that sees half a frame, or a version and
+  // sequence that disagree, fails. Searches run on the same pinned versions,
+  // so shared columns are read while new versions are built. Under
+  // ThreadSanitizer this also checks for data races.
   constexpr std::uint64_t LastSequence = 2000;
   const auto ValueAt = [](std::uint64_t Sequence) {
     return Sequence % 2 == 0 ? Stone : Water;

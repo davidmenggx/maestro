@@ -35,19 +35,19 @@ TEST(Column, AnEditInsideARunSplitsIt) {
   const std::vector<maestro::world::Run> Expected = {
       {4, Stone}, {10, Air}, {11, Water}, {48, Air}};
   EXPECT_TRUE(std::ranges::equal(Edited->runs(), Expected));
-  // The original is a version someone may still hold.
+  // The original must stay unchanged, as a search may still hold it.
   EXPECT_EQ(Ground.at(10), Air);
 }
 
 TEST(Column, AnEditMatchingANeighbourMergesWithIt) {
   const Column Ground = column({{4, Stone}, {48, Air}});
-  // Raising the ground by one block extends the stone run instead of adding
-  // one.
+  // Raising the ground by one block extends the stone run instead of adding a
+  // new run.
   const auto Raised = Ground.with(4, Stone);
   const std::vector<maestro::world::Run> Expected = {{5, Stone}, {48, Air}};
   EXPECT_TRUE(std::ranges::equal(Raised->runs(), Expected));
 
-  // Clearing the top stone block merges it into the air above.
+  // Clearing the top stone block merges it into the air run above.
   const auto Lowered = Ground.with(3, Air);
   const std::vector<maestro::world::Run> LoweredExpected = {{3, Stone},
                                                             {48, Air}};
@@ -93,8 +93,8 @@ TEST(Area, ANewVersionSharesWhatItDidNotChange) {
   EXPECT_EQ(After->sequence(), Before->sequence() + 1);
   EXPECT_EQ(After->at(3, 0, 4), Water);
   EXPECT_EQ(Before->at(3, 0, 4), Air);
-  // The edited column is new; its neighbour in the same chunk and every
-  // column of the other chunks are shared.
+  // The edited column is new. Its neighbour in the same chunk and all
+  // columns of the other chunks are shared.
   EXPECT_NE(After->column(3, 4), Before->column(3, 4));
   EXPECT_EQ(After->column(3, 5), Before->column(3, 5));
   EXPECT_EQ(After->column(20, 20), Before->column(20, 20));
@@ -124,8 +124,8 @@ TEST(Area, ANewVersionKeepsItsStreamAndTakesTheFramesSequence) {
 }
 
 TEST(Area, AnEditSharesTheRestOfItsRowAndEveryOtherRow) {
-  // Three chunks a side, so the edited chunk has neighbours both in its own
-  // row and in other rows.
+  // Three chunks per side, so the edited chunk has neighbours in its own row
+  // and in other rows.
   maestro::test::DenseWorld World(48, -16, 48);
   for (int X = 0; X < 48; ++X)
     for (int Z = 0; Z < 48; ++Z)

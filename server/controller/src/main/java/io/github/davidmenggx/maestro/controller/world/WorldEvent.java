@@ -7,8 +7,8 @@ import java.util.Objects;
  * simulator replays them from a trace or generator. Events arrive on the server main thread in tick
  * order.
  *
- * <p>Mob and player positions are only reported where the controller needs them: a request carries
- * its own start, so per-tick movement never crosses the boundary.
+ * <p>Mob and player positions are reported only where the controller needs them. A request carries
+ * its own start, so per-tick movement does not cross the boundary.
  */
 public sealed interface WorldEvent {
 
@@ -29,10 +29,10 @@ public sealed interface WorldEvent {
   }
 
   /**
-   * {@code pathType} is {@code getPathTypeFromState} for the new block state: the per-block layer
-   * only, as an ordinal of the shared {@code PathType} enum. {@code floor} is the top of the
-   * block's collision shape in sixteenths rounded up, 0 when it has none. Exactly one event per
-   * block change.
+   * {@code pathType} is {@code getPathTypeFromState} for the new block state (the per-block type
+   * only), as an ordinal of the shared {@code PathType} enum. {@code floor} is the top of the
+   * block's collision shape in sixteenths, rounded up, or 0 if it has none. One event per block
+   * change.
    */
   record BlockChanged(long tick, Pos pos, byte pathType, int floor) implements WorldEvent {
     public BlockChanged {
@@ -48,14 +48,14 @@ public sealed interface WorldEvent {
     }
   }
 
-  /** The chunk's state is sent to the node that owns it at the end of the tick. */
+  /** The chunk's state is sent to its owning node at the end of the tick. */
   record ChunkLoaded(long tick, int chunkX, int chunkZ) implements WorldEvent {
     public ChunkLoaded {
       requireTick(tick);
     }
   }
 
-  /** The owning node is sent the chunk as cleared, and reads it as air until it comes back. */
+  /** The owning node is sent the chunk as cleared and treats it as air until it is loaded again. */
   record ChunkUnloaded(long tick, int chunkX, int chunkZ) implements WorldEvent {
     public ChunkUnloaded {
       requireTick(tick);
@@ -76,9 +76,9 @@ public sealed interface WorldEvent {
   }
 
   /**
-   * The inputs of one {@code PathFinder.findPath} call that vary per call rather than per mob: how
-   * close counts as arrival, the two bounds on the search, and {@code Mob.getMaxFallDistance},
-   * which reads the mob's target, health and the difficulty.
+   * The inputs of one {@code PathFinder.findPath} call that vary per call, not per mob: the
+   * distance that counts as arrival, the two search bounds, and {@code Mob.getMaxFallDistance},
+   * which depends on the mob's target, health and the difficulty.
    */
   record Search(int reachRange, float maxPathLength, int maxVisitedNodes, int maxFallDistance) {
 
@@ -109,9 +109,9 @@ public sealed interface WorldEvent {
 
   /**
    * One A* request. {@code start} is the start node the evaluator resolved on the server, not the
-   * mob's position, and {@code classId} names the profile the mob has right now rather than one
-   * fixed at spawn. The controller mints the request id, so a repeat for the same mob supersedes
-   * the outstanding one rather than racing it.
+   * mob's position. {@code classId} names the mob's current profile, not one fixed at spawn. The
+   * controller assigns the request id, so a repeat request for the same mob replaces the
+   * outstanding one.
    */
   record PathRequested(long tick, int mobId, short classId, Pos start, Pos target, Search search)
       implements WorldEvent {
@@ -127,8 +127,8 @@ public sealed interface WorldEvent {
   }
 
   /**
-   * The mob stopped wanting a path, having lost its target or stopped hunting. Frees fleet capacity
-   * that would otherwise be spent on an answer nobody reads.
+   * The mob no longer wants a path because it lost its target or stopped hunting. Frees fleet
+   * capacity that would be spent on an answer nobody reads.
    */
   record PathCanceled(long tick, int mobId) implements WorldEvent {
     public PathCanceled {
@@ -136,7 +136,7 @@ public sealed interface WorldEvent {
     }
   }
 
-  /** Feeds the shedding and failover priorities, which are both distance-to-player ordered. */
+  /** Used for shedding and failover priorities, which both order mobs by distance to a player. */
   record PlayerMoved(long tick, int playerId, Pos pos) implements WorldEvent {
     public PlayerMoved {
       requireTick(tick);

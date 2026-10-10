@@ -64,7 +64,7 @@ void BinaryHeap::downHeap(std::size_t Idx) {
     const float RightCost = HasRight ? Nodes[Heap[RightIdx]].F
                                      : std::numeric_limits<float>::infinity();
 
-    // A tie between the children goes right, as in vanilla.
+    // As in vanilla, a tie between the children picks the right one.
     if (LeftCost < RightCost) {
       if (!(LeftCost < Cost))
         break;

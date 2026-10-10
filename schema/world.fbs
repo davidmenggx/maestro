@@ -3,13 +3,13 @@ include "common.fbs";
 namespace maestro.fbs;
 
 // One block as the node needs it: the per-block `PathType` (Minecraft's
-// `getPathTypeFromState`, a pure function of that block state) and `floor`,
-// the top of the block's collision shape in sixteenths, which is what
-// `getFloorLevel` reads from the block below a node. `floor` is rounded up to
-// a whole sixteenth on purpose: nearly every collision shape already ends on
-// one, and the few that do not, such as the lily pad at 1.5, move by less than
-// a sixteenth. Neighbor-dependent and mob-dependent types are derived on the
-// node at query time, so a block change produces exactly one `CellDelta`.
+// `getPathTypeFromState`, a pure function of the block state) and `floor`, the
+// top of the block's collision shape in sixteenths, which `getFloorLevel` reads
+// from the block below a node. `floor` is rounded up to a sixteenth on
+// purpose: almost every collision shape already ends on one, and the few that
+// do not, such as the lily pad at 1.5, change by less than a sixteenth.
+// Neighbor-dependent and mob-dependent types are computed on the node at query
+// time, so a block change produces exactly one `CellDelta`.
 struct CellDelta {
   pos:Vec3s;
   node_type:PathType;
@@ -31,18 +31,18 @@ struct CellRun {
 }
 
 // Full state of one chunk at `sequence`, run-length encoded. An empty
-// `run_counts` means the chunk is not resident on the server, which reads as
-// air: the same answer vanilla's `PathNavigationRegion` gives for a chunk it
-// could not fetch. A node therefore starts its whole area as air and fills it
-// in as chunks arrive, rather than waiting for a region to be complete.
+// `run_counts` means the chunk is not resident on the server, and reads as
+// air, as vanilla's `PathNavigationRegion` does for a chunk it could not
+// fetch. A node therefore starts its whole area as air and fills it in as
+// chunks arrive, without waiting for the region to be complete.
 //
-// `chunk_xz` is the chunk's index within the assigned area rather than its world
-// chunk coordinate, so it is relative like every other position on the wire.
-// Columns cover the chunk densely, indexed `(x - min_x) * 16 + (z - min_z)`
-// against the chunk's own origin. `run_counts` holds each column's run count in
-// that order, and `runs` is every column's runs concatenated in the same order,
-// so a column's slice starts at the prefix sum of the counts before it. Runs
-// within a column go upward from the `min_y` in `RegionAssignment` and their
+// `chunk_xz` is the chunk's index within the assigned area, not its world
+// chunk coordinate, so like every other position on the wire it is relative.
+// The columns cover the whole chunk, indexed `(x - min_x) * 16 + (z - min_z)`
+// from the chunk's own origin. `run_counts` holds each column's run count in
+// that order, and `runs` is every column's runs concatenated in the same
+// order, so a column's runs start at the sum of the counts before it. Runs
+// in a column go upward from the `min_y` in `RegionAssignment`, and their
 // lengths sum to its `height`.
 table ChunkSnapshot {
   sequence:ulong;

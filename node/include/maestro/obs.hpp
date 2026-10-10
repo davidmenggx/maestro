@@ -5,12 +5,12 @@
 namespace maestro::obs {
 
 /// Installs the process-wide tracer provider, exporting over OTLP/gRPC to
-/// `OtlpEndpoint` (e.g. localhost:4317). Spans are exported in batches off the
-/// calling thread, so ending one never waits on the network. A build without
-/// `MAESTRO_WITH_OTEL` makes this and `shutdown` no-ops.
+/// `OtlpEndpoint` (e.g. localhost:4317). Spans are exported in batches on a
+/// background thread. Without `MAESTRO_WITH_OTEL`, this and `shutdown` do
+/// nothing.
 void init(std::string_view ServiceName, std::string_view OtlpEndpoint);
 
-/// Flushes and tears down the tracer provider.
+/// Flushes and shuts down the tracer provider.
 void shutdown();
 
 } // namespace maestro::obs

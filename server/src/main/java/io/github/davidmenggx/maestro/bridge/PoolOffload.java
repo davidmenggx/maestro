@@ -11,9 +11,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Production {@link Offload}. Work runs on a small daemon pool and its completion, or its failure,
- * is queued for {@link #drain}, which the server thread calls at the tick boundary, so results only
- * ever reach the controller from one thread.
+ * Production {@link Offload}. Work runs on a small daemon pool. Its completion or failure is
+ * queued for {@link #drain}, which the server thread calls at the tick boundary, so results reach
+ * the controller from one thread only.
  */
 public final class PoolOffload implements Offload, AutoCloseable {
 
@@ -41,7 +41,7 @@ public final class PoolOffload implements Offload, AutoCloseable {
           try {
             result = work.get();
           } catch (RuntimeException e) {
-            // The caller decides what a failure means, so it hears about it.
+            // The caller decides how to handle a failure.
             LOG.error("Maestro offload job '{}' failed", name, e);
             completions.add(failure);
             return;

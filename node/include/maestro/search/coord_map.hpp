@@ -8,18 +8,17 @@
 
 namespace maestro::search {
 
-/// Open-addressed map from a block position to a small value. Clearing keeps
-/// the slots and costs nothing, so a map reused across searches stops
-/// allocating once it has grown to the largest search, and a small search
-/// after a large one does not pay for the large one's slots. Coordinates must
-/// lie in [-2^20, 2^20).
+/// Open-addressed map from a block position to a small value. `clear` is
+/// constant time and keeps the allocated slots, so a map reused across
+/// searches only allocates while it grows to the largest search. Coordinates
+/// must lie in [-2^20, 2^20).
 template <typename V> class CoordMap {
 public:
   void clear() {
     Size = 0;
-    // A slot is live only if it carries the current generation, so moving to
-    // the next one empties every slot at once. Once the counter wraps, stale
-    // slots could carry it again, so they are wiped first.
+    // A slot is live only if it holds the current generation, so bumping the
+    // generation empties every slot. When the counter wraps, old slots are
+    // wiped so they cannot match again.
     if (++Generation == 0) {
       for (Slot &S : Slots)
         S.Generation = 0;
@@ -57,7 +56,7 @@ private:
 
   struct Slot {
     std::uint64_t Key = 0;
-    /// 0 is never current, so a slot starts out empty.
+    /// Generation 0 is never current, so a new slot is empty.
     std::uint16_t Generation = 0;
     V Value{};
   };
@@ -73,7 +72,7 @@ private:
     return Field(X) << 42 | Field(Y) << 21 | Field(Z);
   }
 
-  /// The splitmix64 finalizer, so neighbouring positions scatter.
+  /// The splitmix64 finalizer, to spread neighbouring positions apart.
   static std::uint64_t mix(std::uint64_t Z) {
     Z ^= Z >> 30;
     Z *= 0xbf58476d1ce4e5b9ULL;
@@ -82,7 +81,7 @@ private:
     return Z ^ (Z >> 31);
   }
 
-  /// The live slot holding `Key`, or the empty slot where it would go.
+  /// The slot holding `Key`, or the empty slot where `Key` would be inserted.
   Slot &slotFor(std::uint64_t Key) {
     const std::size_t Mask = Slots.size() - 1;
     for (std::size_t I = mix(Key) & Mask;; I = (I + 1) & Mask)

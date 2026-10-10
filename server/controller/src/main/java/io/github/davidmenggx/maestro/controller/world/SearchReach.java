@@ -1,19 +1,19 @@
 package io.github.davidmenggx.maestro.controller.world;
 
 /**
- * How far from its start a search reads the world. A node reads everything past its area as air,
- * which turns real ground into a cliff and gives a wrong path rather than none, so a request is
- * only sent to a node whose area holds every block its search can read. Height is not checked:
- * areas are full height.
+ * How far from its start a search reads the world. A node reads everything outside its area as
+ * air, which turns real ground into a cliff and gives a wrong path instead of none. A request is
+ * therefore sent only to a node whose area contains every block its search can read. Height is
+ * not checked, because areas are full height.
  */
 public final class SearchReach {
 
   private SearchReach() {}
 
   /**
-   * Blocks a search may read past its start along either horizontal axis. A node is only expanded
-   * while it is nearer the start than {@code maxPathLength}; its neighbours are a block further;
-   * the footprint test reads {@code floor(width + 1) - 1} blocks past each neighbour; and each of
+   * Blocks a search may read past its start along either horizontal axis. A node is expanded only
+   * while it is nearer the start than {@code maxPathLength}. Its neighbours are one block further.
+   * The footprint test reads {@code floor(width + 1) - 1} blocks past each neighbour, and each of
    * those cells reads the cells around it to find its type.
    */
   public static int blocks(float maxPathLength, float width) {
@@ -28,7 +28,7 @@ public final class SearchReach {
   }
 
   /**
-   * Whether the square area with corner {@code (minX, minZ)} and side {@code size} holds every
+   * Whether the square area with corner {@code (minX, minZ)} and side {@code size} contains every
    * block a search from {@code start} can read.
    */
   public static boolean fits(

@@ -32,8 +32,8 @@ struct Geometry {
   friend bool operator==(const Geometry &, const Geometry &) = default;
 };
 
-/// Vertically contiguous cells sharing one value. `End` is the offset above
-/// the area's `MinY` where the run stops, exclusive.
+/// Vertically contiguous cells with one value. `End` is the exclusive end of
+/// the run, as an offset above the area's `MinY`.
 struct Run {
   std::uint16_t End = 0;
   Cell Value;
@@ -41,8 +41,8 @@ struct Run {
   friend bool operator==(Run, Run) = default;
 };
 
-/// One full-height column, run-length encoded. Immutable once built, so
-/// versions of an area can share it.
+/// One full-height column, run-length encoded. Immutable, so versions of an
+/// area can share it.
 class Column {
 public:
   /// `Runs` must be ordered, non-empty, and end at the area's height.
@@ -76,15 +76,15 @@ struct CellEdit {
 
 /// One immutable version of an assigned area, as of a world stream sequence.
 /// A new version shares every chunk and column it did not change, so a search
-/// can hold a version for as long as it runs while newer ones are published.
-/// A chunk with no state reads as air, as does anything outside the area.
+/// can keep using its version while newer ones are published. A chunk with no
+/// state reads as air, as does anything outside the area.
 ///
-/// A version also names the stream it belongs to, so `run`, `regionId` and
-/// `sequence` read from one version always describe the same stream position.
+/// A version also records its stream, so `run`, `regionId` and `sequence` from
+/// one version always describe the same stream position.
 class Area {
 public:
-  /// An area that is air throughout, before the first frame of the stream
-  /// `ControllerRun` and `RegionId` name.
+  /// An all-air area, before the first frame of the stream named by
+  /// `ControllerRun` and `RegionId`.
   Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId);
 
   const Geometry &geometry() const { return Geo; }
@@ -99,27 +99,26 @@ public:
 
   Cell at(int X, int Y, int Z) const;
 
-  /// The column at `X`, `Z`, or null where it reads as air. Lets versions be
-  /// checked for what they share.
+  /// The column at `X`, `Z`, or null where it reads as air. Used to check
+  /// which columns versions share.
   const Column *column(int X, int Z) const;
 
-  /// A version with one chunk replaced. A null `Content` clears it to air.
+  /// A version with one chunk replaced. A null `Content` clears the chunk to air.
   std::shared_ptr<const Area> withChunk(int ChunkX, int ChunkZ,
                                         ChunkPtr Content,
                                         std::uint64_t Sequence) const;
 
-  /// A version with `Edits` applied in order. Every edit must lie inside the
-  /// area; one landing in a chunk with no state starts that chunk from air.
+  /// A version with `Edits` applied in order. Every edit must be inside the
+  /// area. An edit in a chunk with no state starts that chunk from air.
   std::shared_ptr<const Area> withCells(std::span<const CellEdit> Edits,
                                         std::uint64_t Sequence) const;
 
 private:
-  /// The chunks at one `ChunkX`, indexed by `ChunkZ`. A null chunk reads as
-  /// air.
+  /// The chunks at one `ChunkX`, indexed by `ChunkZ`. A null chunk is air.
   using ChunkRow = std::vector<ChunkPtr>;
   using RowPtr = std::shared_ptr<const ChunkRow>;
 
-  /// A writable copy of the row at `ChunkX`, or a row of air if it has none.
+  /// A writable copy of the row at `ChunkX`, or an all-air row if it has none.
   std::shared_ptr<ChunkRow> copyRow(int ChunkX) const;
 
   const ChunkPtr *chunkAt(int X, int Z) const;
@@ -128,11 +127,11 @@ private:
   std::uint64_t ControllerRun;
   std::uint32_t RegionId;
   std::uint64_t Sequence = 0;
-  /// Indexed by `ChunkX`. A frame copies this table and the rows it touches,
-  /// so a one-chunk change copies about two rows of pointers rather than one
-  /// pointer per chunk in the area. A null row reads as air.
+  /// Indexed by `ChunkX`. A frame copies this table and the rows it changes,
+  /// so a one-chunk change copies about two rows of pointers, not one pointer
+  /// per chunk in the area. A null row is air.
   std::vector<RowPtr> Rows;
-  /// Shared by every chunk that is materialized from air.
+  /// Shared by every chunk created from air.
   ColumnPtr AirColumn;
 };
 

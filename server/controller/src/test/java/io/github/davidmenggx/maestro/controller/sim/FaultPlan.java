@@ -7,10 +7,10 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * What the network, the fleet and the controller's encode workers are allowed to do to a run. The
- * drop and duplicate rates apply to unordered channels only: an ordered channel loses nothing
- * without also breaking the connection. {@code offloadFailureRate} is the chance an offloaded
- * encode throws.
+ * The faults the network, the fleet and the controller's encode workers may inject into a run. The
+ * drop and duplicate rates apply to unordered channels only, because an ordered channel cannot
+ * lose a frame without breaking the connection. {@code offloadFailureRate} is the probability that
+ * an offloaded encode throws.
  */
 public record FaultPlan(
     int minLatencySteps,
@@ -20,7 +20,7 @@ public record FaultPlan(
     double offloadFailureRate,
     List<Fault> faults) {
 
-  /** Scheduled fleet event, applied at the start of its tick. */
+  /** Scheduled fleet fault, applied at the start of its tick. */
   public sealed interface Fault {
     long tick();
 
@@ -31,20 +31,20 @@ public record FaultPlan(
   public record NodeDied(long tick, NodeId node) implements Fault {}
 
   /**
-   * The connection breaks but the process lives, so the node keeps its region state. This is the
-   * case resume-from-N exists for: the node reconnects still holding most of the stream.
+   * The connection breaks but the process survives, so the node keeps its region state. This is the
+   * case resume-from-N is for: the node reconnects still holding most of the stream.
    */
   public record LinkReset(long tick, NodeId node) implements Fault {}
 
   public record NodeRecovered(long tick, NodeId node) implements Fault {}
 
-  /** Partitions are only found by the failure detector (as opposed to disconnects). */
+  /** Only the failure detector can find a partition, unlike a disconnect. */
   public record Partitioned(long tick, NodeId node, boolean active) implements Fault {}
 
   /**
-   * The ordered channels stop delivering while the link stays up, as TCP does while it backs off
-   * retransmitting, and unordered frames still get through. What was held arrives when the stall
-   * ends. This is how a request can overtake the profile it names.
+   * The ordered channels stop delivering while the link stays up, like TCP during a retransmit
+   * backoff, and unordered frames still get through. Held frames arrive when the stall ends. This
+   * is how a request can arrive before the profile it names.
    */
   public record Stalled(long tick, NodeId node, boolean active) implements Fault {}
 
@@ -66,15 +66,15 @@ public record FaultPlan(
   static final double MAX_SAMPLED_RATE = 0.1;
 
   /**
-   * Faults drawn per run. Several may land on one node, so a failure during a recovery is a case
-   * the sweep reaches. Raising it makes the average run rougher rather than the space wider, so it
-   * trades runs that get far enough to answer anything for runs that spend their length recovering.
+   * Faults drawn per run. Several may hit one node, so the sweep covers a failure during a
+   * recovery. Raising this makes the average run harsher without widening the space, trading runs
+   * that get far enough to answer requests for runs that spend their whole length recovering.
    */
   static final int MAX_FAULTS = 5;
 
   static final int MAX_FAULT_SPAN_TICKS = 15;
 
-  /** A node that dies this often is never brought back, so a run ends a node short. */
+  /** A node that dies this often is never brought back, so a run ends with one node fewer. */
   private static final double PERMANENT_LOSS_CHANCE = 0.15;
 
   /** Floor of the sampled latency range, in steps. Twenty steps is one millisecond. */
@@ -82,22 +82,22 @@ public record FaultPlan(
 
   /**
    * Widest sampled range. The worst case a draw can reach, {@code MAX_MIN_LATENCY_STEPS +
-   * MAX_LATENCY_SPAN_STEPS}, has to stay well inside {@link Simulation#STEPS_PER_TICK}, or a
-   * request is late by construction and the latency invariant stops saying anything about the
-   * controller. At 1000 steps a tick, 400 is 20ms.
+   * MAX_LATENCY_SPAN_STEPS}, must stay well inside {@link Simulation#STEPS_PER_TICK}. Otherwise a
+   * request is always late and the latency invariant says nothing about the controller. At 1000
+   * steps per tick, 400 is 20ms.
    */
   static final int MAX_LATENCY_SPAN_STEPS = 400;
 
-  /** Nothing goes wrong; latency is a few hundred microseconds. */
+  /** No faults; latency is a few hundred microseconds. */
   public static FaultPlan reliable() {
     return new FaultPlan(2, 12, 0.0, 0.0, 0.0, List.of());
   }
 
   /**
    * One draw from the full range of latency, loss, duplication and encode failure, plus up to
-   * {@link #MAX_FAULTS} fleet faults that may overlap on one node or hit several at once. Each
-   * fault starts inside {@code activeTicks} and, unless the node is permanently lost, ends there
-   * too, leaving the quiet tail of the run to settle.
+   * {@link #MAX_FAULTS} fleet faults that may overlap on one node or hit several nodes at once.
+   * Each fault starts inside {@code activeTicks} and, unless the node is permanently lost, ends
+   * there too, so the quiet tail of the run can settle.
    */
   public static FaultPlan sample(Rng rng, int nodeCount, long activeTicks) {
     int minLatency = 1 + rng.nextInt(MAX_MIN_LATENCY_STEPS);

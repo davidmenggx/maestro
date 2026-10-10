@@ -63,8 +63,6 @@ jobs:
           path: server/build/boot-smoke-test.log
           if-no-files-found: ignore
 
-  # The node's unit tests under sanitizers. TSan builds with Clang, so the node
-  # is also checked against a second compiler.
   sanitize:
     name: Node under ${{ matrix.sanitizer }}
     runs-on: ubuntu-latest

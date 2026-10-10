@@ -19,7 +19,7 @@ class SearchReachTest {
   void theReachIsThePathLengthPlusTheFootprintAndTheTypeScan() {
     assertEquals(16 + 1 + 1, SearchReach.blocks(16f, NARROW));
     assertEquals(16 + 2 + 1, SearchReach.blocks(16f, WIDE));
-    // A bound that is not whole still lets a node a fraction short of it expand.
+    // A fractional bound still lets a node just short of it expand.
     assertEquals(36 + 1 + 1, SearchReach.blocks(35.5f, NARROW));
   }
 
@@ -32,7 +32,7 @@ class SearchReachTest {
 
     assertTrue(
         SearchReach.fits(minX, minZ, size, new Pos(minX + 192, 64, minZ + 192), 64f, NARROW));
-    // Right at each edge, then one block past it.
+    // Exactly at each edge, then one block past it.
     assertTrue(
         SearchReach.fits(minX, minZ, size, new Pos(minX + reach, 64, minZ + 192), 64f, NARROW));
     assertFalse(
@@ -52,7 +52,7 @@ class SearchReachTest {
 
   @Test
   void aOneHorizonHaloDoesNotHoldALongSearchFromTheRegionEdge() {
-    // A 256 region with a 64 block halo. An Enderman's 64 block follow range
+    // A 256-block region with a 64-block halo. An Enderman's 64-block follow range
     // fits from the middle of the region but not from its edge.
     int halo = 64;
     int region = 256;

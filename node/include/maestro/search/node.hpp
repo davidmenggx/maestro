@@ -13,8 +13,8 @@ namespace maestro::search {
 using NodeId = std::uint32_t;
 inline constexpr NodeId NoNode = std::numeric_limits<NodeId>::max();
 
-/// Vanilla's `Node`: a block position the search has looked at, and its A*
-/// state. Fields keep vanilla's types, so costs round the way they do in Java.
+/// Vanilla's `Node`: a block position the search has visited, and its A*
+/// state. Fields use vanilla's types so costs round as they do in Java.
 struct Node {
   int X = 0;
   int Y = 0;
@@ -33,7 +33,7 @@ struct Node {
 };
 
 /// `Node.distanceTo`: single precision, with the square root taken in double
-/// as `Mth.sqrt` does.
+/// like `Mth.sqrt`.
 inline float distanceTo(const Node &From, const Node &To) {
   const auto Dx = static_cast<float>(To.X - From.X);
   const auto Dy = static_cast<float>(To.Y - From.Y);

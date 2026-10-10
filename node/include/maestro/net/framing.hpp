@@ -11,20 +11,19 @@ namespace maestro::net {
 /// where the payload is a FlatBuffers buffer.
 inline constexpr std::size_t HeaderSize = 4;
 
-/// Largest payload a frame may declare. The biggest frame is one chunk's
-/// state: even with every block a run of its own, that is about 400 KiB at the
-/// overworld's 384 blocks and about 4 MiB at the tallest world Minecraft
-/// allows.
+/// Largest allowed payload. The biggest frame is one chunk's state. With every
+/// block in its own run, that is about 400 KiB at the overworld's 384 blocks
+/// and about 4 MiB at the tallest world Minecraft allows.
 inline constexpr std::uint32_t MaxPayloadSize = 8u << 20;
 
-/// What the front of a receive buffer holds.
+/// What is at the front of a receive buffer.
 enum class HeaderStatus {
   /// Fewer than `HeaderSize` bytes have arrived.
   Incomplete,
   /// `Length` bytes of payload follow the header.
   Ready,
-  /// The declared length is over `MaxPayloadSize`, so the stream cannot be
-  /// trusted and the connection should be dropped rather than allocated for.
+  /// The declared length is over `MaxPayloadSize`. Drop the connection
+  /// instead of allocating.
   TooLarge,
 };
 
@@ -34,8 +33,8 @@ struct Header {
   std::uint32_t Length = 0;
 };
 
-/// Serializes `Payload`, which must be at most `MaxPayloadSize` bytes, into a
-/// framed message (header followed by payload).
+/// Frames `Payload`, which must be at most `MaxPayloadSize` bytes: the header,
+/// then the payload.
 std::vector<std::uint8_t> frame(std::span<const std::uint8_t> Payload);
 
 /// Reads the header at the front of `Buffer`.

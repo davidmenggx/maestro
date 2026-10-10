@@ -37,15 +37,15 @@ import maestro.fbs.WorldMsg;
 import org.junit.jupiter.api.Test;
 
 /**
- * The harness has to be trustworthy before the runs it produces are. These cover the machinery the
- * assertions themselves lean on, the samplers that decide what a sweep explores, and the guards
- * that turn a harness misuse into a message.
+ * The harness must be reliable before its runs can be trusted. These tests cover the machinery the
+ * assertions depend on, the samplers that decide what a sweep explores, and the guards that report
+ * harness misuse as an error message.
  */
 class HarnessGuardsTest {
 
   private static final int DRAWS = 300;
 
-  /** Any value works for a node built outside a controller. */
+  /** Any value works for a node created outside a controller. */
   private static final long RUN = 7;
 
   private static final RegionMap ONE_REGION =
@@ -66,7 +66,7 @@ class HarnessGuardsTest {
       }
     }
 
-    // A sample stuck at one setting would not fuzz anything.
+    // A sample that always returns one setting would not fuzz anything.
     for (Count setting : Count.values()) {
       counts.get(setting).assertCovers(setting, setting.floor(), setting.ceiling());
     }
@@ -135,12 +135,12 @@ class HarnessGuardsTest {
       sawPermanentLoss |= died > recovered;
     }
 
-    // Process death, a silent partition, a stalled stream and a link reset are
-    // four different recoveries, so the sweep has to reach all of them.
+    // Process death, a silent partition, a stalled stream and a link reset need
+    // four different recoveries, so the sweep must cover all of them.
     assertEquals(Set.of("NodeDied", "NodeRecovered", "Partitioned", "Stalled", "LinkReset"), kinds);
-    // Faults have to be able to pile up on one node, or a second failure during a
-    // recovery is a case the sweep can never reach. A paired fault contributes two
-    // entries, so the count only has to clear the number of faults drawn.
+    // Faults must be able to accumulate on one node, or the sweep can never cover a
+    // second failure during a recovery. A paired fault adds two entries, so the
+    // count only needs to exceed the number of faults drawn.
     faultCount.assertCovers("fault count", 0, FaultPlan.MAX_FAULTS);
     minLatency.assertCovers("min latency", 1, FaultPlan.MAX_MIN_LATENCY_STEPS);
     maxLatency.assertCovers(
@@ -155,7 +155,7 @@ class HarnessGuardsTest {
     Simulation sim = new Simulation(5L, FaultPlan.reliable());
     ModeledNode node = sim.addNode(NodeId.of(0), 4);
 
-    // The node holds nothing, so a resume is a claim it cannot honor.
+    // The node holds nothing, so it cannot honor a resume.
     SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
     node.receive(
         Channel.WORLD, ByteBuffer.wrap(Frames.assignment(ONE_REGION, 0, true, RUN, world)));
@@ -227,7 +227,7 @@ class HarnessGuardsTest {
       node.receive(Channel.WORLD, ByteBuffer.wrap(entry.getValue()));
 
       assertEquals(1, node.violations().size(), entry.getKey() + ": " + node.violations());
-      // Like the real node, it drops everything rather than keep half a stream.
+      // Like the real node, it drops all state instead of keeping half a stream.
       assertFalse(node.hasState(), entry.getKey());
       assertEquals(0, node.lastSequence(), entry.getKey());
       assertTrue(before != node.stateDigest(), entry.getKey());
@@ -245,9 +245,9 @@ class HarnessGuardsTest {
     node.receive(
         Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(request), ONE_REGION, 0)));
 
-    // A request overtaking its profile is something the network does, not a
-    // controller bug, so it is not a violation. The answer goes out at once
-    // rather than waiting for the node's next service.
+    // A request arriving before its profile is network behavior, not a controller
+    // bug, so it is not a violation. The answer is sent immediately instead of
+    // waiting for the node's next service.
     assertEquals(List.of(), node.violations());
     assertEquals(
         1,
@@ -320,7 +320,7 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.with(Chance.REQUEST, 1.5));
     assertThrows(
         IllegalArgumentException.class, () -> Scenario.DEFAULT.with(Chance.CHUNK_CHURN, -0.1));
-    // A table with a setting left out cannot be completed by guessing.
+    // A table with a missing setting is rejected, not filled in with a guess.
     assertThrows(
         IllegalArgumentException.class,
         () -> new Scenario(Map.of(Count.MOBS, 1), Scenario.DEFAULT.chances()));
@@ -331,7 +331,7 @@ class HarnessGuardsTest {
     assertEquals(8, scenario(8, 0).capacityOf(0));
     assertEquals(2, scenario(8, 1).capacityOf(0));
     assertEquals(8, scenario(8, 1).capacityOf(1));
-    // A capacity that would round to zero still serves one request a tick.
+    // A capacity that rounds to zero still serves one request per tick.
     assertEquals(1, scenario(2, 1).capacityOf(0));
   }
 
@@ -340,7 +340,7 @@ class HarnessGuardsTest {
     assertThrows(
         IllegalArgumentException.class, () -> Topology.DEFAULT.withRegionSize(Chunks.SIZE + 4));
     assertThrows(IllegalArgumentException.class, () -> Topology.DEFAULT.withRegionsPerSide(0));
-    // A column too short, or a hill that would leave a mob nowhere to stand.
+    // A column that is too short, or a hill that leaves a mob nowhere to stand.
     assertThrows(IllegalArgumentException.class, () -> Topology.DEFAULT.withHeight(16));
     assertThrows(IllegalArgumentException.class, () -> Topology.DEFAULT.withRelief(32));
 
@@ -364,15 +364,15 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> world.set(0, -65, 0, (byte) 0, 16));
     assertThrows(IllegalArgumentException.class, () -> world.chunkLoaded(9, 9));
     assertThrows(IllegalArgumentException.class, () -> new SimWorld(topology, 0, SeededRng.of(1L)));
-    // Derived types cannot be a block's own type.
+    // A derived type cannot be a block's own type.
     assertThrows(
         IllegalArgumentException.class, () -> world.set(0, -60, 0, (byte) PathType.WALKABLE, 16));
   }
 
   @Test
   void everySampledMobProfileIsCarriedOnTheWire() {
-    // Profiles are drawn per run, so the encoder meets values that differ between
-    // runs rather than one pair of constants.
+    // Profiles are drawn per run, so the encoder sees values that vary between
+    // runs, not constants.
     Set<String> shapes = new LinkedHashSet<>();
     for (int seed = 0; seed < DRAWS; seed++) {
       SimWorld world = new SimWorld(Topology.DEFAULT, 3, SeededRng.of(seed).derive("terrain"));
@@ -386,7 +386,7 @@ class HarnessGuardsTest {
 
   @Test
   void everySearchInputIsCarriedOnTheWire() {
-    // Distinct values, so a field written into its neighbour's slot is caught.
+    // Distinct values, so a field written into its neighbour's slot is detected.
     WorldEvent.Search search = new WorldEvent.Search(6, 40.5f, 640, 300);
     Frames.Request request =
         new Frames.Request(9, (short) 2, new Pos(3, 40, 5), new Pos(7, 41, 11), search);
@@ -429,7 +429,7 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> transport.connect(NodeId.of(7), "sim://7"));
   }
 
-  /** A chunk frame with {@code columns} one-run columns, which only a broken encoder sends. */
+  /** A chunk frame with {@code columns} one-run columns, which only a faulty encoder would send. */
   private static byte[] chunkWithColumns(long sequence, int columns) {
     FlatBufferBuilder builder = new FlatBufferBuilder(1024);
     int[] counts = new int[columns];
@@ -458,10 +458,10 @@ class HarnessGuardsTest {
     return IntStream.range(0, count).mapToObj(NodeId::of).toList();
   }
 
-  /** Lowest and highest value a sampler produced, so a range can be asserted in one place. */
+  /** Lowest and highest value a sampler produced, so a range can be checked in one place. */
   private static final class Span {
 
-    /** Share of a range each end may be missed by, so the check is not a test of luck. */
+    /** Fraction of the range at each end that may be missed, so the check does not depend on luck. */
     private static final double EDGE_MARGIN = 0.1;
 
     private double low = Double.POSITIVE_INFINITY;
@@ -472,7 +472,7 @@ class HarnessGuardsTest {
       high = Math.max(high, value);
     }
 
-    /** Asserts the draws reached both ends of {@code [low, high]}, give or take a margin. */
+    /** Asserts that the draws reached both ends of {@code [low, high]}, within a margin. */
     void assertCovers(Object label, double low, double high) {
       double margin = (high - low) * EDGE_MARGIN;
       assertTrue(

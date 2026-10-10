@@ -33,9 +33,8 @@ TEST(BinaryHeap, PopsInCostOrder) {
 }
 
 TEST(BinaryHeap, BreaksTiesAsVanillaDoes) {
-  // Moving the last entry to the root and sifting it down only on a strictly
-  // lower child cost leaves it in place, so equal costs do not come out in
-  // insertion order.
+  // The last entry moves to the root and sifts down only for a strictly lower
+  // child cost, so equal costs do not leave in insertion order.
   std::vector<Node> Nodes = withCosts({1.0F, 1.0F, 1.0F});
   BinaryHeap Heap(Nodes);
   for (NodeId Id = 0; Id < Nodes.size(); ++Id)
@@ -48,7 +47,7 @@ TEST(BinaryHeap, TiesBetweenChildrenGoRight) {
   BinaryHeap Heap(Nodes);
   for (NodeId Id = 0; Id < Nodes.size(); ++Id)
     Heap.insert(Id);
-  // Popping 0 moves 3 to the root, which sinks towards the right child.
+  // Popping 0 moves 3 to the root, which sinks to the right child.
   EXPECT_EQ(Heap.pop(), 0u);
   EXPECT_EQ(Heap.pop(), 2u);
   EXPECT_EQ(Heap.pop(), 1u);

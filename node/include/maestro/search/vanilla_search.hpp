@@ -9,11 +9,10 @@
 namespace maestro::search {
 
 /// Port of vanilla's `PathFinder` driving a `WalkNodeEvaluator`, decision for
-/// decision, so that given the same world and inputs it returns the same path.
-/// That includes vanilla's quirks: the heuristic is weighted by 1.5, a node's
-/// walked distance is overwritten even when the path through it is not taken,
-/// and the result ends at the node nearest the target rather than at the node
-/// that reached it.
+/// decision, so the same world and inputs give the same path. This keeps
+/// vanilla's quirks: the heuristic is weighted by 1.5, a node's walked
+/// distance is overwritten even when the path through it is not taken, and the
+/// result ends at the node nearest the target, not the node that reached it.
 class VanillaSearch final : public Search {
 public:
   VanillaSearch() : OpenSet(Evaluator.nodes()) {}
@@ -24,7 +23,7 @@ public:
             Result &Out) override;
 
 private:
-  /// `getBestH`: the distance to the target, recording the nearest node seen.
+  /// `getBestH`: the distance to the target, tracking the nearest node seen.
   float getBestH(NodeId Id);
 
   WalkNodeEvaluator Evaluator;

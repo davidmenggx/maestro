@@ -4,35 +4,35 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * What the controller hands back to the server, on the main thread. Exactly one call per request:
+ * What the controller returns to the server, on the main thread. Exactly one call per request:
  * either a path or a drop.
  */
 public interface WorldOutput {
 
-  /** Why a request will never produce a computed path. The server then falls back on its own. */
+  /** Why a request will not produce a computed path. The server then computes its own. */
   enum DropReason {
-    /** Rejected before sending: the owning node would answer past the tick budget. */
+    /** Rejected before sending because the owning node would answer past the tick budget. */
     QUEUE_DEPTH,
     /** No node owns the region. */
     NO_NODE,
     /**
-     * The owning node had not been told this mob profile yet. It is registered on the way out, and
-     * a request that still overtakes the registration is answered as unknown by the node.
+     * The owning node did not have this mob profile yet. It is registered as part of the send, and
+     * if the request still arrives before the registration, the node answers that it is unknown.
      */
     CLASS_UNREGISTERED,
-    /** The owner died before answering. */
+    /** The owning node died before answering. */
     NODE_LOST,
     /** The mob was removed while the request was in flight. */
     MOB_GONE,
     /** The mob withdrew the request before it was answered. */
     CANCELED,
-    /** The mob asked again before this one was answered, so the older request was abandoned. */
+    /** The mob sent a new request before this one was answered, so this one was abandoned. */
     SUPERSEDED,
-    /** Dropped to hold the latency SLO under a saturated fleet. */
+    /** Dropped to meet the latency SLO when the fleet is saturated. */
     SHED
   }
 
-  /** One node of the path, with the resolved type the navigation reads while following it. */
+  /** One node of the path, with the resolved type the navigation reads when following it. */
   record Node(Pos pos, byte pathType) {
     public Node {
       Objects.requireNonNull(pos, "pos");
@@ -43,8 +43,8 @@ public interface WorldOutput {
   }
 
   /**
-   * What {@code Path(nodes, target, reached)} takes, plus the tick the request was issued so the
-   * server knows how old the answer is. Empty {@code nodes} means no path.
+   * The arguments of {@code Path(nodes, target, reached)}, plus the tick the request was issued,
+   * so the server knows how old the answer is. Empty {@code nodes} means no path.
    */
   record PathResult(
       int mobId, Pos target, boolean reached, List<Node> nodes, float cost, long issuedTick) {

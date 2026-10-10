@@ -25,11 +25,11 @@ inline constexpr world::Cell IronDoor{world::PathType::DOOR_IRON_CLOSED,
 inline constexpr world::Cell OpenDoor{world::PathType::DOOR_OPEN,
                                       world::FullFloor};
 
-/// A dense, writable world that a test describes terrain in, then turns into
-/// the frames a controller would send. Positions use the wire's frame.
+/// A dense, writable world for describing test terrain, which converts to the
+/// frames a controller would send. Positions use the wire's frame.
 class DenseWorld {
 public:
-  /// A world that is air throughout.
+  /// An all-air world.
   DenseWorld(int Size, int MinY, int Height);
 
   const world::Geometry &geometry() const { return Geo; }
@@ -37,7 +37,7 @@ public:
   world::Cell at(int X, int Y, int Z) const;
   void set(int X, int Y, int Z, world::Cell Value);
 
-  /// Sets every cell in the box between the two corners, both included.
+  /// Sets every cell in the box between the two corners, inclusive.
   void fill(int X0, int Y0, int Z0, int X1, int Y1, int Z1, world::Cell Value);
 
   Frame assignment(bool Resume = false, std::uint64_t Run = 1,
@@ -46,7 +46,7 @@ public:
   /// One chunk's state, run-length encoded as the controller encodes it.
   Frame chunk(std::uint64_t Sequence, int ChunkX, int ChunkZ) const;
 
-  /// A fresh store fed the assignment and then every chunk, pinned.
+  /// A new store given the assignment and then every chunk, pinned.
   std::shared_ptr<const world::Area> load() const;
 
 private:

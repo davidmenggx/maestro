@@ -45,24 +45,24 @@ import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 
 /**
- * Stand-in for a C++ compute node: it decodes real frames with the generated bindings, holds the
- * region state a stateful node would hold, and answers requests at a fixed rate. Paths are straight
- * lines, because what is under test here is the controller and the wire, not A*.
+ * Model of a C++ compute node. It decodes real frames with the generated bindings, holds the region
+ * state a stateful node would, and answers requests at a fixed rate. Paths are straight lines,
+ * because the controller and the wire are under test, not A*.
  *
  * <p>It refuses exactly the world frames the real node's {@code WorldStore} refuses, and reacts the
- * same way: nothing in the frame is applied, everything held is dropped, and the link is reset so
+ * same way: nothing in the frame is applied, all held state is dropped, and the link is reset so
  * the node reconnects reporting nothing held. A correct controller never sends such a frame, so
- * each refusal is also recorded in {@link #violations()} rather than thrown, and one run reports
- * every problem it hit.
+ * each refusal is recorded in {@link #violations()} instead of thrown, and one run reports every
+ * problem it hit.
  */
 public final class ModeledNode {
 
   private static final int MAX_PATH_NODES = 32;
 
-  /** The node's own cadence, which the controller neither sets nor solicits. */
+  /** The node's own interval. The controller neither sets nor requests it. */
   private static final int HEARTBEAT_TICKS = 20;
 
-  /** Positions are region-relative, as received. */
+  /** Positions are relative to the region, as received. */
   private record Pending(long requestId, Pos start, Pos target) {}
 
   private final Simulation sim;
@@ -73,14 +73,14 @@ public final class ModeledNode {
   private final Set<Long> queued = new LinkedHashSet<>();
 
   /**
-   * Answers kept for retries. A real node would bound this by tick; a run is short enough not to.
+   * Answers kept for retries. A real node would limit this by tick, but a run is short enough not to.
    */
   private final Map<Long, byte[]> answered = new LinkedHashMap<>();
 
   private final Set<Short> knownClasses = new LinkedHashSet<>();
   private final List<String> violations = new ArrayList<>();
 
-  /** Set by a fresh assignment: the next frame's sequence is whatever the controller is up to. */
+  /** Set by a fresh assignment: the next frame's sequence becomes the baseline. */
   private boolean awaitingBaseline;
 
   private long run;
@@ -104,13 +104,13 @@ public final class ModeledNode {
     this.capacityPerTick = capacityPerTick;
   }
 
-  // Assertion surface for the harness. Everything below this point is behavior.
+  // Accessors for harness assertions. Everything below this point is behavior.
 
   public NodeId id() {
     return id;
   }
 
-  /** Mob profiles this node has been told about. */
+  /** Mob profiles this node has received. */
   public int knownClassCount() {
     return knownClasses.size();
   }
@@ -131,7 +131,7 @@ public final class ModeledNode {
     return cells.length > 0 && lastSequence > 0;
   }
 
-  /** Region state only. Two nodes holding the same world agree on this whatever path they took. */
+  /** Region state only. Two nodes with the same world have equal state, however they got there. */
   public long stateDigest() {
     return new Digest()
         .mix(regionId)
@@ -143,7 +143,7 @@ public final class ModeledNode {
         .value();
   }
 
-  /** Process death, or a full reset after a refused frame: nothing the node held survives. */
+  /** Process death, or a full reset after a refused frame: all held state is lost. */
   void kill() {
     awaitingBaseline = false;
     run = 0;
@@ -158,8 +158,8 @@ public final class ModeledNode {
   }
 
   /**
-   * Opens a new connection by saying what this node still holds. A restarted process reports
-   * sequence 0 and gets a snapshot; one that only lost its socket reports where it got to and the
+   * Opens a new connection by reporting what this node still holds. A restarted process reports
+   * sequence 0 and gets a snapshot. A node that only lost its socket reports its sequence and the
    * controller replays from there.
    */
   void linkUp() {
@@ -207,7 +207,7 @@ public final class ModeledNode {
     transport.resetLink(id);
   }
 
-  /** Applies one world frame, or returns why the real node would refuse it. */
+  /** Applies one world frame, or returns the reason the real node would refuse it. */
   private String applyWorld(WorldFrame world) {
     return switch (world.bodyType()) {
       case WorldMsg.ChunkSnapshot ->
@@ -253,7 +253,7 @@ public final class ModeledNode {
     int newSize = assignment.size();
     int newBaseY = assignment.minY();
     int newHeight = assignment.height();
-    // Positions on the wire are shorts, so the whole area has to fit in one.
+    // Wire positions are shorts, so the area must fit in one.
     if (newSize <= 0
         || newSize % Chunks.SIZE != 0
         || newSize > Short.MAX_VALUE
@@ -269,8 +269,8 @@ public final class ModeledNode {
     }
 
     if (assignment.resume()) {
-      // Resuming keeps what is held, so it has to be the stream the controller
-      // thinks it is continuing.
+      // Resuming keeps the held state, so it must be the stream the controller
+      // is continuing.
       if (!hasState()
           || assignment.run() != run
           || assignment.regionId() != regionId
@@ -282,8 +282,8 @@ public final class ModeledNode {
       return null;
     }
 
-    // Everything the node holds is air until a chunk says otherwise, which is what
-    // vanilla reads for a chunk the server is not holding.
+    // Everything is air until a chunk says otherwise, as vanilla reads a chunk the
+    // server does not hold.
     run = assignment.run();
     regionId = assignment.regionId();
     size = newSize;
@@ -298,9 +298,9 @@ public final class ModeledNode {
   }
 
   /**
-   * Why {@code sequence} may not follow what is held, or null if it may. The first frame after a
-   * fresh assignment sets the baseline, since the controller's sequence carries on across a reset
-   * and the node cannot know where it got to.
+   * The reason {@code sequence} cannot follow the held state, or null if it can. The first frame
+   * after a fresh assignment sets the baseline, because the controller's sequence continues across
+   * a reset and the node cannot know where it was.
    */
   private String admit(long sequence) {
     if (sequence == 0) {
@@ -345,7 +345,7 @@ public final class ModeledNode {
 
     int originX = position.x() * Chunks.SIZE;
     int originZ = position.z() * Chunks.SIZE;
-    // No columns means the server is not holding the chunk, so it reads as air.
+    // No columns means the server does not hold the chunk, so it is air.
     if (snapshot.runCountsLength() == 0) {
       fillChunk(originX, originZ, (byte) PathType.OPEN, (byte) 0);
       return null;
@@ -368,9 +368,9 @@ public final class ModeledNode {
   }
 
   /**
-   * Why a chunk's runs break the contract, or null if they keep it: exactly one column per
-   * position, every column at full height in runs of at least one block, only per-block types, and
-   * no runs left over. A chunk with no columns is cleared, and carries no runs either.
+   * The reason a chunk's runs break the contract, or null if they do not: one column per position,
+   * every column at full height in runs of at least one block, only per-block types, and no extra
+   * runs. A chunk with no columns is cleared and has no runs.
    */
   private String checkChunkContract(ChunkSnapshot snapshot) {
     int columns = snapshot.runCountsLength();
@@ -452,8 +452,8 @@ public final class ModeledNode {
   private void enqueue(PathRequest request) {
     long requestId = request.requestId();
     if (!knownClasses.contains((short) request.classId())) {
-      // The profile is still on its way, so the controller is told at once rather than
-      // left to time the request out.
+      // The profile has not arrived yet, so tell the controller immediately instead of
+      // letting the request time out.
       transport.toController(
           id, Channel.REQUEST, ByteBuffer.wrap(unknownProfile(requestId, request.classId())));
       return;

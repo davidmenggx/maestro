@@ -13,7 +13,7 @@ struct MobClass;
 
 namespace maestro::search {
 
-/// The `WalkNodeEvaluator` inputs one `MobClass` carries. A default-built
+/// The `WalkNodeEvaluator` inputs of one `MobClass`. A default-constructed
 /// profile has vanilla's default malus table and door handling.
 struct Profile {
   std::uint16_t ClassId = 0;
@@ -30,8 +30,8 @@ struct Profile {
     return Malus[static_cast<std::size_t>(Type)];
   }
 
-  /// The profile `Wire` describes, or nothing if it breaks the contract: a
-  /// malus for every type and a positive, finite footprint.
+  /// The profile `Wire` describes, or nothing if it breaks the contract: it
+  /// needs a malus for every type and a positive, finite footprint.
   static std::optional<Profile> decode(const fbs::MobClass &Wire);
 };
 

@@ -5,7 +5,7 @@ import java.util.List;
 
 /**
  * Which node owns which region of a {@link Topology}. Resharding is controller logic and is not
- * modeled here: the harness only needs a stable owner per position.
+ * modeled here. The harness only needs each position to have a fixed owner.
  */
 public record RegionMap(Topology topology, List<NodeId> nodes) {
 

@@ -15,19 +15,19 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Generated stand-in for a recorded server trace, and the fuzzer of the suite: every event the
- * boundary defines is reachable from here, and the seed sweep explores their orderings. {@code
- * quietAfter} stops all world activity so the tail of a run drains, so by the end every request has
- * been answered or dropped and the invariants can require it.
+ * Generated replacement for a recorded server trace, and the fuzzer of the suite. Every event the
+ * boundary defines can be generated here, and the seed sweep explores their orderings. {@code
+ * quietAfter} stops all world activity so the end of a run can drain. By then every request has
+ * been answered or dropped, so the invariants can require it.
  */
 public final class SyntheticWorkload implements Workload {
 
   private static final int PLAYER_MOVE_INTERVAL_TICKS = 5;
 
-  /** Vertical spread of block changes around the surface. */
+  /** Vertical range of block changes around the surface. */
   private static final int BLOCK_CHANGE_SPREAD = 2;
 
-  /** How far outside the region grid a stray request starts. */
+  /** How far outside the region grid a stray request can start. */
   private static final int MAX_STRAY_DISTANCE = 8;
 
   /**
@@ -54,7 +54,7 @@ public final class SyntheticWorkload implements Workload {
   private static final int CALM_FALL_DISTANCE = 3;
 
   /**
-   * Extra fall a mob with a target accepts: its health above a third of the maximum, less a
+   * Extra fall a mob with a target accepts: its health above a third of the maximum, minus a
    * difficulty allowance. A 100-health mob on hard reaches 67.
    */
   private static final int MAX_EXTRA_FALL_DISTANCE = 67;
@@ -84,8 +84,8 @@ public final class SyntheticWorkload implements Workload {
       return;
     }
     if (tick >= quietAfter) {
-      // Everything unloaded during the run comes back, so the final state is
-      // comparable with a fresh snapshot of the same world.
+      // Everything unloaded during the run is loaded again, so the final state can be
+      // compared with a fresh snapshot of the same world.
       reloadEverything(tick, input);
       return;
     }
@@ -137,8 +137,8 @@ public final class SyntheticWorkload implements Workload {
   }
 
   /**
-   * Changes are drawn from every type a cell may carry and from a band around the surface, so a
-   * column run-length encodes into more than the two runs flat terrain would give.
+   * Changes use every type a cell may carry, in a band around the surface, so a column encodes
+   * into more than the two runs flat terrain would give.
    */
   private void changeBlocks(long tick, WorldInput input) {
     int changes = rng.nextInt(scenario.counts().get(Count.BLOCK_CHANGES_PER_TICK) + 1);
@@ -146,7 +146,7 @@ public final class SyntheticWorkload implements Workload {
       int x = rng.nextInt(world.size());
       int z = rng.nextInt(world.size());
       if (!world.chunkLoaded(Chunks.of(x), Chunks.of(z))) {
-        // Minecraft cannot change a block it is not holding.
+        // Minecraft cannot change a block in a chunk it does not hold.
         continue;
       }
       int y =
@@ -170,8 +170,8 @@ public final class SyntheticWorkload implements Workload {
   }
 
   /**
-   * Mobs wander, so successive requests for one mob can fall in different regions and the owner of
-   * a mob is not fixed for the life of the run.
+   * Mobs wander, so successive requests for one mob can fall in different regions, and a mob's
+   * owner can change during a run.
    */
   private void moveMobs() {
     for (Map.Entry<Integer, Pos> mob : mobs.entrySet()) {
@@ -182,12 +182,12 @@ public final class SyntheticWorkload implements Workload {
   }
 
   private void requestPaths(long tick, WorldInput input) {
-    // Safe to iterate directly: emitting an event never calls back into the workload.
+    // Safe to iterate directly, because emitting an event never calls back into the workload.
     for (Map.Entry<Integer, Pos> mob : mobs.entrySet()) {
       if (rng.nextDouble() >= scenario.chances().get(Chance.REQUEST)) {
         continue;
       }
-      // A stray start is outside every region, which no node owns and no snapshot covers.
+      // A stray start is outside every region, so no node owns it and no snapshot covers it.
       Pos start =
           rng.nextDouble() < scenario.chances().get(Chance.STRAY_REQUEST)
               ? outsideTheGrid()
@@ -199,9 +199,9 @@ public final class SyntheticWorkload implements Workload {
   }
 
   /**
-   * The visit budget follows the follow range rather than the length bound, because the navigation
+   * The visit budget follows the follow range, not the length bound, because the navigation
    * updates it only when an attribute changes. A caller that passes a shorter bound therefore
-   * leaves the budget where it was, which is the case the two are drawn separately to reach.
+   * leaves the budget unchanged. The two are drawn separately to cover that case.
    */
   private WorldEvent.Search randomSearch() {
     int followRange = MIN_PATH_LENGTH + rng.nextInt(MAX_EXTRA_PATH_LENGTH + 1);
@@ -217,7 +217,7 @@ public final class SyntheticWorkload implements Workload {
         maxFallDistance);
   }
 
-  /** The chosen mob may have nothing outstanding, in which case the cancel must do nothing. */
+  /** The chosen mob may have no outstanding request, in which case the cancel must do nothing. */
   private void cancelPath(long tick, WorldInput input) {
     if (mobs.isEmpty() || rng.nextDouble() >= scenario.chances().get(Chance.CANCEL)) {
       return;
@@ -226,8 +226,8 @@ public final class SyntheticWorkload implements Workload {
   }
 
   /**
-   * Players leave and come back, and a move is what announces one, so the set the shedding priority
-   * will read is never fixed for a whole run.
+   * Players leave and return, and a move event announces each, so the set of players used for
+   * shedding priority changes during a run.
    */
   private void movePlayers(long tick, WorldInput input) {
     int playerCount = scenario.counts().get(Count.PLAYERS);
@@ -256,8 +256,8 @@ public final class SyntheticWorkload implements Workload {
   }
 
   /**
-   * Drawn per request rather than per mob, because a mob's profile is its live evaluator inputs: a
-   * goal that changes its water malus gives it a different one from one request to the next.
+   * Drawn per request, not per mob, because a mob's profile is its current evaluator inputs. A
+   * goal that changes its water malus gives it a different profile from one request to the next.
    */
   private short randomClass() {
     return (short) (1 + rng.nextInt(classCount));
@@ -270,7 +270,7 @@ public final class SyntheticWorkload implements Workload {
     return mobId;
   }
 
-  /** Reaches an insertion position without copying the key set. */
+  /** Gets the key at an insertion position without copying the key set. */
   private Iterator<Integer> mobsFrom(int position) {
     Iterator<Integer> ids = mobs.keySet().iterator();
     for (int i = 0; i < position; i++) {

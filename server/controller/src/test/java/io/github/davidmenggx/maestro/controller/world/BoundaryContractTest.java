@@ -13,19 +13,19 @@ import maestro.fbs.PathType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
-/** The boundary rejects values the wire contract forbids, rather than passing them to a node. */
+/** The boundary rejects values the wire contract forbids instead of passing them to a node. */
 class BoundaryContractTest {
 
   private static final Pos SOMEWHERE = new Pos(1, 2, 3);
   private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256, 3);
 
-  /** The number of types `getPathTypeFromState` can return, pinned against vanilla. */
+  /** The number of types `getPathTypeFromState` can return, checked against vanilla. */
   private static final int PER_BLOCK_TYPES = 17;
 
   @Test
   void onlyPerBlockPathTypesAreCarriedByACell() {
-    // The fuzzer draws a cell type by index, so the enumeration and the predicate
-    // are two views of one set and have to name the same ordinals.
+    // The fuzzer picks a cell type by index, so the enumeration and the predicate
+    // describe the same set and must name the same ordinals.
     Set<Byte> enumerated = new LinkedHashSet<>();
     for (int i = 0; i < PathTypes.perBlockCount(); i++) {
       byte ordinal = PathTypes.perBlock(i);
@@ -45,7 +45,7 @@ class BoundaryContractTest {
 
   @Test
   void derivedPathTypesAreNotPerBlock() {
-    // Each of these needs the cell below or the surrounding cells to decide.
+    // Each of these depends on the cell below or the surrounding cells.
     int[] derived = {
       PathType.WALKABLE,
       PathType.WALKABLE_DOOR,
@@ -91,7 +91,7 @@ class BoundaryContractTest {
         NullPointerException.class,
         () -> new WorldEvent.PathRequested(0, 1, (short) 1, null, SOMEWHERE, SEARCH));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(-1, 16f, 256, 3));
-    // Each bound is the widest value its wire field holds, which a silent cast would wrap.
+    // Each bound is the largest value its wire field holds. A silent cast would wrap it.
     new WorldEvent.Search(
         WorldEvent.Search.MAX_REACH_RANGE, 16f, WorldEvent.Search.MAX_VISITED_NODES, 3);
     assertThrows(
@@ -118,8 +118,8 @@ class BoundaryContractTest {
     MobClass accepted = profile(new float[PathTypes.count()]);
     assertEquals(PathTypes.count(), accepted.malus().length);
 
-    // The array is copied both ways, so neither the caller's array nor a handed-out
-    // one can reach the profile's own.
+    // The array is copied on the way in and out, so the profile's own array cannot
+    // be modified through either.
     float[] mutable = new float[PathTypes.count()];
     MobClass copied = profile(mutable);
     mutable[0] = 99f;

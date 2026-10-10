@@ -8,8 +8,7 @@ namespace maestro::world {
 
 namespace {
 
-/// Appends `R`, extending the previous run instead when it holds the same
-/// value.
+/// Appends `R`, merging it into the previous run if the value is the same.
 void appendMerged(std::vector<Run> &Runs, Run R) {
   if (!Runs.empty() && Runs.back().Value == R.Value)
     Runs.back().End = R.End;
@@ -103,8 +102,8 @@ std::shared_ptr<const Area> Area::withCells(std::span<const CellEdit> Edits,
   auto Next = std::make_shared<Area>(*this);
   Next->Sequence = Sequence;
 
-  // Rows and chunks copied for this version so far. A delta touches few, so a
-  // linear scan beats a map.
+  // Rows and chunks already copied for this version. A delta touches few, so
+  // a linear scan is faster than a map.
   std::vector<std::pair<int, std::shared_ptr<ChunkRow>>> CopiedRows;
   std::vector<std::pair<int, std::shared_ptr<Chunk>>> CopiedChunks;
   for (const CellEdit &Edit : Edits) {
@@ -126,7 +125,7 @@ std::shared_ptr<const Area> Area::withCells(std::span<const CellEdit> Edits,
         std::find_if(CopiedChunks.begin(), CopiedChunks.end(),
                      [&](const auto &Entry) { return Entry.first == Index; });
     if (ChunkIt == CopiedChunks.end()) {
-      // A cleared chunk is materialized as air, so an edit to it still lands.
+      // A cleared chunk becomes air, so an edit to it still applies.
       ChunkPtr &Slot = (*RowIt->second)[ChunkZ];
       auto Fresh = std::make_shared<Chunk>();
       if (Slot)

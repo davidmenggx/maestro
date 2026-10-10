@@ -5,12 +5,12 @@ import java.util.random.RandomGeneratorFactory;
 
 /**
  * The only {@link Rng} implementation. Production seeds it once at startup and the simulator seeds
- * it per run; both produce the same sequence for the same seed, so a failing run replays.
+ * it per run. The same seed always gives the same sequence, so a failing run can be replayed.
  */
 public final class SeededRng implements Rng {
 
-  // Pinned by name. The replay contract is "algorithm plus seed", so it must not
-  // follow whatever the platform happens to default to.
+  // Named explicitly. Replay needs the same algorithm and seed, so it must not
+  // depend on the platform default.
   private static final String ALGORITHM = "L64X128MixRandom";
 
   private static final RandomGeneratorFactory<RandomGenerator> FACTORY =

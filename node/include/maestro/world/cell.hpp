@@ -8,15 +8,15 @@ namespace maestro::world {
 
 using PathType = fbs::PathType;
 
-/// Number of `PathType` ordinals, and so the length of a malus table.
+/// Number of `PathType` ordinals, which is also the length of a malus table.
 inline constexpr int PathTypeCount = static_cast<int>(PathType::MAX) + 1;
 
 /// Collision height of a full cube, in sixteenths of a block.
 inline constexpr std::uint8_t FullFloor = 16;
 
 /// One block as the node holds it: the per-block `PathType` and `Floor`, the
-/// top of the block's collision shape in sixteenths (0 when it has none),
-/// rounded up to a whole sixteenth.
+/// top of the block's collision shape in sixteenths (0 if it has none),
+/// rounded up.
 struct Cell {
   PathType Type = PathType::OPEN;
   std::uint8_t Floor = 0;
@@ -24,11 +24,11 @@ struct Cell {
   friend bool operator==(Cell, Cell) = default;
 };
 
-/// What vanilla reads for a position outside the chunks it holds.
+/// What vanilla reads for a position in a chunk it does not hold.
 inline constexpr Cell Air{};
 
-/// Whether `getPathTypeFromState` can return `Type`, which is the only kind of
-/// type a cell on the wire may carry. A raw byte naming no type is not one.
+/// Whether `getPathTypeFromState` can return `Type`. Only these types may
+/// appear in a wire cell. A byte that is not a valid type is rejected.
 constexpr bool isPerBlock(PathType Type) {
   switch (Type) {
   case PathType::BLOCKED:

@@ -58,7 +58,7 @@ class EnvContractTest {
 
   @Test
   void channelsMatchTheirTransports() {
-    // World and control ride TCP, requests ride UDP.
+    // World and control use TCP, requests use UDP.
     assertTrue(Transport.Channel.WORLD.ordered());
     assertTrue(Transport.Channel.CONTROL.ordered());
     assertFalse(Transport.Channel.REQUEST.ordered());
