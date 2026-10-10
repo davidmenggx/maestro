@@ -27,12 +27,16 @@ GEN_JAVA := $(ROOT)/server/controller/src/generated/java
 
 FLATC := $(BUILD)/tools/bin/flatc
 
-# The Gradle daemon JVM is pinned in server/gradle.properties (JDK 25, required
-# by Minecraft 26.1). The mod is compiled to Java 25 via the toolchain there.
+# Minecraft 26.1 needs JDK 25. The `java.toolchain` blocks in the Gradle builds
+# select it, and Gradle finds installed JDKs on its own.
 GRADLE := ./gradlew
 
 # Toggle the OpenTelemetry C++ SDK (heavy) for the node build.
 MAESTRO_WITH_OTEL ?= ON
+
+# Sanitizers for the node build, e.g. `address,undefined` or `thread`. Empty
+# builds without any.
+MAESTRO_SANITIZE ?=
 
 .PHONY: all help flatc schema schema-cpp schema-java \
         node node-configure node-test \
@@ -62,7 +66,7 @@ schema-cpp: $(FLATC) ## Generate C++ bindings into node/generated
 	@rm -rf $(GEN_CPP) && mkdir -p $(GEN_CPP)
 	$(FLATC) --cpp --scoped-enums --gen-name-strings -o $(GEN_CPP) $(FBS)
 
-schema-java: $(FLATC) ## Generate Java bindings into server/src/generated/java
+schema-java: $(FLATC) ## Generate Java bindings into server/controller/src/generated/java
 	@rm -rf $(GEN_JAVA) && mkdir -p $(GEN_JAVA)
 	$(FLATC) --java -o $(GEN_JAVA) $(FBS)
 
@@ -71,7 +75,8 @@ schema-java: $(FLATC) ## Generate Java bindings into server/src/generated/java
 # ---------------------------------------------------------------------------
 node-configure: schema-cpp
 	cmake -S node -B $(BUILD)/node -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-		-DMAESTRO_WITH_OTEL=$(MAESTRO_WITH_OTEL)
+		-DMAESTRO_WITH_OTEL=$(MAESTRO_WITH_OTEL) \
+		-DMAESTRO_SANITIZE=$(MAESTRO_SANITIZE)
 
 node: node-configure ## Configure and build the C++ compute node
 	cmake --build $(BUILD)/node -j

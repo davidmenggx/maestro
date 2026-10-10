@@ -1,8 +1,11 @@
 #include "maestro/net/framing.hpp"
 
+#include <cassert>
+
 namespace maestro::net {
 
 std::vector<std::uint8_t> frame(std::span<const std::uint8_t> Payload) {
+  assert(Payload.size() <= MaxPayloadSize && "payload over the frame cap");
   const auto Len = static_cast<std::uint32_t>(Payload.size());
   std::vector<std::uint8_t> Out;
   Out.reserve(HeaderSize + Payload.size());
@@ -14,15 +17,15 @@ std::vector<std::uint8_t> frame(std::span<const std::uint8_t> Payload) {
   return Out;
 }
 
-std::optional<std::uint32_t>
-peekLength(std::span<const std::uint8_t> Buffer) noexcept {
+Header peekHeader(std::span<const std::uint8_t> Buffer) noexcept {
   if (Buffer.size() < HeaderSize)
-    return std::nullopt;
+    return {};
 
   std::uint32_t Len = 0;
   for (std::size_t I = 0; I < HeaderSize; ++I)
     Len |= static_cast<std::uint32_t>(Buffer[I]) << (8 * I);
-  return Len;
+  return {Len > MaxPayloadSize ? HeaderStatus::TooLarge : HeaderStatus::Ready,
+          Len};
 }
 
 } // namespace maestro::net

@@ -8,7 +8,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * Records what the controller reports so invariants can assert on it. Output order is consistent on
+ * Records what the controller reports so invariants can check it. Output order is the same on
  * repeated runs.
  */
 public final class SimMetrics implements Metrics {

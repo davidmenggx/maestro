@@ -25,15 +25,19 @@ import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 
 /**
- * Everything the controller puts on the wire, encoded with the generated bindings. Kept apart from
- * the controller so a test can build the frames a run would build, and so the encoding reads as one
- * piece.
+ * Everything the controller puts on the wire, encoded with the generated bindings. Separate from
+ * the controller so a test can build the same frames a run would, and so the encoding is in one
+ * place.
+ *
+ * <p>The generated setters take an {@code int} and cast it to the field's width without checking,
+ * so any value not already range-checked at the boundary must go through {@link #int16} or {@link
+ * #uint16} first.
  */
 public final class Frames {
 
   private Frames() {}
 
-  /** One path request as the controller holds it until the tick is flushed. */
+  /** One path request, held by the controller until the tick is flushed. */
   public record Request(
       long requestId, short classId, Pos start, Pos target, WorldEvent.Search search) {}
 
@@ -41,13 +45,13 @@ public final class Frames {
   static final int COLUMNS_PER_CHUNK = Chunks.SIZE * Chunks.SIZE;
 
   /**
-   * One chunk's columns, run-length encoded. Runs are packed one per int as {@code (length << 16) |
-   * (floor << 8) | pathType}, which keeps a full-height chunk's worth of runs out of the allocator.
+   * One chunk's columns, run-length encoded. Each run is packed into one int as {@code (length <<
+   * 16) | (floor << 8) | pathType}, which avoids allocating an object per run.
    */
   public static final class ChunkRuns {
 
     private final int[] runsPerColumn = new int[COLUMNS_PER_CHUNK];
-    // Flat terrain is two runs a column, so this is the size most chunks settle at.
+    // Flat terrain has two runs per column, so most chunks end up this size.
     private int[] packedRuns = new int[COLUMNS_PER_CHUNK * 2];
     private int runCount;
 
@@ -55,13 +59,13 @@ public final class Frames {
       if (runCount == packedRuns.length) {
         packedRuns = Arrays.copyOf(packedRuns, runCount * 2);
       }
-      packedRuns[runCount++] = (length << 16) | cell;
+      packedRuns[runCount++] = (uint16(length) << 16) | cell;
     }
   }
 
   /**
-   * Reads one chunk out of the world. The world may only be read on the main thread, so this is
-   * separate from the encoding, which runs off it.
+   * Reads one chunk from the world. The world can only be read on the main thread, so this is
+   * separate from the encoding, which runs on another thread.
    */
   public static ChunkRuns readChunk(WorldSource world, int chunkX, int chunkZ) {
     int minX = chunkX * Chunks.SIZE;
@@ -110,7 +114,7 @@ public final class Frames {
     return chunkFrame(builder, sequence, chunkX, chunkZ, runCountsVector, runsVector);
   }
 
-  /** A chunk the server no longer holds. The node reads it as air, as vanilla does. */
+  /** A chunk the server no longer holds. The node treats it as air, as vanilla does. */
   public static byte[] chunkCleared(long sequence, int chunkX, int chunkZ) {
     FlatBufferBuilder builder = new FlatBufferBuilder(64);
     return chunkFrame(builder, sequence, chunkX, chunkZ, 0, 0);
@@ -141,9 +145,9 @@ public final class Frames {
       Pos pos = cell.pos();
       CellDelta.createCellDelta(
           builder,
-          (short) (pos.x() - originX),
-          (short) pos.y(),
-          (short) (pos.z() - originZ),
+          int16(pos.x() - originX),
+          int16(pos.y()),
+          int16(pos.z() - originZ),
           cell.pathType(),
           cell.floor());
     }
@@ -169,6 +173,7 @@ public final class Frames {
       PathRequest.addReachRange(builder, search.reachRange());
       PathRequest.addMaxPathLength(builder, search.maxPathLength());
       PathRequest.addMaxVisitedNodes(builder, search.maxVisitedNodes());
+      PathRequest.addMaxFallDistance(builder, search.maxFallDistance());
       offsets[i] = PathRequest.endPathRequest(builder);
     }
     int requestsVector = PathRequestBatch.createRequestsVector(builder, offsets);
@@ -186,11 +191,9 @@ public final class Frames {
     RegionAssignment.startRegionAssignment(builder);
     RegionAssignment.addRun(builder, run);
     RegionAssignment.addRegionId(builder, region);
-    RegionAssignment.addMinXz(
-        builder, Vec2i.createVec2i(builder, regions.minX(region), regions.minZ(region)));
-    RegionAssignment.addSize(builder, regions.topology().regionSize());
+    RegionAssignment.addSize(builder, uint16(regions.topology().regionSize()));
     RegionAssignment.addMinY(builder, world.minY());
-    RegionAssignment.addHeight(builder, world.height());
+    RegionAssignment.addHeight(builder, uint16(world.height()));
     RegionAssignment.addResume(builder, resume);
     int assignment = RegionAssignment.endRegionAssignment(builder);
     builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.RegionAssignment, assignment));
@@ -223,6 +226,22 @@ public final class Frames {
 
   private static int vec3(FlatBufferBuilder builder, Pos pos, int originX, int originZ) {
     return Vec3s.createVec3s(
-        builder, (short) (pos.x() - originX), (short) pos.y(), (short) (pos.z() - originZ));
+        builder, int16(pos.x() - originX), int16(pos.y()), int16(pos.z() - originZ));
+  }
+
+  /** {@code value} as a wire {@code short}. Throws if it does not fit instead of wrapping. */
+  static short int16(int value) {
+    if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
+      throw new IllegalArgumentException("does not fit a 16-bit wire field: " + value);
+    }
+    return (short) value;
+  }
+
+  /** {@code value} as a wire {@code ushort}. Throws if it does not fit instead of wrapping. */
+  static int uint16(int value) {
+    if (value < 0 || value > 0xFFFF) {
+      throw new IllegalArgumentException("does not fit an unsigned 16-bit wire field: " + value);
+    }
+    return value;
   }
 }

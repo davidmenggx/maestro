@@ -3,8 +3,9 @@ include "common.fbs";
 namespace maestro.fbs;
 
 // Land-mob (`WalkNodeEvaluator`) pathfinding profile, referenced by `class_id`
-// in each request. Distinct count is bounded by the number of mob types, so
-// these are registered once.
+// in each request. These inputs change at runtime per mob, so a profile
+// is interned by content, and `class_id` names that content, not a mob type. A
+// node is sent a profile the first time a request names one it does not hold.
 table MobClass {
   class_id:ushort;
   width:float;

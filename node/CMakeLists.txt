@@ -27,6 +27,14 @@ endif()
 add_library(maestro_core
   src/net/framing.cpp
   src/obs.cpp
+  src/search/binary_heap.cpp
+  src/search/path_types.cpp
+  src/search/profile.cpp
+  src/search/search.cpp
+  src/search/vanilla_search.cpp
+  src/search/walk_node_evaluator.cpp
+  src/world/area.cpp
+  src/world/world_store.cpp
 )
 target_include_directories(maestro_core PUBLIC include ${MAESTRO_GENERATED_DIR})
 target_compile_features(maestro_core PUBLIC cxx_std_20)
@@ -46,6 +54,9 @@ endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(maestro_core PRIVATE -Wall -Wextra)
+  # Search costs must match Java's float math bit for bit, and Java never
+  # fuses a multiply and an add.
+  target_compile_options(maestro_core PUBLIC -ffp-contract=off)
 endif()
 
 # Optional sanitizers, e.g. `-DMAESTRO_SANITIZE=address,undefined` (or `thread`).
@@ -67,8 +78,15 @@ target_link_libraries(maestro-node PRIVATE maestro_core)
 if(MAESTRO_BUILD_TESTS)
   enable_testing()
   add_executable(maestro_tests
+    tests/test_area.cpp
+    tests/test_binary_heap.cpp
+    tests/test_coord_map.cpp
     tests/test_framing.cpp
+    tests/test_path_types.cpp
     tests/test_schema.cpp
+    tests/test_vanilla_search.cpp
+    tests/test_world.cpp
+    tests/test_world_store.cpp
   )
   target_link_libraries(maestro_tests PRIVATE maestro_core GTest::gtest_main)
   include(GoogleTest)

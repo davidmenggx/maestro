@@ -13,7 +13,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(PortalShape.class)
 public abstract class PortalShapeMixin {
 
-  /** Reporting no ignitable frame stops nether portals from ever forming. */
+  /** Reporting no ignitable frame prevents nether portals from forming. */
   @Inject(method = "findEmptyPortalShape", at = @At("HEAD"), cancellable = true)
   private static void maestro$refuseNetherPortals(
       LevelAccessor level,

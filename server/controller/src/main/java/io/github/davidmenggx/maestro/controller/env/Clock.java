@@ -1,14 +1,14 @@
 package io.github.davidmenggx.maestro.controller.env;
 
 /**
- * Time as the controller sees it. Production advances {@code tick} from the server tick loop; the
- * simulator advances both values itself, so a replayed run reads back identical timestamps.
+ * Time as the controller sees it. Production advances {@code tick} from the server tick loop. The
+ * simulator advances both values itself, so a replayed run sees identical timestamps.
  */
 public interface Clock {
 
-  /** Server tick currently being serviced. Advances by one per tick and never runs backwards. */
+  /** Server tick currently being handled. Increases by one per tick and never decreases. */
   long tick();
 
-  /** Monotonic nanoseconds (not wall clock) */
+  /** Monotonic nanoseconds (not wall clock). */
   long nowNanos();
 }

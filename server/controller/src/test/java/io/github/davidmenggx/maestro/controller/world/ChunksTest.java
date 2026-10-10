@@ -14,7 +14,7 @@ class ChunksTest {
     assertEquals(0, Chunks.of(0));
     assertEquals(0, Chunks.of(15));
     assertEquals(1, Chunks.of(16));
-    // Truncating division would put -1 in chunk 0 alongside 0.
+    // Truncating division would put -1 in chunk 0 with 0.
     assertEquals(-1, Chunks.of(-1));
     assertEquals(-1, Chunks.of(-16));
     assertEquals(-2, Chunks.of(-17));

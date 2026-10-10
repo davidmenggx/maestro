@@ -3,9 +3,9 @@ package io.github.davidmenggx.maestro.controller.world;
 import maestro.fbs.PathType;
 
 /**
- * The half of the {@code PathType} contract the controller is responsible for. A cell may only
- * carry a type {@code getPathTypeFromState} can return: the rest are composed on the node, from the
- * cell below and the 24 surrounding cells, and cannot be known from one block state.
+ * The part of the {@code PathType} contract the controller is responsible for. A cell may carry
+ * only a type that {@code getPathTypeFromState} can return. The other types are computed on the
+ * node from the cell below and the 24 surrounding cells, and cannot be known from one block state.
  *
  * <p>Sending a derived type would silently disagree with vanilla, so the boundary rejects it.
  */
@@ -41,7 +41,7 @@ public final class PathTypes {
 
   private PathTypes() {}
 
-  /** Number of ordinals in the shared enum. The per-mob malus table is this long. */
+  /** Number of ordinals in the shared enum, which is also the length of a malus table. */
   public static int count() {
     return PathType.names.length;
   }
@@ -56,7 +56,7 @@ public final class PathTypes {
     return PER_BLOCK_ORDINALS.length;
   }
 
-  /** The nth type a cell may carry, in enum order, so an index is a stable choice. */
+  /** The nth type a cell may carry, in enum order, so a given index always picks the same type. */
   public static byte perBlock(int index) {
     return PER_BLOCK_ORDINALS[index];
   }

@@ -3,12 +3,12 @@ package io.github.davidmenggx.maestro.controller.env;
 import java.util.random.RandomGenerator;
 
 /**
- * Randomness seam. Every draw on the controller path comes from here, so a run replays from its
- * seed alone. {@link #derive} hands a component its own stream: adding a draw in one component then
- * does not shift the values every other component sees.
+ * Randomness seam. Every random draw on the controller path comes from here, so a run replays from
+ * its seed alone. {@link #derive} gives a component its own stream, so adding a draw in one
+ * component does not change the values other components see.
  */
 public interface Rng extends RandomGenerator {
 
-  /** Independent stream, stable for a given name and parent seed. */
+  /** Independent stream, the same for a given name and parent seed. */
   Rng derive(String name);
 }

@@ -10,8 +10,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
- * Startup settings read from `<config dir>/maestro.json`. A missing file is written with the
- * defaults below, a malformed or incomplete one aborts startup.
+ * Startup settings read from `<config dir>/maestro.json`. A missing file is created with the
+ * defaults below. A malformed or incomplete file aborts startup.
  */
 public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint, boolean devMode) {
 
@@ -57,8 +57,8 @@ public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint, boo
     } catch (IOException e) {
       throw new IllegalStateException("Could not read Maestro config at " + path, e);
     } catch (RuntimeException e) {
-      // Gson reports a rejected record component by wrapping the canonical
-      // constructor's exception, so the useful message is on the cause.
+      // Gson wraps the canonical constructor's exception when it rejects a record
+      // component, so the useful message is on the cause.
       throw new IllegalStateException(
           "Invalid Maestro config at " + path + ": " + rootCause(e).getMessage(), e);
     }

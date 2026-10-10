@@ -3,16 +3,16 @@ package io.github.davidmenggx.maestro.controller.world;
 import java.util.Objects;
 
 /**
- * One land-mob pathfinding profile, the {@code WalkNodeEvaluator} input set. Registered once per
- * mob type and referenced by {@code classId} in every request, so the count is bounded by the
- * number of mob types rather than the number of mobs.
+ * One land-mob pathfinding profile: the {@code WalkNodeEvaluator} inputs. These change at runtime
+ * per mob, so a profile is interned by content, and {@code classId} names that content, not a mob
+ * type. A request names the profile its mob has at that moment.
  *
- * <p>{@code malus} is indexed by {@code PathType} ordinal and covers every ordinal, including the
- * ones a cell can never carry, because the node resolves those before charging a malus.
+ * <p>{@code malus} is indexed by {@code PathType} ordinal and covers every ordinal, including those
+ * a cell cannot carry, because the node resolves those types before applying a malus.
  */
 public record MobClass(short classId, Shape shape, Abilities abilities, float[] malus) {
 
-  /** Collision box, and the height the mob clears without jumping. */
+  /** Collision box, and the height the mob can step up without jumping. */
   public record Shape(float width, float height, float maxUpStep) {
 
     public Shape {
@@ -25,7 +25,7 @@ public record MobClass(short classId, Shape shape, Abilities abilities, float[] 
     }
   }
 
-  /** The evaluator toggles that decide which cells a mob may enter at all. */
+  /** Evaluator flags that decide which cells a mob may enter. */
   public record Abilities(
       boolean canPassDoors, boolean canOpenDoors, boolean canFloat, boolean canWalkOverFences) {}
 
@@ -44,8 +44,8 @@ public record MobClass(short classId, Shape shape, Abilities abilities, float[] 
   }
 
   /**
-   * Copied on the way out as well as in, so the array cannot be written through. Equality stays
-   * reference-based on it, so do not use a profile as a map key.
+   * Copied on the way in and out, so the array cannot be modified through the record. Equality
+   * compares the array by reference, so do not use a profile as a map key.
    */
   @Override
   public float[] malus() {

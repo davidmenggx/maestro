@@ -13,16 +13,17 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Modeled network. An ordered channel keeps frame order and loses nothing without also breaking the
- * connection; an unordered one may drop, duplicate and reorder. The at-least-once request path has
- * to survive that.
+ * Modeled network. An ordered channel keeps frame order and cannot lose a frame without breaking
+ * the connection. An unordered channel may drop, duplicate and reorder frames, which the
+ * at-least-once request path must tolerate.
  *
- * <p>Process death resets the connection, so the controller sees it happen. A partition does not,
- * so only a failure detector can find one.
+ * <p>Process death resets the connection, so the controller sees it. A partition does not, so only
+ * a failure detector can find it. A stall holds only the ordered channels, like TCP holding a
+ * stream during a retransmit, so unordered frames can overtake the held ones.
  */
 public final class SimTransport implements Transport {
 
-  /** Which way a frame is travelling. Each direction of a channel orders itself. */
+  /** Which way a frame is travelling. Each direction of a channel is ordered separately. */
   private enum Direction {
     TO_NODE,
     TO_CONTROLLER
@@ -37,6 +38,7 @@ public final class SimTransport implements Transport {
   private final Set<NodeId> connected = new LinkedHashSet<>();
   private final Set<NodeId> dead = new LinkedHashSet<>();
   private final Set<NodeId> partitioned = new LinkedHashSet<>();
+  private final Set<NodeId> stalled = new LinkedHashSet<>();
   private final Map<NodeId, Integer> epoch = new LinkedHashMap<>();
   private final Map<Link, Long> lastDelivery = new LinkedHashMap<>();
   private final Map<Link, List<byte[]>> backlog = new LinkedHashMap<>();
@@ -123,7 +125,7 @@ public final class SimTransport implements Transport {
 
   /**
    * Only a node that died recovers. Bumping the epoch of a live connection would discard the frames
-   * already in flight on it, which is a loss the ordered channel is not allowed to have.
+   * in flight on it, and an ordered channel cannot lose frames.
    */
   public void revive(NodeId node) {
     if (dead.remove(node)) {
@@ -131,13 +133,23 @@ public final class SimTransport implements Transport {
     }
   }
 
-  /** Ordered frames are held and replayed when the partition lifts; unordered ones are lost. */
+  /** Ordered frames are held and replayed when the partition ends. Unordered ones are lost. */
   public void partition(NodeId node, boolean active) {
+    hold(partitioned, node, active);
+  }
+
+  /** Ordered frames are held and replayed when the stall ends. Unordered ones still flow. */
+  public void stall(NodeId node, boolean active) {
+    hold(stalled, node, active);
+  }
+
+  /** Held frames are released once the node has no partition or stall. */
+  private void hold(Set<NodeId> holding, NodeId node, boolean active) {
     if (active) {
-      partitioned.add(node);
+      holding.add(node);
       return;
     }
-    if (!partitioned.remove(node)) {
+    if (!holding.remove(node) || partitioned.contains(node) || stalled.contains(node)) {
       return;
     }
     int sentEpoch = epoch.getOrDefault(node, 0);
@@ -179,7 +191,13 @@ public final class SimTransport implements Transport {
     }
 
     if (channel.ordered()) {
-      deliverInOrder(new Link(node, channel, direction), bytes, sentEpoch, "frame:" + channel);
+      Link link = new Link(node, channel, direction);
+      if (stalled.contains(node)) {
+        backlog.computeIfAbsent(link, held -> new ArrayList<>()).add(bytes);
+        sim.metrics().count("transport.held", 1, "node", nodeLabel, "channel", channel.name());
+        return;
+      }
+      deliverInOrder(link, bytes, sentEpoch, "frame:" + channel);
       return;
     }
 
@@ -190,7 +208,7 @@ public final class SimTransport implements Transport {
     sim.schedule(
         latency(), "frame:" + channel, () -> arrive(node, channel, bytes, direction, sentEpoch));
     if (rng.nextDouble() < faults.duplicateRate()) {
-      // An independent delay, so a duplicate can also land before the original.
+      // An independent delay, so a duplicate can arrive before the original.
       sim.metrics().count("transport.duplicated", 1, "node", nodeLabel, "channel", channel.name());
       sim.schedule(
           latency(),
@@ -199,7 +217,7 @@ public final class SimTransport implements Transport {
     }
   }
 
-  /** Holds the arrival back behind the last one on the same link, so order cannot invert. */
+  /** Delays the arrival until after the last one on the same link, so order is preserved. */
   private void deliverInOrder(Link link, byte[] bytes, int sentEpoch, String name) {
     long time = Math.max(sim.now() + latency(), lastDelivery.getOrDefault(link, 0L) + 1);
     lastDelivery.put(link, time);
@@ -222,7 +240,7 @@ public final class SimTransport implements Transport {
     }
   }
 
-  /** A partition is not a link failure: it holds or discards frames while the link stays up. */
+  /** A partition is not a link failure. It holds or discards frames while the link stays up. */
   private boolean linkUp(NodeId node) {
     return connected.contains(node) && !dead.contains(node);
   }

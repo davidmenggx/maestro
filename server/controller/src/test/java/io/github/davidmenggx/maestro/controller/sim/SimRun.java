@@ -12,13 +12,13 @@ import java.util.function.BiFunction;
 
 /**
  * One assembled run: world, fleet, controller and workload, all seeded from a single number. {@code
- * -Dmaestro.dst.seed} and {@code -Dmaestro.dst.runs} move the sweep, so a failing seed from CI
- * replays with `make fuzz SEED=...`.
+ * -Dmaestro.dst.seed} and {@code -Dmaestro.dst.runs} set the sweep, so a failing seed from CI can
+ * be replayed with `make fuzz SEED=...`.
  */
 public final class SimRun {
 
   /**
-   * Trailing quiet ticks, so every in-flight request resolves before the invariants are checked.
+   * Quiet ticks at the end, so every in-flight request resolves before the invariants are checked.
    */
   public static final long DRAIN_TICKS = 25;
 
@@ -29,8 +29,8 @@ public final class SimRun {
   private static final int DEFAULT_RUNS = 100;
 
   /**
-   * Length of a fuzzed run. The active part, everything before {@link #DRAIN_TICKS}, has to leave
-   * room for a fault to start and finish, or the shortest runs draw no faults at all.
+   * Length of a fuzzed run. The active part, before {@link #DRAIN_TICKS}, must leave room for a
+   * fault to start and end, or the shortest runs would have no faults.
    */
   static final long MIN_FUZZED_TICKS = 60;
 
@@ -98,9 +98,9 @@ public final class SimRun {
   }
 
   /**
-   * A run whose geometry, load, length and faults are all drawn from the seed alongside its event
+   * A run whose geometry, load, length and faults are all drawn from the seed, along with its event
    * ordering, so a sweep covers the ranges in {@link Topology}, {@link Scenario} and {@link
-   * FaultPlan} rather than one fixed setting.
+   * FaultPlan}, not one fixed setting.
    */
   public static SimRun fuzzed(long seed) {
     Rng rng = SeededRng.of(seed).derive("fuzz");
@@ -111,7 +111,7 @@ public final class SimRun {
     return of(seed, faults, ticks, topology, scenario);
   }
 
-  /** A run driven by a fixed event list rather than a generator, for focused tests. */
+  /** A run driven by a fixed event list instead of a generator, for focused tests. */
   public static SimRun scripted(long seed, FaultPlan faults, long ticks, List<WorldEvent> events) {
     return new SimRun(
         seed,
@@ -135,12 +135,12 @@ public final class SimRun {
     return Invariants.check(this, tickBudget);
   }
 
-  /** Chunks the fleet covers, which is how many frames one full send of the world costs. */
+  /** Chunks the fleet covers, which is the number of frames in one full send of the world. */
   public int chunkCount() {
     return topology.chunksPerSide() * topology.chunksPerSide();
   }
 
-  /** Transport counters are per node and per channel, so a whole-fleet total has to be summed. */
+  /** Transport counters are per node and per channel, so a fleet total must be summed. */
   public long fleetCounter(String name, Channel channel) {
     long total = 0;
     for (NodeId node : regions.nodes()) {
@@ -149,7 +149,7 @@ public final class SimRun {
     return total;
   }
 
-  /** Seed and outcome, for a failure message that is enough to reproduce the run. */
+  /** Seed and outcome, enough for a failure message to reproduce the run. */
   public String describe() {
     return "seed="
         + seed

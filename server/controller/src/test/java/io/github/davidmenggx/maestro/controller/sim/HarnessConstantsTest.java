@@ -7,16 +7,16 @@ import io.github.davidmenggx.maestro.controller.world.Chunks;
 import org.junit.jupiter.api.Test;
 
 /**
- * The one place a harness constant is checked against another. Several are only correct relative to
- * something else, and left to drift apart they fail silently: the sweep still passes, having
- * quietly stopped reaching the case it was sized for. Nothing here runs a simulation.
+ * The one place harness constants are checked against each other. Several are correct only relative
+ * to another constant. If they drift apart, nothing fails: the sweep still passes but no longer
+ * reaches the case it was sized for. Nothing here runs a simulation.
  */
 class HarnessConstantsTest {
 
   @Test
   void aSampledLatencyStaysWellInsideATick() {
-    // Any wider and a response is late whatever the controller does, so the latency
-    // invariant would be measuring the sampler instead of the code under test.
+    // Any wider and a response is late regardless of the controller, so the latency
+    // invariant would measure the sampler instead of the code under test.
     assertTrue(
         FaultPlan.MAX_MIN_LATENCY_STEPS + FaultPlan.MAX_LATENCY_SPAN_STEPS
             <= Simulation.STEPS_PER_TICK / 2,
@@ -30,8 +30,8 @@ class HarnessConstantsTest {
 
   @Test
   void theShortestFuzzedRunHasRoomForAFault() {
-    // A fault starts inside the active window and, unless the node is lost for good,
-    // ends there too.
+    // A fault starts inside the active window and, unless the node is lost
+    // permanently, ends there too.
     assertTrue(
         SimRun.MIN_FUZZED_TICKS - SimRun.DRAIN_TICKS > FaultPlan.MAX_FAULT_SPAN_TICKS,
         "the shortest fuzzed run has no room for a fault");
@@ -40,8 +40,8 @@ class HarnessConstantsTest {
 
   @Test
   void theSloIsTighterThanTheAdmissionBound() {
-    // A saturated fleet is only held to the bound admission control promises, so the
-    // budget the invariants default to has to be the stricter of the two.
+    // A saturated fleet is held only to the bound that admission control promises,
+    // so the default invariant budget must be the stricter of the two.
     assertTrue(
         SimRun.TICK_BUDGET < ProbeController.MAX_TICKS_LATE,
         "the SLO budget is no tighter than what admission control already guarantees");
@@ -71,8 +71,8 @@ class HarnessConstantsTest {
 
   @Test
   void aComparisonNodeCannotCollideWithARealOne() {
-    // Fresh nodes are built outside the fleet at `FRESH_NODE + region`, so the block
-    // they sit in has to start above every id a sampled grid hands out.
+    // Fresh nodes are built outside the fleet at `FRESH_NODE + region`, so their
+    // id range must start above every id a sampled grid assigns.
     assertTrue(
         Invariants.FRESH_NODE >= Topology.maxNodeCount(),
         "a comparison node can collide with a real one");

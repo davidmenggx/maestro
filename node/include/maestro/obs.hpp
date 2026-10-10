@@ -2,16 +2,15 @@
 
 #include <string_view>
 
-// Thin observability facade over the OpenTelemetry C++ SDK. Built with
-// `MAESTRO_WITH_OTEL`, `init` wires up an OTLP-over-gRPC trace pipeline;
-// without it every function is a no-op.
 namespace maestro::obs {
 
-/// Installs the process-wide tracer provider. `OtlpEndpoint` is the collector's
-/// OTLP/gRPC endpoint (e.g. localhost:4317).
+/// Installs the process-wide tracer provider, exporting over OTLP/gRPC to
+/// `OtlpEndpoint` (e.g. localhost:4317). Spans are exported in batches on a
+/// background thread. Without `MAESTRO_WITH_OTEL`, this and `shutdown` do
+/// nothing.
 void init(std::string_view ServiceName, std::string_view OtlpEndpoint);
 
-/// Flushes and tears down the tracer provider.
+/// Flushes and shuts down the tracer provider.
 void shutdown();
 
 } // namespace maestro::obs

@@ -49,10 +49,10 @@ TEST(Schema, WorldFrameCarriesRunLengthEncodedChunk) {
   constexpr int Columns = Width * Width;
   constexpr int Height = 384;
 
-  // Every column is superflat except two: column 1 is topped by a slab, whose
-  // run shares a type with the run below it and differs only in `floor`, and
-  // column 2 has water on the surface. Run counts therefore differ per column
-  // and a reader cannot assume a fixed stride into `runs`.
+  // Every column is superflat except two. Column 1 is topped by a slab, whose
+  // run has the same type as the run below and differs only in `floor`.
+  // Column 2 has water on the surface. Run counts differ per column, so a
+  // reader cannot assume a fixed stride into `runs`.
   std::vector<std::uint16_t> RunCounts(Columns, 2);
   RunCounts[1] = 3;
   RunCounts[2] = 3;
@@ -103,7 +103,7 @@ TEST(Schema, WorldFrameCarriesRunLengthEncodedChunk) {
   ASSERT_EQ(Decoded->run_counts()->size(), Columns);
   ASSERT_EQ(Decoded->runs()->size(), Runs.size());
 
-  // Walk the prefix sum the way a node would, checking every column tiles the
+  // Walk the prefix sum as a node would, checking that every column spans the
   // region height and that the offsets land on the right runs.
   unsigned Offset = 0;
   for (unsigned Column = 0; Column < Decoded->run_counts()->size(); ++Column) {
@@ -138,15 +138,15 @@ TEST(Schema, AChunkWithNoColumnsIsNotResident) {
   const auto *Decoded =
       fbs::GetWorldFrame(Fbb.GetBufferPointer())->body_as_ChunkSnapshot();
   ASSERT_NE(Decoded, nullptr);
-  // Absent rather than empty: the reader has to tell "no columns" from a
-  // zero-length vector it could otherwise index into.
+  // Absent, not empty, so the reader can tell "no columns" from a zero-length
+  // vector it could index into.
   EXPECT_EQ(Decoded->run_counts(), nullptr);
   EXPECT_EQ(Decoded->runs(), nullptr);
 }
 
 TEST(Schema, PathTypeOrdinalsArePinned) {
-  // The server sends vanilla ordinals as is, so the first, the last, and one
-  // from the middle are pinned against the vanilla enum.
+  // The server sends vanilla ordinals unchanged, so check the first, the
+  // last, and one in the middle against the vanilla enum.
   static_assert(static_cast<int>(fbs::PathType::BLOCKED) == 0);
   static_assert(static_cast<int>(fbs::PathType::WATER) == 9);
   static_assert(static_cast<int>(fbs::PathType::BIG_MOBS_CLOSE_TO_DANGER) ==
@@ -161,7 +161,7 @@ TEST(Schema, RequestFrameCarriesABatch) {
   const auto Request = fbs::CreatePathRequest(
       Fbb, /*request_id=*/42, /*class_id=*/3, &Start, &Target,
       /*reach_range=*/1, /*max_path_length=*/32.5f,
-      /*max_visited_nodes=*/560);
+      /*max_visited_nodes=*/560, /*max_fall_distance=*/16);
   const auto Batch =
       fbs::CreatePathRequestBatch(Fbb, Fbb.CreateVector(std::vector{Request}));
   Fbb.Finish(fbs::CreateRequestFrame(Fbb, fbs::RequestMsg::PathRequestBatch,
@@ -183,6 +183,7 @@ TEST(Schema, RequestFrameCarriesABatch) {
   EXPECT_EQ(Req->reach_range(), 1u);
   EXPECT_FLOAT_EQ(Req->max_path_length(), 32.5f);
   EXPECT_EQ(Req->max_visited_nodes(), 560u);
+  EXPECT_EQ(Req->max_fall_distance(), 16u);
 }
 
 TEST(Schema, ResponseFrameCarriesResolvedNodes) {
@@ -210,6 +211,22 @@ TEST(Schema, ResponseFrameCarriesResolvedNodes) {
   ASSERT_EQ(Decoded->nodes()->size(), std::size(Nodes));
   EXPECT_EQ(Decoded->nodes()->Get(1)->type(), fbs::PathType::WALKABLE_DOOR);
   EXPECT_EQ(Decoded->nodes()->Get(1)->pos().x(), 1);
+}
+
+TEST(Schema, ResponseFrameCarriesAnUnknownProfile) {
+  flatbuffers::FlatBufferBuilder Fbb;
+  const auto Body =
+      fbs::CreateUnknownProfile(Fbb, /*request_id=*/12, /*class_id=*/700);
+  Fbb.Finish(fbs::CreateResponseFrame(Fbb, fbs::ResponseMsg::UnknownProfile,
+                                      Body.Union()));
+
+  const auto *Frame =
+      flatbuffers::GetRoot<fbs::ResponseFrame>(Fbb.GetBufferPointer());
+  EXPECT_EQ(Frame->body_as_PathResponse(), nullptr);
+  const auto *Decoded = Frame->body_as_UnknownProfile();
+  ASSERT_NE(Decoded, nullptr);
+  EXPECT_EQ(Decoded->request_id(), 12u);
+  EXPECT_EQ(Decoded->class_id(), 700u);
 }
 
 TEST(Schema, ControlFrameCarriesAFullMalusTable) {
@@ -278,9 +295,8 @@ TEST(Schema, HeartbeatCarriesQueueDepth) {
 
 TEST(Schema, WorldFrameCarriesRegionAssignment) {
   flatbuffers::FlatBufferBuilder Fbb;
-  const fbs::Vec2i MinXz(-256, 512);
   const auto Assignment = fbs::CreateRegionAssignment(
-      Fbb, /*run=*/11, /*region_id=*/4, &MinXz, /*size=*/256, /*min_y=*/-64,
+      Fbb, /*run=*/11, /*region_id=*/4, /*size=*/256, /*min_y=*/-64,
       /*height=*/384, /*resume=*/true);
   Fbb.Finish(fbs::CreateWorldFrame(Fbb, fbs::WorldMsg::RegionAssignment,
                                    Assignment.Union()));
@@ -290,8 +306,6 @@ TEST(Schema, WorldFrameCarriesRegionAssignment) {
   ASSERT_NE(Decoded, nullptr);
   EXPECT_EQ(Decoded->run(), 11u);
   EXPECT_EQ(Decoded->region_id(), 4u);
-  EXPECT_EQ(Decoded->min_xz()->x(), -256);
-  EXPECT_EQ(Decoded->min_xz()->z(), 512);
   EXPECT_EQ(Decoded->size(), 256u);
   EXPECT_EQ(Decoded->min_y(), -64);
   EXPECT_EQ(Decoded->height(), 384u);

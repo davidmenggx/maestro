@@ -63,6 +63,38 @@ jobs:
           path: server/build/boot-smoke-test.log
           if-no-files-found: ignore
 
+  sanitize:
+    name: Node under ${{ matrix.sanitizer }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: address,undefined
+            cxx: g++
+          - sanitizer: thread
+            cxx: clang++
+    env:
+      CXX: ${{ matrix.cxx }}
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache flatc
+        uses: actions/cache@v4
+        with:
+          path: build/tools
+          key: flatc-${{ runner.os }}-${{ hashFiles('tools/CMakeLists.txt') }}
+
+      # Recent runner kernels randomize more address bits than TSan can map.
+      - name: Narrow address randomization
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Unit tests
+        run: make node-test MAESTRO_WITH_OTEL=OFF MAESTRO_SANITIZE=${{ matrix.sanitizer }}
+
   # One job per tier per seed range.
   fuzz:
     name: Fuzz ${{ matrix.tier }} ${{ matrix.shard }}

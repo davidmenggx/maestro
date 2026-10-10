@@ -5,12 +5,12 @@ import io.github.davidmenggx.maestro.controller.world.Chunks;
 import java.util.List;
 
 /**
- * The coordinate space a run happens in and how it is divided among nodes: a square grid of square,
- * full-height regions, one node each. Separate from {@link Scenario}, which says what happens
- * inside that space.
+ * The coordinate space of a run and how it is divided among nodes: a square grid of square,
+ * full-height regions, one node each. Separate from {@link Scenario}, which describes what happens
+ * in that space.
  *
- * <p>The {@code with} methods exist so a focused test can move one dimension of {@link #DEFAULT}
- * without restating the rest.
+ * <p>The {@code with} methods let a focused test change one dimension of {@link #DEFAULT} without
+ * restating the rest.
  */
 public record Topology(int regionSize, int regionsPerSide, int minY, int height, int relief) {
 
@@ -18,12 +18,12 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
   static final int MAX_HEIGHT = 96;
   static final int MAX_REGIONS_PER_SIDE = 3;
 
-  /** Capped against the shortest column the sampler can draw, so every draw clears the check. */
+  /** Capped by the shortest column the sampler can draw, so every draw passes the check. */
   static final int MAX_RELIEF = MIN_HEIGHT / 4;
 
   public static final Topology DEFAULT = new Topology(Chunks.SIZE, 2, 0, 64, 2);
 
-  /** Floors a sampled world may sit on. The overworld's is negative. */
+  /** Floors a sampled world may use. The overworld's is negative. */
   static List<Integer> floors() {
     return List.of(0, -16, -64);
   }
@@ -33,8 +33,8 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
   }
 
   /**
-   * Nodes in the widest grid {@link #sample} can draw, and so one past the highest node id any run
-   * can assign. Ids at or above it are free for fixtures built outside a fleet.
+   * Number of nodes in the widest grid {@link #sample} can draw, which is one more than the highest
+   * node id any run can assign. Ids at or above it are free for fixtures outside a fleet.
    */
   static int maxNodeCount() {
     return MAX_REGIONS_PER_SIDE * MAX_REGIONS_PER_SIDE;
@@ -55,12 +55,12 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
     }
   }
 
-  /** Block extent of the whole grid along one axis. */
+  /** Size of the whole grid along one axis, in blocks. */
   public int extent() {
     return regionSize * regionsPerSide;
   }
 
-  /** One node per region, since resharding is not modeled. */
+  /** One node per region, because resharding is not modeled. */
   public int nodeCount() {
     return regionsPerSide * regionsPerSide;
   }

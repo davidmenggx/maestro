@@ -6,13 +6,13 @@ import java.util.EnumMap;
 import java.util.Map;
 
 /**
- * How much load a run puts on the fleet, and how much the world moves underneath it. Separate from
- * {@link FaultPlan}, which says what the network does rather than what the server asks for, and
- * from {@link Topology}, which says what shape the world is.
+ * The load a run puts on the fleet, and how much the world changes during it. Separate from {@link
+ * FaultPlan}, which describes network behavior instead of server requests, and from {@link
+ * Topology}, which describes the world's shape.
  *
- * <p>Every setting is declared once below, with the floor it may never go under and the ceiling
- * {@link #sample} draws it up to, so the sampler, the validation and the coverage assertions all
- * read the same table. A ceiling bounds the draw only: a focused test may set a value above it.
+ * <p>Each setting is declared once below, with a minimum it may never go below and a maximum that
+ * {@link #sample} draws up to. The sampler, the validation and the coverage assertions all read
+ * this table. The maximum limits only the draw, and a focused test may set a higher value.
  */
 public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) {
 
@@ -42,7 +42,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     }
   }
 
-  /** The chance, per mob or per tick depending on the event, that the workload emits one. */
+  /**
+   * The probability that the workload emits the event, per mob or per tick depending on the event.
+   */
   public enum Chance {
     REQUEST(0.3),
     CANCEL(0.1),
@@ -80,7 +82,7 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     }
   }
 
-  /** A fleet with headroom and a world whose chunks stay resident. */
+  /** A fleet with spare capacity and a world whose chunks stay loaded. */
   public static final Scenario DEFAULT =
       new Scenario(
           Map.of(
@@ -91,7 +93,7 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
               Count.BLOCK_CHANGES_PER_TICK, 3,
               Count.PLAYERS, 1),
           Map.of(
-              // A mob repaths every 15 ticks or so, which is roughly what vanilla does.
+              // A mob repaths about every 15 ticks, roughly as in vanilla.
               Chance.REQUEST, 0.07,
               Chance.CANCEL, 0.02,
               Chance.MOB_CHURN, 0.05,
@@ -99,14 +101,16 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
               Chance.PLAYER_CHURN, 0.01,
               Chance.STRAY_REQUEST, 0.0));
 
-  /** Far more demand than the fleet can serve, so pre-send rejection has to hold the line. */
+  /** Far more demand than the fleet can serve, so pre-send rejection must limit the load. */
   public static final Scenario SATURATED =
       DEFAULT.with(Count.NODE_CAPACITY, 1).with(Count.MOBS, 40).with(Chance.REQUEST, 0.25);
 
-  /** Chunks come and go under the controller, so regions keep losing and regaining readability. */
+  /**
+   * Chunks are repeatedly unloaded and loaded, so regions keep becoming unreadable and readable.
+   */
   public static final Scenario CHURN = DEFAULT.with(Chance.CHUNK_CHURN, 0.08);
 
-  /** One draw from the full range of every setting, including ones the fleet cannot serve. */
+  /** One draw from the full range of every setting, including loads the fleet cannot serve. */
   public static Scenario sample(Rng rng) {
     Map<Count, Integer> counts = new EnumMap<>(Count.class);
     for (Count setting : Count.values()) {
@@ -132,15 +136,15 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
   }
 
   /**
-   * Capacity of the {@code n}th node. A few nodes run slower than the rest, so admission control,
-   * which assumes one uniform capacity, has to meet a fleet that does not have one.
+   * Capacity of the {@code n}th node. A few nodes are slower than the rest, so admission control,
+   * which assumes uniform capacity, is tested against a fleet that does not have it.
    */
   public int capacityOf(int nodeIndex) {
     int capacity = counts.get(Count.NODE_CAPACITY);
     return nodeIndex < counts.get(Count.SLOW_NODES) ? Math.max(1, capacity / 4) : capacity;
   }
 
-  /** Fixes iteration order at the enum's, and refuses a table with a setting left out. */
+  /** Uses the enum's iteration order, and rejects a table that is missing a setting. */
   private static <K extends Enum<K>, V> Map<K, V> complete(Map<K, V> values, Class<K> type) {
     EnumMap<K, V> copy = new EnumMap<>(type);
     copy.putAll(values);

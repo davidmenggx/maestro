@@ -12,19 +12,19 @@ import java.util.List;
 import maestro.fbs.PathType;
 
 /**
- * Terrain the simulated server owns: a square superflat world with mild hills, matching the
- * fuzz-test world shape. Held as flat arrays because it is dense and small, so every read is O(1)
- * and no iteration order can leak into a run.
+ * Terrain owned by the simulated server: a square superflat world with mild hills, matching the
+ * fuzz-test world shape. Stored in flat arrays because it is dense and small, so every read is O(1)
+ * and no iteration order can affect a run.
  *
- * <p>Vertical extent, floor and hill relief all come from the {@link Topology}, so a sweep covers
- * negative floors and columns that run-length encode into more than a couple of runs.
+ * <p>Vertical extent, floor and hill relief come from the {@link Topology}, so a sweep covers
+ * negative floors and columns that encode into more than a couple of runs.
  */
 public final class SimWorld implements WorldSource {
 
-  /** Marks a cell whose type still comes from the terrain rule rather than a block change. */
+  /** Marks a cell whose type still comes from the terrain rule, not a block change. */
   private static final byte NO_OVERRIDE = -1;
 
-  /** A bottom slab, so a column's top block can differ from the ones below it by floor alone. */
+  /** A bottom slab, so a column's top block can differ from the ones below it only in floor. */
   private static final int SLAB_FLOOR = Cells.FULL_FLOOR / 2;
 
   private static final int FENCE_FLOOR = Cells.FULL_FLOOR * 3 / 2;
@@ -37,7 +37,7 @@ public final class SimWorld implements WorldSource {
   private static final float MAX_EXTRA_UP_STEP = 1.0f;
   private static final float MAX_MALUS = 16.0f;
 
-  /** Fraction of ordinals a profile refuses outright, which vanilla spells as a negative malus. */
+  /** Fraction of ordinals a profile forbids, which vanilla represents as a negative malus. */
   private static final double IMPASSABLE_CHANCE = 0.15;
 
   private final Topology topology;
@@ -83,12 +83,12 @@ public final class SimWorld implements WorldSource {
     return index >= 0 && index < mobClasses.size() ? mobClasses.get(index) : null;
   }
 
-  /** Profiles this world can hand out, which a workload draws a request's class from. */
+  /** Profiles this world can provide. A workload draws a request's class from these. */
   public int mobClassCount() {
     return mobClasses.size();
   }
 
-  /** Block extent along both axes. */
+  /** Size along both axes, in blocks. */
   public int size() {
     return size;
   }
@@ -131,8 +131,8 @@ public final class SimWorld implements WorldSource {
   }
 
   /**
-   * A collision height that goes with the type, as a placed block would have: solid blocks are full
-   * or slabs, fences stand a block and a half, and everything else has no collision.
+   * A collision height that matches the type, as a placed block would have: solid blocks are full
+   * or slabs, fences are a block and a half, and everything else has no collision.
    */
   public static int floorFor(byte pathType, Rng rng) {
     if (pathType == (byte) PathType.BLOCKED) {
@@ -180,9 +180,8 @@ public final class SimWorld implements WorldSource {
   }
 
   /**
-   * One drawn {@code WalkNodeEvaluator} profile. Every field the wire carries is drawn, so the mob
-   * class table is encoded and decoded with values that differ between runs rather than one pair of
-   * constants.
+   * One randomly drawn {@code WalkNodeEvaluator} profile. Every field the wire carries is drawn, so
+   * the mob class table is encoded and decoded with values that vary between runs, not constants.
    */
   private static MobClass profile(short classId, Rng rng) {
     float[] malus = new float[PathTypes.count()];

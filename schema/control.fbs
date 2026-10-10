@@ -5,28 +5,30 @@ include "pathfinding.fbs";
 
 namespace maestro.fbs;
 
-// Assigns a square, full-height area: the region plus its halo, since the node
-// has no use for the boundary between them. `run` identifies the controller
-// process; region ids and sequence numbers are only meaningful within one.
-// `min_y` and `height` size the columns, so a node can allocate the whole area
-// as air before any chunk arrives. `resume` means the node keeps what it holds
-// and deltas continue after the `last_sequence` it reported; otherwise its
-// state is dropped and every resident chunk is sent again.
+// Assigns a square, full-height area: the region plus its halo (the node does
+// not need to know where one ends and the other starts). `run` identifies the
+// controller process; region ids and sequence numbers only have meaning within
+// one run. Positions are relative to the area's corner, and the node is never
+// told where that corner is. `size` is a multiple of 16, so whole chunks tile
+// the area.
+// `min_y` and `height` give the column size, so a node can create the whole
+// area as air before any chunk arrives. If `resume` is set, the node keeps its
+// state and deltas continue after the `last_sequence` it reported. Otherwise
+// it drops its state and every resident chunk is sent again.
 table RegionAssignment {
   run:ulong;
   region_id:uint;
-  min_xz:Vec2i;
   size:ushort;
   min_y:int;
   height:ushort;
   resume:bool;
 }
 
-// A node's opening frame on a new connection: which search it runs, which
-// region it still holds, from which controller run, and how far its world
-// stream got. `last_sequence` is 0 when the node holds no state, which is what
-// a restarted process reports. The controller replies with a
-// `RegionAssignment` that says whether the stream resumes.
+// A node's first frame on a new connection: the search it runs, the region it
+// still holds, the controller run that region came from, and its last applied
+// world sequence. `last_sequence` is 0 if the node holds no state, as after a
+// restart. The controller replies with a `RegionAssignment` saying whether the
+// stream resumes.
 table Hello {
   run:ulong;
   region_id:uint;
@@ -34,23 +36,23 @@ table Hello {
   pathfinder:Pathfinder = VANILLA;
 }
 
-// Pushed by the node on its own timer, unsolicited. Phi accrual reads the
-// intervals between arrivals, timed by the controller's own clock, so the node
-// sends no timestamp and the two clocks are never compared.
+// Sent by the node on its own timer, without being asked. Phi accrual uses the
+// intervals between arrivals, measured on the controller's clock, so the frame
+// has no timestamp and the two clocks are never compared.
 table Heartbeat {
   queue_depth:uint; // For load management.
 }
 
-// One union per channel per direction, so a reader dispatches on a single
-// root type once it knows which channel a frame arrived on. The world and
-// control channels are TCP, the request channel is UDP.
+// One union per channel per direction. A reader knows the channel a frame
+// arrived on, so it dispatches on a single root type. The world and control
+// channels are TCP; the request channel is UDP.
 union WorldMsg { WorldDelta, RegionAssignment, ChunkSnapshot }
 table WorldFrame { body:WorldMsg; }
 
 union RequestMsg { PathRequestBatch }
 table RequestFrame { body:RequestMsg; }
 
-union ResponseMsg { PathResponse }
+union ResponseMsg { PathResponse, UnknownProfile }
 table ResponseFrame { body:ResponseMsg; }
 
 union ControlMsg { MobClass }

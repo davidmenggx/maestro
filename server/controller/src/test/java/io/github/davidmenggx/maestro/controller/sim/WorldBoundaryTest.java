@@ -14,8 +14,8 @@ import maestro.fbs.PathType;
 import org.junit.jupiter.api.Test;
 
 /**
- * Boundary cases driven by a scripted trace. A generated workload reaches these only by luck, and
- * each one is a statement about what the mod is promised: exactly one callback per request.
+ * Boundary cases driven by a scripted trace. A generated workload reaches these only by chance.
+ * Each checks a guarantee made to the mod: exactly one callback per request.
  */
 class WorldBoundaryTest {
 
@@ -26,7 +26,7 @@ class WorldBoundaryTest {
   private static final short OTHER_CLASS = 2;
   private static final Pos HERE = new Pos(4, 40, 4);
   private static final Pos THERE = new Pos(20, 40, 20);
-  private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256);
+  private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256, 3);
 
   @Test
   void aMobRemovedWhileWaitingIsDroppedExactlyOnce() {
@@ -72,7 +72,7 @@ class WorldBoundaryTest {
 
   @Test
   void aRequestIsDroppedWhileNoNodeHoldsTheRegion() {
-    // No chunks load, so no region is ever snapshottable and no node can answer.
+    // No chunks load, so no region can be snapshotted and no node can answer.
     List<WorldEvent> script = new ArrayList<>();
     script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
     script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH));
@@ -88,8 +88,8 @@ class WorldBoundaryTest {
 
   @Test
   void aBlockChangeBeforeTheSnapshotIsAbsorbedByIt() {
-    // The change lands while the region is still unreadable, so it must not be
-    // sent as a delta: the snapshot that follows already contains it.
+    // The change happens while the region is unreadable, so it must not be sent as
+    // a delta. The snapshot that follows already contains it.
     List<WorldEvent> script = new ArrayList<>();
     script.add(new WorldEvent.BlockChanged(2, new Pos(4, 40, 4), (byte) PathType.WATER, 0));
     script.addAll(chunkLoads(5));
@@ -122,8 +122,8 @@ class WorldBoundaryTest {
   }
 
   /**
-   * A chunk that leaves reads as air on the node, which is what vanilla makes of a chunk the server
-   * is not holding, so only that chunk is resent and the rest of the region keeps serving.
+   * A chunk that leaves is treated as air on the node, as vanilla treats a chunk the server does
+   * not hold, so only that chunk is resent and the rest of the region keeps serving.
    */
   @Test
   void anUnloadedChunkIsClearedOnTheNodeAndTheRegionKeepsServing() {
@@ -141,7 +141,7 @@ class WorldBoundaryTest {
     assertEquals(4, run.controller.requestsIssued(), run.describe());
     assertEquals(0, run.out.dropped(DropReason.NO_NODE), run.describe());
     assertEquals(3, run.out.answered(), run.describe());
-    // One frame to clear the chunk and one to fill it again, against no resnapshot.
+    // One frame to clear the chunk and one to fill it again, with no new snapshot.
     assertEquals(
         run.chunkCount() + 2,
         run.sim.metrics().counter("offload.submitted", "job", "chunk"),
@@ -155,7 +155,7 @@ class WorldBoundaryTest {
     script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
     script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH));
     script.add(new WorldEvent.PathRequested(6, MOB, MOB_CLASS, HERE, THERE, SEARCH));
-    // A second profile costs its own request, since registration is per profile.
+    // A second profile costs its own request, because registration is per profile.
     script.add(new WorldEvent.PathRequested(10, MOB, OTHER_CLASS, HERE, THERE, SEARCH));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
@@ -167,7 +167,7 @@ class WorldBoundaryTest {
     assertEquals(2, run.sim.metrics().total("mobclass.registered"), run.describe());
   }
 
-  /** A profile the world cannot produce is the controller's own bug, not the node's. */
+  /** A profile the world cannot produce is a controller bug, not a node bug. */
   @Test
   void aRequestNamingAProfileTheWorldDoesNotHoldIsRefused() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
@@ -183,8 +183,8 @@ class WorldBoundaryTest {
   }
 
   /**
-   * Loads the world and registers {@code MOB_CLASS} with the node that owns it. Registration gives
-   * up the request that triggers it, so every script pays one throwaway request up front.
+   * Loads the world and registers {@code MOB_CLASS} with the node that owns it. Registration
+   * abandons the request that triggers it, so every script spends one request on registration.
    */
   private static List<WorldEvent> prelude() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));

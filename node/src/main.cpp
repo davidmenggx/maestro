@@ -1,22 +1,16 @@
-#include <charconv>
 #include <cstddef>
-#include <cstdint>
 #include <iostream>
 #include <ostream>
 #include <span>
 #include <string>
 #include <string_view>
 
-#include <asio.hpp>
-
 #include "maestro/obs.hpp"
 
 namespace {
 
 struct Options {
-  std::uint16_t Port = 47800;
   std::string OtlpEndpoint = "localhost:4317"; // OTLP/gRPC
-  bool Stateless = false;
 };
 
 enum class ArgsResult { Parsed, Help, Error };
@@ -24,11 +18,8 @@ enum class ArgsResult { Parsed, Help, Error };
 void printUsage(std::ostream &OS) {
   const Options Defaults;
   OS << "usage: maestro-node [options]\n"
-     << "  --port <n>          TCP port to listen on (default " << Defaults.Port
-     << ")\n"
      << "  --otlp <host:port>  OTLP/gRPC collector endpoint (default "
      << Defaults.OtlpEndpoint << ")\n"
-     << "  --stateless         run without persistent world state\n"
      << "  --help              show this message\n";
 }
 
@@ -45,25 +36,11 @@ ArgsResult parseArgs(std::span<char *const> Args, Options &Opts) {
     if (Arg == "--help")
       return ArgsResult::Help;
 
-    if (Arg == "--stateless") {
-      Opts.Stateless = true;
-    } else if (Arg == "--otlp") {
+    if (Arg == "--otlp") {
       const char *Value = takeValue();
       if (!Value)
         return ArgsResult::Error;
       Opts.OtlpEndpoint = Value;
-    } else if (Arg == "--port") {
-      const char *Value = takeValue();
-      if (!Value)
-        return ArgsResult::Error;
-      const std::string_view Text = Value;
-      unsigned Port = 0;
-      const auto [Ptr, Ec] =
-          std::from_chars(Text.data(), Text.data() + Text.size(), Port);
-      if (Ec != std::errc{} || Ptr != Text.data() + Text.size() ||
-          Port > 0xFFFF)
-        return ArgsResult::Error;
-      Opts.Port = static_cast<std::uint16_t>(Port);
     } else {
       return ArgsResult::Error;
     }
@@ -88,15 +65,6 @@ int main(int Argc, char **Argv) {
   }
 
   maestro::obs::init("maestro-node", Opts.OtlpEndpoint);
-
-  asio::io_context IoContext;
-  asio::ip::tcp::acceptor Acceptor(
-      IoContext, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), Opts.Port));
-
-  std::cout << "maestro-node bound to :" << Opts.Port
-            << (Opts.Stateless ? "  [stateless]" : "  [stateful]") << '\n';
-
-  Acceptor.close();
   maestro::obs::shutdown();
   return 0;
 }

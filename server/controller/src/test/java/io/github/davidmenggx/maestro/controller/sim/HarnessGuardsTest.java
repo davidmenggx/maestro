@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.env.Transport;
@@ -15,26 +16,36 @@ import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import maestro.fbs.CellRun;
+import maestro.fbs.ChunkSnapshot;
+import maestro.fbs.PathRequest;
+import maestro.fbs.PathRequestBatch;
 import maestro.fbs.PathType;
+import maestro.fbs.RequestFrame;
+import maestro.fbs.Vec2i;
+import maestro.fbs.WorldFrame;
+import maestro.fbs.WorldMsg;
 import org.junit.jupiter.api.Test;
 
 /**
- * The harness has to be trustworthy before the runs it produces are. These cover the machinery the
- * assertions themselves lean on, the samplers that decide what a sweep explores, and the guards
- * that turn a harness misuse into a message.
+ * The harness must be reliable before its runs can be trusted. These tests cover the machinery the
+ * assertions depend on, the samplers that decide what a sweep explores, and the guards that report
+ * harness misuse as an error message.
  */
 class HarnessGuardsTest {
 
   private static final int DRAWS = 300;
 
-  /** Any value works for a node built outside a controller. */
+  /** Any value works for a node created outside a controller. */
   private static final long RUN = 7;
 
   private static final RegionMap ONE_REGION =
@@ -55,7 +66,7 @@ class HarnessGuardsTest {
       }
     }
 
-    // A sample stuck at one setting would not fuzz anything.
+    // A sample that always returns one setting would not fuzz anything.
     for (Count setting : Count.values()) {
       counts.get(setting).assertCovers(setting, setting.floor(), setting.ceiling());
     }
@@ -99,6 +110,7 @@ class HarnessGuardsTest {
     Span faultCount = new Span();
     Span minLatency = new Span();
     Span maxLatency = new Span();
+    Span failureRate = new Span();
     boolean sawPermanentLoss = false;
 
     for (int seed = 0; seed < DRAWS; seed++) {
@@ -106,6 +118,7 @@ class HarnessGuardsTest {
       faultCount.see(plan.faults().size());
       minLatency.see(plan.minLatencySteps());
       maxLatency.see(plan.maxLatencySteps());
+      failureRate.see(plan.offloadFailureRate());
       assertTrue(plan.maxLatencySteps() >= plan.minLatencySteps(), plan.toString());
 
       int died = 0;
@@ -122,16 +135,17 @@ class HarnessGuardsTest {
       sawPermanentLoss |= died > recovered;
     }
 
-    // Process death, a silent partition and a link reset are three different
-    // recoveries, so the sweep has to reach all of them.
-    assertEquals(Set.of("NodeDied", "NodeRecovered", "Partitioned", "LinkReset"), kinds);
-    // Faults have to be able to pile up on one node, or a second failure during a
-    // recovery is a case the sweep can never reach. A paired fault contributes two
-    // entries, so the count only has to clear the number of faults drawn.
+    // Process death, a silent partition, a stalled stream and a link reset need
+    // four different recoveries, so the sweep must cover all of them.
+    assertEquals(Set.of("NodeDied", "NodeRecovered", "Partitioned", "Stalled", "LinkReset"), kinds);
+    // Faults must be able to accumulate on one node, or the sweep can never cover a
+    // second failure during a recovery. A paired fault adds two entries, so the
+    // count only needs to exceed the number of faults drawn.
     faultCount.assertCovers("fault count", 0, FaultPlan.MAX_FAULTS);
     minLatency.assertCovers("min latency", 1, FaultPlan.MAX_MIN_LATENCY_STEPS);
     maxLatency.assertCovers(
         "max latency", 1, FaultPlan.MAX_MIN_LATENCY_STEPS + FaultPlan.MAX_LATENCY_SPAN_STEPS - 1);
+    failureRate.assertCovers("offload failure rate", 0, FaultPlan.MAX_SAMPLED_RATE);
     assertTrue(sawPermanentLoss, "no node was ever lost for the rest of the run");
     assertEquals(List.of(), FaultPlan.sample(SeededRng.of(1).derive("fuzz"), 0, active).faults());
   }
@@ -141,7 +155,7 @@ class HarnessGuardsTest {
     Simulation sim = new Simulation(5L, FaultPlan.reliable());
     ModeledNode node = sim.addNode(NodeId.of(0), 4);
 
-    // The node holds nothing, so a resume is a claim it cannot honor.
+    // The node holds nothing, so it cannot honor a resume.
     SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
     node.receive(
         Channel.WORLD, ByteBuffer.wrap(Frames.assignment(ONE_REGION, 0, true, RUN, world)));
@@ -172,6 +186,88 @@ class HarnessGuardsTest {
 
     node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.delta(4, cells, ONE_REGION, 0)));
     assertFalse(node.violations().isEmpty(), "a skipped sequence went unreported");
+  }
+
+  @Test
+  void theModeledNodeRefusesWhatTheRealNodeRefusesAndStartsOver() {
+    RegionMap grid = new RegionMap(Topology.DEFAULT, nodes(Topology.DEFAULT.nodeCount()));
+    SimWorld world = new SimWorld(grid.topology(), 2, SeededRng.of(1).derive("terrain"));
+    SimWorld taller =
+        new SimWorld(
+            grid.topology().withHeight(grid.topology().height() + 16),
+            2,
+            SeededRng.of(1).derive("terrain"));
+    world.loadChunk(0, 0);
+    WorldEvent.BlockChanged outside =
+        new WorldEvent.BlockChanged(
+            0, new Pos(grid.topology().regionSize(), 40, 1), (byte) PathType.WATER, 0);
+    WorldEvent.BlockChanged inside =
+        new WorldEvent.BlockChanged(0, new Pos(1, 40, 1), (byte) PathType.WATER, 0);
+
+    Map<String, byte[]> refused = new LinkedHashMap<>();
+    refused.put("delta outside the area", Frames.delta(2, List.of(inside, outside), grid, 0));
+    refused.put("sequence 0", Frames.chunkCleared(0, 0, 0));
+    refused.put("chunk outside the area", Frames.chunkCleared(2, 2, 0));
+    refused.put("repeated sequence", Frames.chunkCleared(1, 0, 0));
+    refused.put("resume of another region", Frames.assignment(grid, 1, true, RUN, world));
+    refused.put("resume of another run", Frames.assignment(grid, 0, true, RUN + 1, world));
+    refused.put("resume of another shape", Frames.assignment(grid, 0, true, RUN, taller));
+    refused.put("chunk a column short", chunkWithColumns(2, Chunks.SIZE * Chunks.SIZE - 1));
+
+    for (Map.Entry<String, byte[]> entry : refused.entrySet()) {
+      Simulation sim = new Simulation(5L, FaultPlan.reliable());
+      ModeledNode node = sim.addNode(NodeId.of(0), 4);
+      node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(grid, 0, false, RUN, world)));
+      node.receive(
+          Channel.WORLD,
+          ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
+      assertTrue(node.hasState(), entry.getKey());
+      long before = node.stateDigest();
+
+      node.receive(Channel.WORLD, ByteBuffer.wrap(entry.getValue()));
+
+      assertEquals(1, node.violations().size(), entry.getKey() + ": " + node.violations());
+      // Like the real node, it drops all state instead of keeping half a stream.
+      assertFalse(node.hasState(), entry.getKey());
+      assertEquals(0, node.lastSequence(), entry.getKey());
+      assertTrue(before != node.stateDigest(), entry.getKey());
+    }
+  }
+
+  @Test
+  void aRequestNamingAnUnknownProfileIsAnsweredAtOnce() {
+    Simulation sim = new Simulation(9L, FaultPlan.reliable());
+    ModeledNode node = sim.addNode(NodeId.of(0), 4);
+    WorldEvent.Search search = new WorldEvent.Search(0, 16f, 256, 3);
+    Frames.Request request =
+        new Frames.Request(5, (short) 3, new Pos(1, 40, 1), new Pos(4, 40, 4), search);
+
+    node.receive(
+        Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(request), ONE_REGION, 0)));
+
+    // A request arriving before its profile is network behavior, not a controller
+    // bug, so it is not a violation. The answer is sent immediately instead of
+    // waiting for the node's next service.
+    assertEquals(List.of(), node.violations());
+    assertEquals(
+        1,
+        sim.metrics()
+            .counter("transport.sent", "node", NodeId.of(0).toString(), "channel", "REQUEST"));
+  }
+
+  @Test
+  void aValueTooWideForItsWireFieldIsRefusedRatherThanWrapped() {
+    assertEquals((short) -32768, Frames.int16(Short.MIN_VALUE));
+    assertThrows(IllegalArgumentException.class, () -> Frames.int16(Short.MAX_VALUE + 1));
+    assertEquals(0xFFFF, Frames.uint16(0xFFFF));
+    assertThrows(IllegalArgumentException.class, () -> Frames.uint16(0x10000));
+    assertThrows(IllegalArgumentException.class, () -> Frames.uint16(-1));
+
+    WorldEvent.Search search = new WorldEvent.Search(0, 16f, 256, 3);
+    Frames.Request farAway =
+        new Frames.Request(1, (short) 1, new Pos(40_000, 40, 0), new Pos(0, 40, 0), search);
+    assertThrows(
+        IllegalArgumentException.class, () -> Frames.requests(List.of(farAway), ONE_REGION, 0));
   }
 
   @Test
@@ -208,8 +304,12 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> FaultPlan.reliable().withDropRate(1.0));
     assertThrows(
         IllegalArgumentException.class, () -> FaultPlan.reliable().withDuplicateRate(-0.1));
-    assertThrows(IllegalArgumentException.class, () -> new FaultPlan(0, 5, 0.0, 0.0, List.of()));
-    assertThrows(IllegalArgumentException.class, () -> new FaultPlan(9, 5, 0.0, 0.0, List.of()));
+    assertThrows(
+        IllegalArgumentException.class, () -> FaultPlan.reliable().withOffloadFailureRate(1.0));
+    assertThrows(
+        IllegalArgumentException.class, () -> new FaultPlan(0, 5, 0.0, 0.0, 0.0, List.of()));
+    assertThrows(
+        IllegalArgumentException.class, () -> new FaultPlan(9, 5, 0.0, 0.0, 0.0, List.of()));
   }
 
   @Test
@@ -220,7 +320,7 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.with(Chance.REQUEST, 1.5));
     assertThrows(
         IllegalArgumentException.class, () -> Scenario.DEFAULT.with(Chance.CHUNK_CHURN, -0.1));
-    // A table with a setting left out cannot be completed by guessing.
+    // A table with a missing setting is rejected, not filled in with a guess.
     assertThrows(
         IllegalArgumentException.class,
         () -> new Scenario(Map.of(Count.MOBS, 1), Scenario.DEFAULT.chances()));
@@ -231,7 +331,7 @@ class HarnessGuardsTest {
     assertEquals(8, scenario(8, 0).capacityOf(0));
     assertEquals(2, scenario(8, 1).capacityOf(0));
     assertEquals(8, scenario(8, 1).capacityOf(1));
-    // A capacity that would round to zero still serves one request a tick.
+    // A capacity that rounds to zero still serves one request per tick.
     assertEquals(1, scenario(2, 1).capacityOf(0));
   }
 
@@ -240,7 +340,7 @@ class HarnessGuardsTest {
     assertThrows(
         IllegalArgumentException.class, () -> Topology.DEFAULT.withRegionSize(Chunks.SIZE + 4));
     assertThrows(IllegalArgumentException.class, () -> Topology.DEFAULT.withRegionsPerSide(0));
-    // A column too short, or a hill that would leave a mob nowhere to stand.
+    // A column that is too short, or a hill that leaves a mob nowhere to stand.
     assertThrows(IllegalArgumentException.class, () -> Topology.DEFAULT.withHeight(16));
     assertThrows(IllegalArgumentException.class, () -> Topology.DEFAULT.withRelief(32));
 
@@ -264,15 +364,15 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> world.set(0, -65, 0, (byte) 0, 16));
     assertThrows(IllegalArgumentException.class, () -> world.chunkLoaded(9, 9));
     assertThrows(IllegalArgumentException.class, () -> new SimWorld(topology, 0, SeededRng.of(1L)));
-    // Derived types cannot be a block's own type.
+    // A derived type cannot be a block's own type.
     assertThrows(
         IllegalArgumentException.class, () -> world.set(0, -60, 0, (byte) PathType.WALKABLE, 16));
   }
 
   @Test
   void everySampledMobProfileIsCarriedOnTheWire() {
-    // Profiles are drawn per run, so the encoder meets values that differ between
-    // runs rather than one pair of constants.
+    // Profiles are drawn per run, so the encoder sees values that vary between
+    // runs, not constants.
     Set<String> shapes = new LinkedHashSet<>();
     for (int seed = 0; seed < DRAWS; seed++) {
       SimWorld world = new SimWorld(Topology.DEFAULT, 3, SeededRng.of(seed).derive("terrain"));
@@ -282,6 +382,26 @@ class HarnessGuardsTest {
       }
     }
     assertTrue(shapes.size() > DRAWS, "mob profiles did not vary across seeds");
+  }
+
+  @Test
+  void everySearchInputIsCarriedOnTheWire() {
+    // Distinct values, so a field written into its neighbour's slot is detected.
+    WorldEvent.Search search = new WorldEvent.Search(6, 40.5f, 640, 300);
+    Frames.Request request =
+        new Frames.Request(9, (short) 2, new Pos(3, 40, 5), new Pos(7, 41, 11), search);
+    ByteBuffer frame = ByteBuffer.wrap(Frames.requests(List.of(request), ONE_REGION, 0));
+
+    PathRequestBatch batch =
+        (PathRequestBatch) RequestFrame.getRootAsRequestFrame(frame).body(new PathRequestBatch());
+    assertEquals(1, batch.requestsLength());
+    PathRequest decoded = batch.requests(0);
+    assertEquals(9, decoded.requestId());
+    assertEquals(2, decoded.classId());
+    assertEquals(search.reachRange(), decoded.reachRange());
+    assertEquals(search.maxPathLength(), decoded.maxPathLength());
+    assertEquals(search.maxVisitedNodes(), decoded.maxVisitedNodes());
+    assertEquals(search.maxFallDistance(), decoded.maxFallDistance());
   }
 
   @Test
@@ -309,6 +429,27 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> transport.connect(NodeId.of(7), "sim://7"));
   }
 
+  /** A chunk frame with {@code columns} one-run columns, which only a faulty encoder would send. */
+  private static byte[] chunkWithColumns(long sequence, int columns) {
+    FlatBufferBuilder builder = new FlatBufferBuilder(1024);
+    int[] counts = new int[columns];
+    Arrays.fill(counts, 1);
+    int countsVector = ChunkSnapshot.createRunCountsVector(builder, counts);
+    ChunkSnapshot.startRunsVector(builder, columns);
+    for (int i = 0; i < columns; i++) {
+      CellRun.createCellRun(builder, Topology.DEFAULT.height(), PathType.OPEN, 0);
+    }
+    int runs = builder.endVector();
+    ChunkSnapshot.startChunkSnapshot(builder);
+    ChunkSnapshot.addSequence(builder, sequence);
+    ChunkSnapshot.addChunkXz(builder, Vec2i.createVec2i(builder, 0, 0));
+    ChunkSnapshot.addRunCounts(builder, countsVector);
+    ChunkSnapshot.addRuns(builder, runs);
+    int snapshot = ChunkSnapshot.endChunkSnapshot(builder);
+    builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.ChunkSnapshot, snapshot));
+    return builder.sizedByteArray();
+  }
+
   private static Scenario scenario(int capacity, int slowNodes) {
     return Scenario.DEFAULT.with(Count.NODE_CAPACITY, capacity).with(Count.SLOW_NODES, slowNodes);
   }
@@ -317,10 +458,12 @@ class HarnessGuardsTest {
     return IntStream.range(0, count).mapToObj(NodeId::of).toList();
   }
 
-  /** Lowest and highest value a sampler produced, so a range can be asserted in one place. */
+  /** Lowest and highest value a sampler produced, so a range can be checked in one place. */
   private static final class Span {
 
-    /** Share of a range each end may be missed by, so the check is not a test of luck. */
+    /**
+     * Fraction of the range at each end that may be missed, so the check does not depend on luck.
+     */
     private static final double EDGE_MARGIN = 0.1;
 
     private double low = Double.POSITIVE_INFINITY;
@@ -331,7 +474,7 @@ class HarnessGuardsTest {
       high = Math.max(high, value);
     }
 
-    /** Asserts the draws reached both ends of {@code [low, high]}, give or take a margin. */
+    /** Asserts that the draws reached both ends of {@code [low, high]}, within a margin. */
     void assertCovers(Object label, double low, double high) {
       double margin = (high - low) * EDGE_MARGIN;
       assertTrue(

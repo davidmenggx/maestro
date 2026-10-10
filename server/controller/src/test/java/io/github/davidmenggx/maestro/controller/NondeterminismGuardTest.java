@@ -25,13 +25,12 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 /**
- * Reads the compiled controller and fails if it references a clock, a random source, a thread pool
- * or a socket directly. Those must arrive through {@code ControllerEnv}, or a replay stops being a
- * replay.
+ * Reads the compiled controller and fails if it directly references a clock, a random source, a
+ * thread pool or a socket. These must come through {@code ControllerEnv}, or replay breaks.
  *
- * <p>Iteration order is not checkable this way. The repeated-run digest in {@code SimulationTest}
- * covers it instead: identity hash codes differ between two runs in one JVM, so an identity-ordered
- * collection shows up there.
+ * <p>Iteration order cannot be checked this way. The repeated-run digest in {@code SimulationTest}
+ * covers it: identity hash codes differ between two runs in one JVM, so an identity-ordered
+ * collection produces different digests.
  */
 class NondeterminismGuardTest {
 
@@ -68,10 +67,10 @@ class NondeterminismGuardTest {
           new Rule("java/nio/channels/ServerSocketChannel", "*"),
           new Rule("java/nio/channels/DatagramChannel", "*"));
 
-  /** flatc output is not controller code and is not held to the rule. */
+  /** flatc output is not controller code, so the rule does not apply. */
   private static final String GENERATED = "maestro/fbs/";
 
-  /** One sample per category the rules exist to catch. */
+  /** One sample for each category of violation the rules catch. */
   private static final List<Class<?>> VIOLATIONS =
       List.of(
           WallClock.class,
@@ -114,7 +113,7 @@ class NondeterminismGuardTest {
     }
   }
 
-  // Samples. Each one breaks the rule in exactly one way.
+  // Samples. Each breaks the rule in exactly one way.
 
   @SuppressWarnings("unused")
   static final class WallClock {
@@ -186,7 +185,7 @@ class NondeterminismGuardTest {
     }
   }
 
-  /** The negative control: takes time from the seam and touches nothing forbidden. */
+  /** The negative control: takes time from the seam and uses nothing forbidden. */
   @SuppressWarnings("unused")
   static final class Wellbehaved {
     long now(Clock clock) {
