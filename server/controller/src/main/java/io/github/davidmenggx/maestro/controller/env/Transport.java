@@ -10,9 +10,9 @@ public interface Transport {
 
   /**
    * Independent streams to one node. Frames are ordered within a channel, not across channels.
-   * {@link #ordered} says whether a frame can be lost or reordered without breaking the
-   * connection. On an ordered channel (TCP) it cannot, so a loss shows up as a disconnect. The
-   * unordered channel is UDP, one frame per datagram.
+   * {@link #ordered} says whether a frame can be lost or reordered without breaking the connection.
+   * On an ordered channel (TCP) it cannot, so a loss shows up as a disconnect. The unordered
+   * channel is UDP, one frame per datagram.
    */
   enum Channel {
     /**
@@ -49,8 +49,8 @@ public interface Transport {
 
   /**
    * Frames are copied or fully consumed before returning, so the caller may reuse the buffer. A
-   * send to a node that is not connected is discarded, with no error return, because
-   * backpressure is decided from the node's reported queue depth, not the socket.
+   * send to a node that is not connected is discarded, with no error return, because backpressure
+   * is decided from the node's reported queue depth, not the socket.
    */
   void send(NodeId node, Channel channel, ByteBuffer frame);
 

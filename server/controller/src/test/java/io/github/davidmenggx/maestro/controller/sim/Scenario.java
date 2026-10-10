@@ -6,9 +6,9 @@ import java.util.EnumMap;
 import java.util.Map;
 
 /**
- * The load a run puts on the fleet, and how much the world changes during it. Separate from
- * {@link FaultPlan}, which describes network behavior instead of server requests, and from
- * {@link Topology}, which describes the world's shape.
+ * The load a run puts on the fleet, and how much the world changes during it. Separate from {@link
+ * FaultPlan}, which describes network behavior instead of server requests, and from {@link
+ * Topology}, which describes the world's shape.
  *
  * <p>Each setting is declared once below, with a minimum it may never go below and a maximum that
  * {@link #sample} draws up to. The sampler, the validation and the coverage assertions all read
@@ -42,7 +42,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     }
   }
 
-  /** The probability that the workload emits the event, per mob or per tick depending on the event. */
+  /**
+   * The probability that the workload emits the event, per mob or per tick depending on the event.
+   */
   public enum Chance {
     REQUEST(0.3),
     CANCEL(0.1),
@@ -103,7 +105,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
   public static final Scenario SATURATED =
       DEFAULT.with(Count.NODE_CAPACITY, 1).with(Count.MOBS, 40).with(Chance.REQUEST, 0.25);
 
-  /** Chunks are repeatedly unloaded and loaded, so regions keep becoming unreadable and readable. */
+  /**
+   * Chunks are repeatedly unloaded and loaded, so regions keep becoming unreadable and readable.
+   */
   public static final Scenario CHURN = DEFAULT.with(Chance.CHUNK_CHURN, 0.08);
 
   /** One draw from the full range of every setting, including loads the fleet cannot serve. */

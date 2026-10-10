@@ -73,7 +73,8 @@ public final class ModeledNode {
   private final Set<Long> queued = new LinkedHashSet<>();
 
   /**
-   * Answers kept for retries. A real node would limit this by tick, but a run is short enough not to.
+   * Answers kept for retries. A real node would limit this by tick, but a run is short enough not
+   * to.
    */
   private final Map<Long, byte[]> answered = new LinkedHashMap<>();
 

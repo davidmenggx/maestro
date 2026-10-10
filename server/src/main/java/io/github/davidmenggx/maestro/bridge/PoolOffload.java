@@ -11,9 +11,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Production {@link Offload}. Work runs on a small daemon pool. Its completion or failure is
- * queued for {@link #drain}, which the server thread calls at the tick boundary, so results reach
- * the controller from one thread only.
+ * Production {@link Offload}. Work runs on a small daemon pool. Its completion or failure is queued
+ * for {@link #drain}, which the server thread calls at the tick boundary, so results reach the
+ * controller from one thread only.
  */
 public final class PoolOffload implements Offload, AutoCloseable {
 

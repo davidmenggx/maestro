@@ -461,7 +461,9 @@ class HarnessGuardsTest {
   /** Lowest and highest value a sampler produced, so a range can be checked in one place. */
   private static final class Span {
 
-    /** Fraction of the range at each end that may be missed, so the check does not depend on luck. */
+    /**
+     * Fraction of the range at each end that may be missed, so the check does not depend on luck.
+     */
     private static final double EDGE_MARGIN = 0.1;
 
     private double low = Double.POSITIVE_INFINITY;

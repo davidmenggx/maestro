@@ -130,9 +130,9 @@ public final class Simulation {
   }
 
   /**
-   * Runs {@code ticks} ticks. Each tick applies its faults, opens the tick, lets the workload change
-   * the world, lets the fleet serve its requests, then closes the tick. Queued work is drained
-   * between stages.
+   * Runs {@code ticks} ticks. Each tick applies its faults, opens the tick, lets the workload
+   * change the world, lets the fleet serve its requests, then closes the tick. Queued work is
+   * drained between stages.
    */
   public void run(WorldInput controller, Workload workload, long ticks) {
     if (ticks < 1) {

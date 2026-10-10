@@ -9,9 +9,9 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Replays a fixed list of events, applying the world changes they describe. A recorded server
- * trace will have this form. Focused tests use it when a random workload would not reliably
- * produce the situation under test.
+ * Replays a fixed list of events, applying the world changes they describe. A recorded server trace
+ * will have this form. Focused tests use it when a random workload would not reliably produce the
+ * situation under test.
  */
 public final class ScriptedWorkload implements Workload {
 

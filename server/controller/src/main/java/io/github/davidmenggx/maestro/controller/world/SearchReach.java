@@ -1,10 +1,10 @@
 package io.github.davidmenggx.maestro.controller.world;
 
 /**
- * How far from its start a search reads the world. A node reads everything outside its area as
- * air, which turns real ground into a cliff and gives a wrong path instead of none. A request is
- * therefore sent only to a node whose area contains every block its search can read. Height is
- * not checked, because areas are full height.
+ * How far from its start a search reads the world. A node reads everything outside its area as air,
+ * which turns real ground into a cliff and gives a wrong path instead of none. A request is
+ * therefore sent only to a node whose area contains every block its search can read. Height is not
+ * checked, because areas are full height.
  */
 public final class SearchReach {
 

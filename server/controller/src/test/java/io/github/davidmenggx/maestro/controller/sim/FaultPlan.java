@@ -8,9 +8,9 @@ import java.util.List;
 
 /**
  * The faults the network, the fleet and the controller's encode workers may inject into a run. The
- * drop and duplicate rates apply to unordered channels only, because an ordered channel cannot
- * lose a frame without breaking the connection. {@code offloadFailureRate} is the probability that
- * an offloaded encode throws.
+ * drop and duplicate rates apply to unordered channels only, because an ordered channel cannot lose
+ * a frame without breaking the connection. {@code offloadFailureRate} is the probability that an
+ * offloaded encode throws.
  */
 public record FaultPlan(
     int minLatencySteps,

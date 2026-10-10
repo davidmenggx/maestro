@@ -55,8 +55,8 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private static final int RECONNECT_TICKS = 20;
 
   /**
-   * World frames kept per node so a reconnecting node can be replayed forward instead of sent a
-   * new snapshot. A node that fell further behind than this gets a new snapshot.
+   * World frames kept per node so a reconnecting node can be replayed forward instead of sent a new
+   * snapshot. A node that fell further behind than this gets a new snapshot.
    */
   static final int RETENTION_FRAMES = 48;
 
@@ -64,14 +64,16 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private record Outstanding(int mobId, NodeId node, long issuedTick, Pos target) {}
 
   /**
-   * What the controller tracks about one node. The connection is only part of this: the world stream
-   * and its replay window belong to the region and survive a reconnect.
+   * What the controller tracks about one node. The connection is only part of this: the world
+   * stream and its replay window belong to the region and survive a reconnect.
    */
   private static final class NodeState {
 
     private boolean connected;
 
-    /** Counts connections, so a request batch built for one connection is never sent on a later one. */
+    /**
+     * Counts connections, so a request batch built for one connection is never sent on a later one.
+     */
     private long connection;
 
     /** Past the {@code Hello} handshake, so world frames may flow. */
@@ -178,9 +180,8 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   }
 
   /**
-   * Internal bookkeeping that must be consistent: one mob mapping per outstanding request,
-   * per-node in-flight counters that sum to the total, and an admission bound that was never
-   * exceeded.
+   * Internal bookkeeping that must be consistent: one mob mapping per outstanding request, per-node
+   * in-flight counters that sum to the total, and an admission bound that was never exceeded.
    */
   public List<String> selfCheck() {
     List<String> violations = new ArrayList<>(selfViolations);
@@ -401,8 +402,8 @@ public final class ProbeController implements WorldInput, Transport.Listener {
 
   /**
    * A request not answered within the budget is abandoned. This handles a lost frame on the request
-   * stream, and a request to a node that went silent without resetting its connection.
-   * {@code outstanding} is in issue order, so the scan stops at the first live entry.
+   * stream, and a request to a node that went silent without resetting its connection. {@code
+   * outstanding} is in issue order, so the scan stops at the first live entry.
    */
   private void expireOutstanding(long tick) {
     Iterator<Map.Entry<Long, Outstanding>> entries = outstanding.entrySet().iterator();
@@ -575,7 +576,8 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   }
 
   /**
-   * Releases the per-mob and per-node bookkeeping for a request already removed from {@code outstanding}.
+   * Releases the per-mob and per-node bookkeeping for a request already removed from {@code
+   * outstanding}.
    */
   private void forget(Outstanding request) {
     requestByMob.remove(request.mobId());
@@ -709,8 +711,8 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   }
 
   /**
-   * Advances the send pointer over every frame now present, sending only once the node has sent
-   * its {@code Hello}. Frames behind the pointer stay as the replay window until they age out.
+   * Advances the send pointer over every frame now present, sending only once the node has sent its
+   * {@code Hello}. Frames behind the pointer stay as the replay window until they age out.
    */
   private void drainOutbox(NodeId node, NodeState state) {
     while (state.outbox.containsKey(state.nextToSend)) {

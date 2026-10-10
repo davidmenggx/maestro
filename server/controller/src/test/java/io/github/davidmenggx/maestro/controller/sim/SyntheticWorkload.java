@@ -137,8 +137,8 @@ public final class SyntheticWorkload implements Workload {
   }
 
   /**
-   * Changes use every type a cell may carry, in a band around the surface, so a column encodes
-   * into more than the two runs flat terrain would give.
+   * Changes use every type a cell may carry, in a band around the surface, so a column encodes into
+   * more than the two runs flat terrain would give.
    */
   private void changeBlocks(long tick, WorldInput input) {
     int changes = rng.nextInt(scenario.counts().get(Count.BLOCK_CHANGES_PER_TICK) + 1);
@@ -199,9 +199,9 @@ public final class SyntheticWorkload implements Workload {
   }
 
   /**
-   * The visit budget follows the follow range, not the length bound, because the navigation
-   * updates it only when an attribute changes. A caller that passes a shorter bound therefore
-   * leaves the budget unchanged. The two are drawn separately to cover that case.
+   * The visit budget follows the follow range, not the length bound, because the navigation updates
+   * it only when an attribute changes. A caller that passes a shorter bound therefore leaves the
+   * budget unchanged. The two are drawn separately to cover that case.
    */
   private WorldEvent.Search randomSearch() {
     int followRange = MIN_PATH_LENGTH + rng.nextInt(MAX_EXTRA_PATH_LENGTH + 1);
@@ -256,8 +256,8 @@ public final class SyntheticWorkload implements Workload {
   }
 
   /**
-   * Drawn per request, not per mob, because a mob's profile is its current evaluator inputs. A
-   * goal that changes its water malus gives it a different profile from one request to the next.
+   * Drawn per request, not per mob, because a mob's profile is its current evaluator inputs. A goal
+   * that changes its water malus gives it a different profile from one request to the next.
    */
   private short randomClass() {
     return (short) (1 + rng.nextInt(classCount));

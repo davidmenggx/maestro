@@ -30,8 +30,8 @@ import maestro.fbs.WorldMsg;
  * place.
  *
  * <p>The generated setters take an {@code int} and cast it to the field's width without checking,
- * so any value not already range-checked at the boundary must go through {@link #int16} or
- * {@link #uint16} first.
+ * so any value not already range-checked at the boundary must go through {@link #int16} or {@link
+ * #uint16} first.
  */
 public final class Frames {
 
@@ -45,8 +45,8 @@ public final class Frames {
   static final int COLUMNS_PER_CHUNK = Chunks.SIZE * Chunks.SIZE;
 
   /**
-   * One chunk's columns, run-length encoded. Each run is packed into one int as {@code (length << 16)
-   * | (floor << 8) | pathType}, which avoids allocating an object per run.
+   * One chunk's columns, run-length encoded. Each run is packed into one int as {@code (length <<
+   * 16) | (floor << 8) | pathType}, which avoids allocating an object per run.
    */
   public static final class ChunkRuns {
 

@@ -319,7 +319,8 @@ TEST(WorldStore, RejectsAChunkOutsideTheArea) {
 }
 
 TEST(WorldStore, RejectsADeltaThatBreaksTheContract) {
-  // The valid first edit is not applied either, because the whole frame is refused.
+  // The valid first edit is not applied either, because the whole frame is
+  // refused.
   const std::vector<CellEdit> Outside = {{1, 1, 1, Water}, {32, 1, 1, Water}};
   expectRefusedAndReset(test::delta(5, Outside), ApplyStatus::Malformed);
   const std::vector<CellEdit> AboveTheTop = {{1, 24, 1, Water}};

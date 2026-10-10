@@ -24,8 +24,8 @@ public final class Telemetry {
 
   /**
    * Held so the JUL level set below is not garbage collected. OpenTelemetry logs export failures
-   * through JUL, which would otherwise log on every cycle when no collector is running (the
-   * normal case in development).
+   * through JUL, which would otherwise log on every cycle when no collector is running (the normal
+   * case in development).
    */
   private static final Logger EXPORTER_LOGGER = Logger.getLogger("io.opentelemetry.exporter");
 

@@ -5,8 +5,8 @@ package io.github.davidmenggx.maestro.controller.world;
  * Production reads loaded chunks; the simulator reads its own terrain model.
  *
  * <p>Chunk residency is not queried here. It comes from {@link WorldEvent.ChunkLoaded} and {@link
- * WorldEvent.ChunkUnloaded}, so the controller already knows which chunks are readable and there
- * is no second source that could disagree. Cells are read only inside a loaded chunk. An unloaded
+ * WorldEvent.ChunkUnloaded}, so the controller already knows which chunks are readable and there is
+ * no second source that could disagree. Cells are read only inside a loaded chunk. An unloaded
  * chunk is sent as cleared, and the node treats it as air.
  */
 public interface WorldSource {

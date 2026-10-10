@@ -43,8 +43,8 @@ public interface WorldOutput {
   }
 
   /**
-   * The arguments of {@code Path(nodes, target, reached)}, plus the tick the request was issued,
-   * so the server knows how old the answer is. Empty {@code nodes} means no path.
+   * The arguments of {@code Path(nodes, target, reached)}, plus the tick the request was issued, so
+   * the server knows how old the answer is. Empty {@code nodes} means no path.
    */
   record PathResult(
       int mobId, Pos target, boolean reached, List<Node> nodes, float cost, long issuedTick) {

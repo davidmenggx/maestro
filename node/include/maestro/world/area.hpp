@@ -103,7 +103,8 @@ public:
   /// which columns versions share.
   const Column *column(int X, int Z) const;
 
-  /// A version with one chunk replaced. A null `Content` clears the chunk to air.
+  /// A version with one chunk replaced. A null `Content` clears the chunk to
+  /// air.
   std::shared_ptr<const Area> withChunk(int ChunkX, int ChunkZ,
                                         ChunkPtr Content,
                                         std::uint64_t Sequence) const;

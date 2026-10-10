@@ -33,7 +33,10 @@ class SimulationTest {
   /** Tick at which a node dies, two ticks before the controller's next reconnect attempt. */
   private static final long DEATH_TICK = 38;
 
-  /** Tick at which the control channel stalls: after the fleet connects, before profiles are registered. */
+  /**
+   * Tick at which the control channel stalls: after the fleet connects, before profiles are
+   * registered.
+   */
   private static final long STALL_TICK = 2;
 
   /** Long enough for several requests to name a profile that is still held behind the stall. */
