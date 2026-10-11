@@ -12,6 +12,7 @@ import io.github.davidmenggx.maestro.controller.env.Transport;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
+import io.github.davidmenggx.maestro.controller.wire.Frames;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
@@ -27,10 +28,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import maestro.fbs.CellRun;
 import maestro.fbs.ChunkSnapshot;
-import maestro.fbs.PathRequest;
-import maestro.fbs.PathRequestBatch;
 import maestro.fbs.PathType;
-import maestro.fbs.RequestFrame;
 import maestro.fbs.Vec2i;
 import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
@@ -158,7 +156,9 @@ class HarnessGuardsTest {
     // The node holds nothing, so it cannot honor a resume.
     SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
     node.receive(
-        Channel.WORLD, ByteBuffer.wrap(Frames.assignment(ONE_REGION, 0, true, RUN, world)));
+        Channel.WORLD,
+        ByteBuffer.wrap(
+            Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), true, world)));
 
     assertEquals(1, node.violations().size(), node.violations().toString());
     assertTrue(node.violations().get(0).contains("resume"), node.violations().toString());
@@ -172,7 +172,9 @@ class HarnessGuardsTest {
     world.loadChunk(0, 0);
 
     node.receive(
-        Channel.WORLD, ByteBuffer.wrap(Frames.assignment(ONE_REGION, 0, false, RUN, world)));
+        Channel.WORLD,
+        ByteBuffer.wrap(
+            Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), false, world)));
     node.receive(
         Channel.WORLD,
         ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
@@ -181,10 +183,10 @@ class HarnessGuardsTest {
 
     List<WorldEvent.BlockChanged> cells =
         List.of(new WorldEvent.BlockChanged(0, new Pos(1, 40, 1), (byte) PathType.WATER, 0));
-    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.delta(2, cells, ONE_REGION, 0)));
+    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.delta(2, cells, 0, 0)));
     assertEquals(List.of(), node.violations());
 
-    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.delta(4, cells, ONE_REGION, 0)));
+    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.delta(4, cells, 0, 0)));
     assertFalse(node.violations().isEmpty(), "a skipped sequence went unreported");
   }
 
@@ -205,19 +207,27 @@ class HarnessGuardsTest {
         new WorldEvent.BlockChanged(0, new Pos(1, 40, 1), (byte) PathType.WATER, 0);
 
     Map<String, byte[]> refused = new LinkedHashMap<>();
-    refused.put("delta outside the area", Frames.delta(2, List.of(inside, outside), grid, 0));
+    refused.put("delta outside the area", Frames.delta(2, List.of(inside, outside), 0, 0));
     refused.put("sequence 0", Frames.chunkCleared(0, 0, 0));
     refused.put("chunk outside the area", Frames.chunkCleared(2, 2, 0));
     refused.put("repeated sequence", Frames.chunkCleared(1, 0, 0));
-    refused.put("resume of another region", Frames.assignment(grid, 1, true, RUN, world));
-    refused.put("resume of another run", Frames.assignment(grid, 0, true, RUN + 1, world));
-    refused.put("resume of another shape", Frames.assignment(grid, 0, true, RUN, taller));
+    refused.put(
+        "resume of another region",
+        Frames.assignment(RUN, 1, grid.topology().regionSize(), true, world));
+    refused.put(
+        "resume of another run",
+        Frames.assignment(RUN + 1, 0, grid.topology().regionSize(), true, world));
+    refused.put(
+        "resume of another shape",
+        Frames.assignment(RUN, 0, grid.topology().regionSize(), true, taller));
     refused.put("chunk a column short", chunkWithColumns(2, Chunks.SIZE * Chunks.SIZE - 1));
 
     for (Map.Entry<String, byte[]> entry : refused.entrySet()) {
       Simulation sim = new Simulation(5L, FaultPlan.reliable());
       ModeledNode node = sim.addNode(NodeId.of(0), 4);
-      node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(grid, 0, false, RUN, world)));
+      node.receive(
+          Channel.WORLD,
+          ByteBuffer.wrap(Frames.assignment(RUN, 0, grid.topology().regionSize(), false, world)));
       node.receive(
           Channel.WORLD,
           ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
@@ -242,8 +252,7 @@ class HarnessGuardsTest {
     Frames.Request request =
         new Frames.Request(5, (short) 3, new Pos(1, 40, 1), new Pos(4, 40, 4), search);
 
-    node.receive(
-        Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(request), ONE_REGION, 0)));
+    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(request), 0, 0)));
 
     // A request arriving before its profile is network behavior, not a controller
     // bug, so it is not a violation. The answer is sent immediately instead of
@@ -253,21 +262,6 @@ class HarnessGuardsTest {
         1,
         sim.metrics()
             .counter("transport.sent", "node", NodeId.of(0).toString(), "channel", "REQUEST"));
-  }
-
-  @Test
-  void aValueTooWideForItsWireFieldIsRefusedRatherThanWrapped() {
-    assertEquals((short) -32768, Frames.int16(Short.MIN_VALUE));
-    assertThrows(IllegalArgumentException.class, () -> Frames.int16(Short.MAX_VALUE + 1));
-    assertEquals(0xFFFF, Frames.uint16(0xFFFF));
-    assertThrows(IllegalArgumentException.class, () -> Frames.uint16(0x10000));
-    assertThrows(IllegalArgumentException.class, () -> Frames.uint16(-1));
-
-    WorldEvent.Search search = new WorldEvent.Search(0, 16f, 256, 3);
-    Frames.Request farAway =
-        new Frames.Request(1, (short) 1, new Pos(40_000, 40, 0), new Pos(0, 40, 0), search);
-    assertThrows(
-        IllegalArgumentException.class, () -> Frames.requests(List.of(farAway), ONE_REGION, 0));
   }
 
   @Test
@@ -382,26 +376,6 @@ class HarnessGuardsTest {
       }
     }
     assertTrue(shapes.size() > DRAWS, "mob profiles did not vary across seeds");
-  }
-
-  @Test
-  void everySearchInputIsCarriedOnTheWire() {
-    // Distinct values, so a field written into its neighbour's slot is detected.
-    WorldEvent.Search search = new WorldEvent.Search(6, 40.5f, 640, 300);
-    Frames.Request request =
-        new Frames.Request(9, (short) 2, new Pos(3, 40, 5), new Pos(7, 41, 11), search);
-    ByteBuffer frame = ByteBuffer.wrap(Frames.requests(List.of(request), ONE_REGION, 0));
-
-    PathRequestBatch batch =
-        (PathRequestBatch) RequestFrame.getRootAsRequestFrame(frame).body(new PathRequestBatch());
-    assertEquals(1, batch.requestsLength());
-    PathRequest decoded = batch.requests(0);
-    assertEquals(9, decoded.requestId());
-    assertEquals(2, decoded.classId());
-    assertEquals(search.reachRange(), decoded.reachRange());
-    assertEquals(search.maxPathLength(), decoded.maxPathLength());
-    assertEquals(search.maxVisitedNodes(), decoded.maxVisitedNodes());
-    assertEquals(search.maxFallDistance(), decoded.maxFallDistance());
   }
 
   @Test

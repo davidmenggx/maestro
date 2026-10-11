@@ -4,6 +4,7 @@ import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.wire.Frames;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
@@ -376,7 +377,10 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     if (region >= 0) {
       // Sent on the world channel, not the control channel. The assignment must
       // arrive before the frames it applies to, and only one channel orders them.
-      send(node, Channel.WORLD, Frames.assignment(regions, region, resume, run, world));
+      send(
+          node,
+          Channel.WORLD,
+          Frames.assignment(run, region, regions.topology().regionSize(), resume, world));
     }
     drainOutbox(node, state);
   }
@@ -643,7 +647,10 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       long sequence = ++state.lastSequence;
       int region = regions.indexOf(entry.getKey());
       offload(
-          entry.getKey(), sequence, "delta", () -> Frames.delta(sequence, cells, regions, region));
+          entry.getKey(),
+          sequence,
+          "delta",
+          () -> Frames.delta(sequence, cells, regions.minX(region), regions.minZ(region)));
     }
   }
 
@@ -663,7 +670,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       long connection = state.connection;
       encode(
           "requests",
-          () -> Frames.requests(batch, regions, region),
+          () -> Frames.requests(batch, regions.minX(region), regions.minZ(region)),
           frame -> {
             // A retried encode can finish after the connection it was built for ended. Its
             // requests were dropped with that connection, and the profiles they name may not

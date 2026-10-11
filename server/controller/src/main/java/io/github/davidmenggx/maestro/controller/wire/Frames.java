@@ -1,10 +1,11 @@
-package io.github.davidmenggx.maestro.controller.sim;
+package io.github.davidmenggx.maestro.controller.wire;
 
 import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
+import io.github.davidmenggx.maestro.controller.world.WorldOutput;
 import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import java.util.Arrays;
 import java.util.List;
@@ -13,11 +14,15 @@ import maestro.fbs.CellRun;
 import maestro.fbs.ChunkSnapshot;
 import maestro.fbs.ControlFrame;
 import maestro.fbs.ControlMsg;
+import maestro.fbs.PathNode;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
+import maestro.fbs.PathResponse;
 import maestro.fbs.RegionAssignment;
 import maestro.fbs.RequestFrame;
 import maestro.fbs.RequestMsg;
+import maestro.fbs.ResponseFrame;
+import maestro.fbs.ResponseMsg;
 import maestro.fbs.Vec2i;
 import maestro.fbs.Vec3s;
 import maestro.fbs.WorldDelta;
@@ -25,9 +30,9 @@ import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 
 /**
- * Everything the controller puts on the wire, encoded with the generated bindings. Separate from
- * the controller so a test can build the same frames a run would, and so the encoding is in one
- * place.
+ * Every frame payload the controller puts on the wire, encoded with the generated bindings, so the
+ * encoding is in one place. Positions are given in world coordinates with the corner {@code
+ * (originX, originZ)} of the receiving node's area, and leave as the wire's relative positions.
  *
  * <p>The generated setters take an {@code int} and cast it to the field's width without checking,
  * so any value not already range-checked at the boundary must go through {@link #int16} or {@link
@@ -101,7 +106,7 @@ public final class Frames {
     return runs;
   }
 
-  /** {@code chunkX} and {@code chunkZ} are indices within the region, not world coordinates. */
+  /** {@code chunkX} and {@code chunkZ} are indices within the area, not world coordinates. */
   public static byte[] chunkSnapshot(long sequence, int chunkX, int chunkZ, ChunkRuns runs) {
     FlatBufferBuilder builder = new FlatBufferBuilder(4096);
     int runCountsVector = ChunkSnapshot.createRunCountsVector(builder, runs.runsPerColumn);
@@ -135,9 +140,7 @@ public final class Frames {
   }
 
   public static byte[] delta(
-      long sequence, List<WorldEvent.BlockChanged> cells, RegionMap regions, int region) {
-    int originX = regions.minX(region);
-    int originZ = regions.minZ(region);
+      long sequence, List<WorldEvent.BlockChanged> cells, int originX, int originZ) {
     FlatBufferBuilder builder = new FlatBufferBuilder(256);
     WorldDelta.startCellsVector(builder, cells.size());
     for (int i = cells.size() - 1; i >= 0; i--) {
@@ -157,9 +160,7 @@ public final class Frames {
     return builder.sizedByteArray();
   }
 
-  public static byte[] requests(List<Request> batch, RegionMap regions, int region) {
-    int originX = regions.minX(region);
-    int originZ = regions.minZ(region);
+  public static byte[] requests(List<Request> batch, int originX, int originZ) {
     FlatBufferBuilder builder = new FlatBufferBuilder(512);
     int[] offsets = new int[batch.size()];
     for (int i = 0; i < batch.size(); i++) {
@@ -185,13 +186,17 @@ public final class Frames {
     return builder.sizedByteArray();
   }
 
+  /** {@code size} is the side of the square area, a multiple of {@link Chunks#SIZE}. */
   public static byte[] assignment(
-      RegionMap regions, int region, boolean resume, long run, WorldSource world) {
+      long run, int regionId, int size, boolean resume, WorldSource world) {
+    if (size <= 0 || size % Chunks.SIZE != 0) {
+      throw new IllegalArgumentException("an area is whole chunks: " + size);
+    }
     FlatBufferBuilder builder = new FlatBufferBuilder(128);
     RegionAssignment.startRegionAssignment(builder);
     RegionAssignment.addRun(builder, run);
-    RegionAssignment.addRegionId(builder, region);
-    RegionAssignment.addSize(builder, uint16(regions.topology().regionSize()));
+    RegionAssignment.addRegionId(builder, regionId);
+    RegionAssignment.addSize(builder, uint16(size));
     RegionAssignment.addMinY(builder, world.minY());
     RegionAssignment.addHeight(builder, uint16(world.height()));
     RegionAssignment.addResume(builder, resume);
@@ -222,6 +227,42 @@ public final class Frames {
     maestro.fbs.MobClass.addCanFloat(builder, abilities.canFloat());
     maestro.fbs.MobClass.addCanWalkOverFences(builder, abilities.canWalkOverFences());
     return maestro.fbs.MobClass.endMobClass(builder);
+  }
+
+  /**
+   * A node's answer. The controller never sends one, but recorded vanilla answers are stored in
+   * this form so they compare directly with what a node returns.
+   */
+  public static byte[] response(
+      long requestId,
+      boolean reached,
+      List<WorldOutput.Node> nodes,
+      float cost,
+      long worldSequence,
+      int originX,
+      int originZ) {
+    FlatBufferBuilder builder = new FlatBufferBuilder(256);
+    PathResponse.startNodesVector(builder, nodes.size());
+    for (int i = nodes.size() - 1; i >= 0; i--) {
+      WorldOutput.Node node = nodes.get(i);
+      Pos pos = node.pos();
+      PathNode.createPathNode(
+          builder,
+          int16(pos.x() - originX),
+          int16(pos.y()),
+          int16(pos.z() - originZ),
+          node.pathType());
+    }
+    int nodesVector = builder.endVector();
+    PathResponse.startPathResponse(builder);
+    PathResponse.addRequestId(builder, requestId);
+    PathResponse.addReached(builder, reached);
+    PathResponse.addNodes(builder, nodesVector);
+    PathResponse.addCost(builder, cost);
+    PathResponse.addWorldSequence(builder, worldSequence);
+    int response = PathResponse.endPathResponse(builder);
+    builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, response));
+    return builder.sizedByteArray();
   }
 
   private static int vec3(FlatBufferBuilder builder, Pos pos, int originX, int originZ) {

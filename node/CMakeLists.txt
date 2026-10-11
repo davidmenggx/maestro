@@ -82,6 +82,7 @@ if(MAESTRO_BUILD_TESTS)
     tests/test_binary_heap.cpp
     tests/test_coord_map.cpp
     tests/test_framing.cpp
+    tests/test_parity.cpp
     tests/test_path_types.cpp
     tests/test_schema.cpp
     tests/test_vanilla_search.cpp
@@ -89,6 +90,10 @@ if(MAESTRO_BUILD_TESTS)
     tests/test_world_store.cpp
   )
   target_link_libraries(maestro_tests PRIVATE maestro_core GTest::gtest_main)
+  # Parity fixtures recorded from vanilla by `make capture`, committed with the
+  # repository and shared with the Java tests.
+  target_compile_definitions(maestro_tests PRIVATE
+    MAESTRO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/parity")
   include(GoogleTest)
   gtest_discover_tests(maestro_tests)
 endif()

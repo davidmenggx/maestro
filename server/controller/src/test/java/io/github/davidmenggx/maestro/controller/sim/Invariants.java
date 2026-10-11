@@ -2,6 +2,7 @@ package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.wire.Frames;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -126,7 +127,12 @@ public final class Invariants {
     fresh.receive(
         Channel.WORLD,
         ByteBuffer.wrap(
-            Frames.assignment(run.regions, region, false, run.controller.run, run.world)));
+            Frames.assignment(
+                run.controller.run,
+                region,
+                run.regions.topology().regionSize(),
+                false,
+                run.world)));
     // A chunk the server does not hold is never sent, and is air on both sides.
     int chunksPerSide = run.regions.topology().regionSize() / Chunks.SIZE;
     int originChunkX = Chunks.of(run.regions.minX(region));

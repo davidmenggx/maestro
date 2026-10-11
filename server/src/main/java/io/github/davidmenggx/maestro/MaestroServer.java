@@ -2,9 +2,11 @@ package io.github.davidmenggx.maestro;
 
 import io.github.davidmenggx.maestro.bridge.PoolOffload;
 import io.github.davidmenggx.maestro.bridge.ServerClock;
+import io.github.davidmenggx.maestro.capture.CaptureCommand;
 import io.github.davidmenggx.maestro.config.MaestroConfig;
 import io.github.davidmenggx.maestro.obs.Telemetry;
 import net.fabricmc.api.DedicatedServerModInitializer;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.loader.api.FabricLoader;
@@ -63,6 +65,10 @@ public final class MaestroServer implements DedicatedServerModInitializer {
           offload.drain();
           clock.advance();
         });
+    if (config.devMode()) {
+      CommandRegistrationCallback.EVENT.register(
+          (dispatcher, buildContext, selection) -> CaptureCommand.register(dispatcher));
+    }
     ServerLifecycleEvents.SERVER_STOPPED.register(
         server -> {
           offload.close();
