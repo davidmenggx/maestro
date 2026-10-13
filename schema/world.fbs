@@ -8,6 +8,8 @@ namespace maestro.fbs;
 // from the block below a node. `floor` is rounded up to a sixteenth on
 // purpose: almost every collision shape already ends on one, and the few that
 // do not, such as the lily pad at 1.5, change by less than a sixteenth.
+// `floor` is at most 32: the node looks only one block below a collision box,
+// and vanilla's tallest shapes, fences and walls, are 24.
 // Neighbor-dependent and mob-dependent types are computed on the node at query
 // time, so a block change produces exactly one `CellDelta`.
 struct CellDelta {

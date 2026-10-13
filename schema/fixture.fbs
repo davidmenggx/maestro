@@ -1,0 +1,38 @@
+namespace maestro.fbs;
+
+// One vanilla `PathFinder.findPath` call. `exact` is set when the node's
+// approximations cannot have changed the answer: the node's stand-in for the
+// mob's position gave the search the same inputs, and every collision and
+// floor query the search made got the same answer from the node's model of
+// the cells as from vanilla. Other cases may diverge by design and are only
+// measured.
+//
+// The search ran after the first `world_frames` frames of the world stream, so
+// a replay applies that many frames before it and the response's
+// `world_sequence` is the sequence of the last of them.
+table ParityCase {
+  entity:string;       // Minecraft entity type id, for reports
+  exact:bool;
+  mob_class:[ubyte];   // `ControlFrame` holding the mob's `MobClass`
+  request:[ubyte];     // `RequestFrame` holding one `PathRequest`
+  response:[ubyte];    // `ResponseFrame` holding vanilla's `PathResponse`
+  world_frames:uint;
+}
+
+// Test data, never sent: a world and the searches vanilla ran on it, recorded
+// by the `/maestro capture` command of a dev server so the node and the
+// controller can both replay them. Every frame inside is a payload exactly as
+// the wire carries it.
+//
+// `world` is the world stream as a node reads it off its world channel: a
+// `RegionAssignment`, then every chunk of the area, then `WorldDelta` frames
+// for the block changes made between searches, each framed as
+// `[uint32 little-endian length][payload]`.
+table ParityFixture {
+  seed:ulong;
+  world:[ubyte];
+  cases:[ParityCase];
+}
+
+root_type ParityFixture;
+file_identifier "MPAR";

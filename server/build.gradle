@@ -19,6 +19,38 @@ repositories {
   }
 }
 
+// Capture and the probe behind it are development tools. They are a separate
+// mod on the classpath of `runServer` only, so the released jar holds none of
+// them.
+sourceSets {
+  dev {
+    compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+    runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
+  }
+}
+
+loom {
+  mods {
+    maestro {
+      sourceSet sourceSets.main
+    }
+    "maestro-dev" {
+      sourceSet sourceSets.dev
+    }
+  }
+  runs {
+    server {
+      source sourceSets.dev
+    }
+    // The released mod alone, as a server would load it. The boot smoke test uses it.
+    releaseServer {
+      inherit server
+      configName = "Release Server"
+      source sourceSets.main
+    }
+  }
+}
+
 configurations {
   // Resolved separately so the whole OpenTelemetry graph can be nested. See the
   // `include` loop below.
@@ -88,7 +120,8 @@ test {
   useJUnitPlatform()
 }
 
-processResources {
+// Both mods take their version from the project.
+tasks.withType(ProcessResources).configureEach {
   inputs.property "version", project.version
   filesMatching("fabric.mod.json") {
     expand "version": project.version
@@ -109,7 +142,7 @@ def devServerProperties = [
   "max-tick-time": "-1",
 ]
 
-tasks.named("runServer") {
+tasks.matching { it.name in ["runServer", "runReleaseServer"] }.configureEach {
   doFirst {
     devRunDir.mkdirs()
     new File(devRunDir, "eula.txt").text = "eula=true\n"
@@ -154,7 +187,7 @@ tasks.named("runServer") {
     // Always written: a previous `-Pworld=` run would otherwise leave its
     // `level-name` behind and silently redirect the next default boot.
     properties.setProperty("level-name", levelName)
-    propertiesFile.withOutputStream { properties.store(it, "Written by the runServer task") }
+    propertiesFile.withOutputStream { properties.store(it, "Written by the server run tasks") }
   }
 }
 

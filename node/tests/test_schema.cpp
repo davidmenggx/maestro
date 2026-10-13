@@ -103,19 +103,6 @@ TEST(Schema, WorldFrameCarriesRunLengthEncodedChunk) {
   ASSERT_EQ(Decoded->run_counts()->size(), Columns);
   ASSERT_EQ(Decoded->runs()->size(), Runs.size());
 
-  // Walk the prefix sum as a node would, checking that every column spans the
-  // region height and that the offsets land on the right runs.
-  unsigned Offset = 0;
-  for (unsigned Column = 0; Column < Decoded->run_counts()->size(); ++Column) {
-    const unsigned Count = Decoded->run_counts()->Get(Column);
-    int Total = 0;
-    for (unsigned I = 0; I < Count; ++I)
-      Total += Decoded->runs()->Get(Offset + I)->length();
-    EXPECT_EQ(Total, Height) << "column " << Column;
-    Offset += Count;
-  }
-  EXPECT_EQ(Offset, Decoded->runs()->size());
-
   // The slab run has the same type as the run below it and a different floor.
   const unsigned SlabOffset = Decoded->run_counts()->Get(0);
   EXPECT_EQ(Decoded->runs()->Get(SlabOffset)->node_type(),

@@ -111,7 +111,7 @@ public sealed interface WorldEvent {
    * One A* request. {@code start} is the start node the evaluator resolved on the server, not the
    * mob's position. {@code classId} names the mob's current profile, not one fixed at spawn. The
    * controller assigns the request id, so a repeat request for the same mob replaces the
-   * outstanding one.
+   * outstanding one, even if the repeat itself is refused.
    */
   record PathRequested(long tick, int mobId, short classId, Pos start, Pos target, Search search)
       implements WorldEvent {
@@ -127,8 +127,9 @@ public sealed interface WorldEvent {
   }
 
   /**
-   * The mob no longer wants a path because it lost its target or stopped hunting. Frees fleet
-   * capacity that would be spent on an answer nobody reads.
+   * The mob no longer wants a path because it lost its target or stopped hunting. A request that
+   * has not left yet is never sent. One already sent is still served by its node, which nobody
+   * tells, so it keeps counting against the node until its answer is due.
    */
   record PathCanceled(long tick, int mobId) implements WorldEvent {
     public PathCanceled {

@@ -2,18 +2,25 @@ package io.github.davidmenggx.maestro.config;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 import com.google.gson.annotations.SerializedName;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
+import java.lang.reflect.RecordComponent;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Startup settings read from `<config dir>/maestro.json`. A missing file is created with the
- * defaults below. A malformed or incomplete file aborts startup.
+ * defaults below. A malformed or incomplete file, or one with a key that is not a setting, aborts
+ * startup.
  */
-public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint, boolean devMode) {
+public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint) {
 
   /** How compute nodes hold world state. */
   public enum Mode {
@@ -34,9 +41,14 @@ public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint, boo
   public static final String FILE_NAME = "maestro.json";
 
   public static final MaestroConfig DEFAULT =
-      new MaestroConfig(Mode.STATEFUL, SubMode.BATCH, "http://localhost:4317", true);
+      new MaestroConfig(Mode.STATEFUL, SubMode.BATCH, "http://localhost:4317");
 
   private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+
+  private static final Set<String> SETTINGS =
+      Arrays.stream(MaestroConfig.class.getRecordComponents())
+          .map(RecordComponent::getName)
+          .collect(Collectors.toUnmodifiableSet());
 
   public MaestroConfig {
     require(mode != null, "`mode` must be \"stateful\" or \"stateless\"");
@@ -51,9 +63,15 @@ public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint, boo
     }
 
     try (Reader reader = Files.newBufferedReader(path)) {
-      MaestroConfig config = GSON.fromJson(reader, MaestroConfig.class);
-      require(config != null, "file is empty");
-      return config;
+      JsonElement json = JsonParser.parseReader(reader);
+      require(!json.isJsonNull(), "file is empty");
+      require(json.isJsonObject(), "file is not a JSON object");
+      // Gson ignores a key it does not know, so a misspelled or retired setting would
+      // otherwise be dropped without a word.
+      for (String key : json.getAsJsonObject().keySet()) {
+        require(SETTINGS.contains(key), "`" + key + "` is not a setting");
+      }
+      return GSON.fromJson(json, MaestroConfig.class);
     } catch (IOException e) {
       throw new IllegalStateException("Could not read Maestro config at " + path, e);
     } catch (RuntimeException e) {

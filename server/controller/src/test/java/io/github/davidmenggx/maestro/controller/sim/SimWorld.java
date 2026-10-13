@@ -47,6 +47,10 @@ public final class SimWorld implements WorldSource {
   private final boolean[] slabTopped;
   private final byte[] overrides;
   private final byte[] overrideFloors;
+
+  /** Cells with an override, per chunk section, so a section without any can be summarized. */
+  private final int[] overridesPerSection;
+
   private final boolean[] loadedChunks;
   private final List<MobClass> mobClasses;
 
@@ -61,6 +65,8 @@ public final class SimWorld implements WorldSource {
     this.slabTopped = new boolean[size * size];
     this.overrides = new byte[size * size * topology.height()];
     this.overrideFloors = new byte[overrides.length];
+    this.overridesPerSection =
+        new int[chunksPerSide * chunksPerSide * (topology.height() / SECTION_HEIGHT)];
     this.loadedChunks = new boolean[chunksPerSide * chunksPerSide];
     Arrays.fill(overrides, NO_OVERRIDE);
 
@@ -126,6 +132,10 @@ public final class SimWorld implements WorldSource {
       throw new IllegalArgumentException("floor out of range: " + floor);
     }
     int index = index(x, y, z);
+    int section = (y - topology.minY()) / SECTION_HEIGHT;
+    if (overrides[index] == NO_OVERRIDE && section < topology.height() / SECTION_HEIGHT) {
+      overridesPerSection[sectionIndex(Chunks.of(x), Chunks.of(z), section)]++;
+    }
     overrides[index] = pathType;
     overrideFloors[index] = (byte) floor;
   }
@@ -180,6 +190,35 @@ public final class SimWorld implements WorldSource {
   }
 
   /**
+   * A section is uniform when no block in it was changed and every column's ground lies wholly
+   * above it, so it is solid, or wholly below it, so it is air. Anything else is read block by
+   * block, which is always correct.
+   */
+  @Override
+  public int uniformCell(int chunkX, int chunkZ, int section) {
+    if (!chunkLoaded(chunkX, chunkZ)
+        || overridesPerSection[sectionIndex(chunkX, chunkZ, section)] > 0) {
+      return NOT_UNIFORM;
+    }
+    int low = topology.minY() + section * SECTION_HEIGHT;
+    int high = low + SECTION_HEIGHT - 1;
+    boolean air = true;
+    boolean solid = true;
+    for (int x = chunkX * Chunks.SIZE; x < (chunkX + 1) * Chunks.SIZE; x++) {
+      for (int z = chunkZ * Chunks.SIZE; z < (chunkZ + 1) * Chunks.SIZE; z++) {
+        int column = x * size + z;
+        air &= ground[column] < low;
+        // The top block may be a slab, which differs from the blocks below it.
+        solid &= ground[column] > high || (ground[column] == high && !slabTopped[column]);
+      }
+    }
+    if (air) {
+      return PathType.OPEN;
+    }
+    return solid ? (Cells.FULL_FLOOR << 8) | PathType.BLOCKED : NOT_UNIFORM;
+  }
+
+  /**
    * One randomly drawn {@code WalkNodeEvaluator} profile. Every field the wire carries is drawn, so
    * the mob class table is encoded and decoded with values that vary between runs, not constants.
    */
@@ -214,6 +253,10 @@ public final class SimWorld implements WorldSource {
       throw new IllegalArgumentException("chunk outside the world: " + chunkX + "," + chunkZ);
     }
     return chunkX * chunksPerSide + chunkZ;
+  }
+
+  private int sectionIndex(int chunkX, int chunkZ, int section) {
+    return chunkIndex(chunkX, chunkZ) * (topology.height() / SECTION_HEIGHT) + section;
   }
 
   private int index(int x, int y, int z) {

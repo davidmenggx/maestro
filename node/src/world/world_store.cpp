@@ -46,7 +46,7 @@ ChunkPtr decodeChunk(const fbs::ChunkSnapshot &Snapshot, int Height,
       const fbs::CellRun *Wire = Runs->Get(Offset + I);
       End += Wire->length();
       if (Wire->length() == 0 || End > Height ||
-          !isPerBlock(Wire->node_type())) {
+          !isPerBlock(Wire->node_type()) || Wire->floor() > MaxFloor) {
         Malformed = true;
         return nullptr;
       }
@@ -117,7 +117,7 @@ ApplyStatus WorldStore::assign(const fbs::RegionAssignment &Assignment) {
   constexpr int ShortMax = std::numeric_limits<std::int16_t>::max();
   if (Geo.Size <= 0 || Geo.Size % ChunkSize != 0 || Geo.Size > ShortMax ||
       Geo.Height <= 0 || Geo.MinY < ShortMin ||
-      Geo.MinY + Geo.Height - 1 > ShortMax)
+      std::int64_t{Geo.MinY} + Geo.Height - 1 > ShortMax)
     return ApplyStatus::Malformed;
 
   if (Assignment.resume()) {
@@ -173,7 +173,7 @@ ApplyStatus WorldStore::applyDelta(const fbs::WorldDelta &Delta) {
       const CellEdit Edit{Wire->pos().x(), Wire->pos().y(), Wire->pos().z(),
                           Cell{Wire->node_type(), Wire->floor()}};
       if (!Held->geometry().contains(Edit.X, Edit.Y, Edit.Z) ||
-          !isPerBlock(Edit.Value.Type))
+          !isPerBlock(Edit.Value.Type) || Edit.Value.Floor > MaxFloor)
         return ApplyStatus::Malformed;
       Edits.push_back(Edit);
     }

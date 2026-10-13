@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <thread>
 #include <vector>
@@ -46,6 +47,29 @@ void load(WorldStore &Store, const DenseWorld &World) {
                 ApplyStatus::Applied);
 }
 
+/// A chunk frame at chunk (0, 0), or with no position if `Positioned` is
+/// false, holding `Counts` and `Runs` as given.
+Frame chunkFrame(std::uint64_t Sequence,
+                 const std::vector<std::uint16_t> &Counts,
+                 const std::vector<fbs::CellRun> &Runs,
+                 bool Positioned = true) {
+  flatbuffers::FlatBufferBuilder Builder;
+  const auto CountsVec = Builder.CreateVector(Counts);
+  const auto RunsVec = Builder.CreateVectorOfStructs(Runs);
+  const fbs::Vec2i ChunkXz(0, 0);
+  fbs::ChunkSnapshotBuilder Snapshot(Builder);
+  Snapshot.add_sequence(Sequence);
+  if (Positioned)
+    Snapshot.add_chunk_xz(&ChunkXz);
+  Snapshot.add_run_counts(CountsVec);
+  Snapshot.add_runs(RunsVec);
+  const auto Body = Snapshot.Finish();
+  Builder.Finish(fbs::CreateWorldFrame(Builder, fbs::WorldMsg::ChunkSnapshot,
+                                       Body.Union()));
+  return {Builder.GetBufferPointer(),
+          Builder.GetBufferPointer() + Builder.GetSize()};
+}
+
 /// A chunk frame whose runs come from `Runs` for every column.
 Frame uniformChunk(std::uint64_t Sequence,
                    const std::vector<fbs::CellRun> &Runs,
@@ -55,20 +79,7 @@ Frame uniformChunk(std::uint64_t Sequence,
   std::vector<fbs::CellRun> All;
   for (int I = 0; I < Columns; ++I)
     All.insert(All.end(), Runs.begin(), Runs.end());
-  flatbuffers::FlatBufferBuilder Builder;
-  const auto CountsVec = Builder.CreateVector(Counts);
-  const auto RunsVec = Builder.CreateVectorOfStructs(All);
-  const fbs::Vec2i ChunkXz(0, 0);
-  fbs::ChunkSnapshotBuilder Snapshot(Builder);
-  Snapshot.add_sequence(Sequence);
-  Snapshot.add_chunk_xz(&ChunkXz);
-  Snapshot.add_run_counts(CountsVec);
-  Snapshot.add_runs(RunsVec);
-  const auto Body = Snapshot.Finish();
-  Builder.Finish(fbs::CreateWorldFrame(Builder, fbs::WorldMsg::ChunkSnapshot,
-                                       Body.Union()));
-  return {Builder.GetBufferPointer(),
-          Builder.GetBufferPointer() + Builder.GetSize()};
+  return chunkFrame(Sequence, Counts, All);
 }
 
 Frame assignmentOf(int Size, int MinY, int Height) {
@@ -89,6 +100,13 @@ void expectRefusedAndReset(const Frame &Bad, ApplyStatus Expected) {
   load(Store, flatWorld());
   EXPECT_EQ(Store.apply(Bad), Expected);
   EXPECT_EQ(Store.pin(), nullptr);
+}
+
+/// What a store holding `flatWorld` makes of `Frame`.
+ApplyStatus applyToLoaded(const Frame &Frame) {
+  WorldStore Store;
+  load(Store, flatWorld());
+  return Store.apply(Frame);
 }
 
 } // namespace
@@ -279,6 +297,10 @@ TEST(WorldStore, RejectsAnAreaThatDoesNotTileIntoChunks) {
   expectRefusedAndReset(assignmentOf(32, 0, 0), ApplyStatus::Malformed);
   // Wire positions are shorts, so the top of the area must fit in one.
   expectRefusedAndReset(assignmentOf(32, 32700, 100), ApplyStatus::Malformed);
+  // Even when the sum would overflow an `int`.
+  expectRefusedAndReset(
+      assignmentOf(32, std::numeric_limits<int>::max() - 10, 100),
+      ApplyStatus::Malformed);
 }
 
 TEST(WorldStore, RejectsChunksThatBreakTheContract) {
@@ -306,6 +328,32 @@ TEST(WorldStore, RejectsChunksThatBreakTheContract) {
       uniformChunk(
           5, {fbs::CellRun(4, static_cast<fbs::PathType>(200), 0), Air20}),
       ApplyStatus::Malformed);
+  // A collision height taller than the collision check can see.
+  expectRefusedAndReset(
+      uniformChunk(
+          5, {fbs::CellRun(4, fbs::PathType::BLOCKED, MaxFloor + 1), Air20}),
+      ApplyStatus::Malformed);
+
+  const std::vector<fbs::CellRun> Full = {Stone4, Air20};
+  std::vector<std::uint16_t> Counts(ColumnsPerChunk, 2);
+  std::vector<fbs::CellRun> Runs;
+  for (int I = 0; I < ColumnsPerChunk; ++I)
+    Runs.insert(Runs.end(), Full.begin(), Full.end());
+  ASSERT_EQ(applyToLoaded(chunkFrame(5, Counts, Runs)), ApplyStatus::Applied);
+  // No position.
+  expectRefusedAndReset(chunkFrame(5, Counts, Runs, false),
+                        ApplyStatus::Malformed);
+  // A cleared chunk that still carries runs.
+  expectRefusedAndReset(chunkFrame(5, {}, Runs), ApplyStatus::Malformed);
+  // A column with no runs, its runs left over for the others.
+  std::vector<std::uint16_t> Empty = Counts;
+  Empty[0] = 0;
+  Empty[1] = 4;
+  expectRefusedAndReset(chunkFrame(5, Empty, Runs), ApplyStatus::Malformed);
+  // Runs past the last column.
+  std::vector<fbs::CellRun> Extra = Runs;
+  Extra.push_back(Air20);
+  expectRefusedAndReset(chunkFrame(5, Counts, Extra), ApplyStatus::Malformed);
 
   WorldStore Store;
   load(Store, flatWorld());
@@ -328,6 +376,9 @@ TEST(WorldStore, RejectsADeltaThatBreaksTheContract) {
   const std::vector<CellEdit> Derived = {
       {1, 4, 1, Cell{PathType::WATER_BORDER, 0}}};
   expectRefusedAndReset(test::delta(5, Derived), ApplyStatus::Malformed);
+  const std::vector<CellEdit> TooTall = {
+      {1, 4, 1, Cell{PathType::FENCE, MaxFloor + 1}}};
+  expectRefusedAndReset(test::delta(5, TooTall), ApplyStatus::Malformed);
 }
 
 TEST(WorldStore, MatchesADenseModelUnderRandomFrames) {
@@ -442,16 +493,22 @@ TEST(WorldStore, ReadersSeeWholeFramesWhileFramesAreApplied) {
   WorldStore Store;
   load(Store, World);
 
+  // The changed cells are far above the floor the search walks on, so every
+  // version gives the same path, and a reader that saw a torn column would not.
+  search::Request Call;
+  Call.Start = {2, 4, 2};
+  Call.Target = {28, 4, 28};
+  Call.MaxPathLength = 40.0F;
+  Call.MaxVisitedNodes = 200;
+  search::Result Expected;
+  search::VanillaSearch().find(*Store.pin(), search::Profile{}, Call, Expected);
+  ASSERT_FALSE(Expected.Nodes.empty());
+
   std::atomic<bool> Done = false;
   std::atomic<int> Failures = 0;
   const auto Reader = [&] {
     search::VanillaSearch Search;
     search::Result Out;
-    search::Request Call;
-    Call.Start = {2, 4, 2};
-    Call.Target = {28, 4, 28};
-    Call.MaxPathLength = 40.0F;
-    Call.MaxVisitedNodes = 200;
     while (!Done.load()) {
       const auto Held = Store.pin();
       const Cell A = Held->at(1, 10, 1);
@@ -460,7 +517,7 @@ TEST(WorldStore, ReadersSeeWholeFramesWhileFramesAreApplied) {
       if (A != B || (Fresh ? A != Air : A != ValueAt(Held->sequence())))
         ++Failures;
       Search.find(*Held, search::Profile{}, Call, Out);
-      if (Out.Nodes.empty())
+      if (Out.Nodes != Expected.Nodes || Out.Reached != Expected.Reached)
         ++Failures;
     }
   };

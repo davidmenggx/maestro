@@ -54,11 +54,12 @@ struct Result {
 };
 
 /// Encodes `Path` as a finished `ResponseFrame` in `Builder`, which is cleared
-/// first so one builder can be reused. Every position must fit the wire's 16
-/// bits, which holds for any area the controller admitted.
-void encodeResponse(flatbuffers::FlatBufferBuilder &Builder,
-                    std::uint64_t RequestId, const Result &Path,
-                    std::uint64_t WorldSequence);
+/// first so one builder can be reused. Returns false, with nothing encoded, if
+/// a position does not fit the wire's 16 bits, which cannot happen for a
+/// request the controller admitted.
+[[nodiscard]] bool encodeResponse(flatbuffers::FlatBufferBuilder &Builder,
+                                  std::uint64_t RequestId, const Result &Path,
+                                  std::uint64_t WorldSequence);
 
 /// Encodes the answer to a request that names a profile this node has not
 /// received, as a finished `ResponseFrame` in `Builder`, which is cleared

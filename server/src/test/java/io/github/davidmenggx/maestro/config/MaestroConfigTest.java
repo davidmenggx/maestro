@@ -33,8 +33,7 @@ class MaestroConfigTest {
             {
               "mode": "stateless",
               "subMode": "stream",
-              "otlpEndpoint": "http://collector:4317",
-              "devMode": false
+              "otlpEndpoint": "http://collector:4317"
             }
             """);
 
@@ -43,14 +42,14 @@ class MaestroConfigTest {
     assertEquals(MaestroConfig.Mode.STATELESS, config.mode());
     assertEquals(MaestroConfig.SubMode.STREAM, config.subMode());
     assertEquals("http://collector:4317", config.otlpEndpoint());
-    assertEquals(false, config.devMode());
   }
 
   @Test
   void rejectsAFileItCannotUse(@TempDir Path dir) throws IOException {
     List<String> unusable =
         List.of(
-            // An unknown enum value, a missing field, a blank endpoint, and truncated JSON.
+            // An unknown enum value, a missing field, a blank endpoint, truncated JSON, an
+            // empty file, and a value that is not an object.
             """
             {"mode": "sharded", "subMode": "batch", "otlpEndpoint": "http://localhost:4317"}
             """,
@@ -60,12 +59,34 @@ class MaestroConfigTest {
             """
             {"mode": "stateful", "subMode": "batch", "otlpEndpoint": "  "}
             """,
-            "{\"mode\": ");
+            "{\"mode\": ",
+            "",
+            "[]");
 
     for (String json : unusable) {
       Path path = write(dir, json);
       assertThrows(IllegalStateException.class, () -> MaestroConfig.load(path), json);
     }
+  }
+
+  @Test
+  void rejectsAKeyThatIsNotASetting(@TempDir Path dir) throws IOException {
+    // A setting that was removed, or a misspelled one, must not be ignored silently.
+    Path path =
+        write(
+            dir,
+            """
+            {
+              "mode": "stateful",
+              "subMode": "batch",
+              "otlpEndpoint": "http://localhost:4317",
+              "devMode": true
+            }
+            """);
+
+    IllegalStateException thrown =
+        assertThrows(IllegalStateException.class, () -> MaestroConfig.load(path));
+    assertTrue(thrown.getMessage().contains("devMode"), thrown.getMessage());
   }
 
   private static Path write(Path dir, String json) throws IOException {

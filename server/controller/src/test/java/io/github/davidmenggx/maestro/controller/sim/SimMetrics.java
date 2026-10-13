@@ -54,14 +54,27 @@ public final class SimMetrics implements Metrics {
 
   /** Nearest-rank percentile. Returns {@code NaN} when nothing was recorded. */
   public double percentile(String name, double quantile, String... labels) {
-    List<Double> values = distributions.get(key(name, labels));
-    if (values == null || values.isEmpty()) {
+    return rank(distributions.getOrDefault(key(name, labels), List.of()), quantile, 0);
+  }
+
+  /**
+   * Nearest-rank percentile of {@code values} plus {@code misses} samples larger than any of them,
+   * which rank as {@code +Infinity}. A miss is a sample that never got a value, such as a request
+   * that was never answered. Returns {@code NaN} when there are no samples at all.
+   */
+  public static double percentileWithMisses(List<Double> values, double quantile, long misses) {
+    return rank(values, quantile, misses);
+  }
+
+  private static double rank(List<Double> values, double quantile, long misses) {
+    long total = values.size() + misses;
+    if (total == 0) {
       return Double.NaN;
     }
     List<Double> sorted = new ArrayList<>(values);
     Collections.sort(sorted);
-    int rank = (int) Math.ceil(quantile * sorted.size());
-    return sorted.get(Math.clamp(rank - 1, 0, sorted.size() - 1));
+    long rank = Math.clamp((long) Math.ceil(quantile * total), 1, total);
+    return rank > sorted.size() ? Double.POSITIVE_INFINITY : sorted.get((int) rank - 1);
   }
 
   public Map<String, Long> counters() {

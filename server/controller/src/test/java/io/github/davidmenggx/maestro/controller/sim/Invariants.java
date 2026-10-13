@@ -1,11 +1,11 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
-import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import maestro.fbs.PathType;
 
 /**
  * The properties a run must satisfy regardless of network behavior. Returns every violation, not
@@ -13,17 +13,9 @@ import java.util.List;
  */
 public final class Invariants {
 
-  /**
-   * First id for the temporary nodes that a fresh recomputation is loaded into. One is created per
-   * region, at {@code FRESH_NODE + region}, so this range must not overlap any id a fleet can
-   * assign. A run gives its nodes {@code 0 .. nodeCount - 1}, and no sampled grid has more than
-   * {@link Topology#maxNodeCount()} regions.
-   */
-  static final int FRESH_NODE = Topology.maxNodeCount();
-
   private Invariants() {}
 
-  public static List<String> check(SimRun run, double tickBudget) {
+  public static List<String> check(SimRun run) {
     List<String> violations = new ArrayList<>();
 
     // Every world frame the real node would refuse: a sequence gap, a malformed
@@ -33,8 +25,18 @@ public final class Invariants {
       violations.addAll(node.violations());
     }
 
-    // The controller's own bookkeeping, including the admission bound.
+    // A region's sequence never goes back, across replays and resnapshots alike.
+    violations.addAll(run.sim.streamViolations());
+
+    // The controller's own bookkeeping.
     violations.addAll(run.controller.selfCheck());
+
+    // Every frame fits its channel: a request frame one datagram, a world frame what
+    // the node reads.
+    long oversize = run.sim.metrics().total("transport.oversize");
+    if (oversize > 0) {
+      violations.add(oversize + " frames were larger than their channel carries");
+    }
 
     // The modeled network never creates a frame. A duplicate is sent once and
     // arrives twice, which is the only way received can exceed sent.
@@ -67,98 +69,118 @@ public final class Invariants {
       }
     }
 
-    // Every node that caught up with its stream holds the same state as a fresh
-    // snapshot, regardless of the resets, replays and resnapshots before it.
+    // Every node still alive has caught up with its stream: faults end before the
+    // quiet tail, which leaves time to reconnect and send a region again. Every node
+    // that caught up holds the same state as a fresh snapshot, regardless of the
+    // resets, replays and resnapshots before it.
     for (ModeledNode node : run.sim.nodes()) {
       if (caughtUp(run.controller, node)) {
         violations.addAll(checkAgainstFreshSnapshot(run, node));
+      } else if (run.sim.transport().alive(node.id())) {
+        violations.add(
+            node.id()
+                + " is alive but has not caught up: it holds sequence "
+                + node.lastSequence()
+                + " of "
+                + run.controller.heldSequence(node.id()));
       }
     }
 
     // Every request is answered or explicitly dropped, exactly once.
-    int accounted = run.out.answered() + run.out.dropped();
-    if (accounted != run.controller.requestsIssued()) {
-      violations.add(
-          "requests issued "
-              + run.controller.requestsIssued()
-              + " but accounted "
-              + accounted
-              + " (answered "
-              + run.out.answered()
-              + ", dropped "
-              + run.out.dropped()
-              + ")");
-    }
+    violations.addAll(run.out.ledgerViolations());
     if (run.controller.outstandingCount() != 0) {
       violations.add(
           run.controller.outstandingCount() + " requests still outstanding at end of run");
     }
 
-    // Latency SLO, measured only over requests that were answered.
-    double p99 = run.sim.metrics().percentile("path.latency.ticks", 0.99);
-    if (!Double.isNaN(p99) && p99 > tickBudget) {
-      violations.add("p99 latency " + p99 + " ticks exceeds budget " + tickBudget);
+    if (run.fitsCapacity()) {
+      violations.addAll(checkSlo(run.out.latencies(), run.out.sloMisses()));
     }
 
     return violations;
   }
 
   /**
-   * A node has caught up when it holds a region and its world stream reached the last sequence the
-   * controller produced for it. A node that is behind, partitioned or dead cannot be compared.
+   * The latency SLO: p99 below {@link SimRun#TICK_BUDGET}. A miss is a request rejected for queue
+   * depth or never answered in time. It ranks later than any answer, so a run cannot meet the SLO
+   * by refusing work.
+   */
+  static List<String> checkSlo(List<Double> latencies, long misses) {
+    double p99 = SimMetrics.percentileWithMisses(latencies, 0.99, misses);
+    if (!Double.isNaN(p99) && p99 >= SimRun.TICK_BUDGET) {
+      return List.of(
+          "p99 latency "
+              + p99
+              + " ticks is not below the SLO of "
+              + SimRun.TICK_BUDGET
+              + " ("
+              + misses
+              + " missed)");
+    }
+    return List.of();
+  }
+
+  /**
+   * A node has caught up when it holds its region and has applied everything the controller
+   * produced for it. A node that is behind, partitioned or dead cannot be compared.
    */
   public static boolean caughtUp(ProbeController controller, ModeledNode node) {
-    return node.hasState() && node.lastSequence() == controller.producedSequence(node.id());
+    return node.assigned() && node.lastSequence() == controller.heldSequence(node.id());
   }
 
   /**
    * State after a failover must equal a fresh full recomputation: a node rebuilt from a snapshot
-   * plus deltas must hold the same state as a node given a fresh snapshot of the same world.
+   * plus deltas must hold what the world holds now. The expected state is read from the world
+   * directly, not through the encoder, so an encoding bug cannot cancel out.
    */
   public static List<String> checkAgainstFreshSnapshot(SimRun run, ModeledNode node) {
     int region = run.regions.indexOf(node.id());
     if (region < 0) {
       return List.of(node.id() + " owns no region to compare");
     }
-    // Built outside the fleet, so comparing does not change `sim.nodes()`.
-    ModeledNode fresh =
-        new ModeledNode(run.sim, run.sim.transport(), NodeId.of(FRESH_NODE + region), 1);
-    fresh.receive(
-        Channel.WORLD,
-        ByteBuffer.wrap(
-            Frames.assignment(run.regions, region, false, run.controller.run, run.world)));
-    // A chunk the server does not hold is never sent, and is air on both sides.
-    int chunksPerSide = run.regions.topology().regionSize() / Chunks.SIZE;
-    int originChunkX = Chunks.of(run.regions.minX(region));
-    int originChunkZ = Chunks.of(run.regions.minZ(region));
-    long sequence = 0;
-    for (int dx = 0; dx < chunksPerSide; dx++) {
-      for (int dz = 0; dz < chunksPerSide; dz++) {
-        int chunkX = originChunkX + dx;
-        int chunkZ = originChunkZ + dz;
-        if (!run.world.chunkLoaded(chunkX, chunkZ)) {
-          continue;
-        }
-        fresh.receive(
-            Channel.WORLD,
-            ByteBuffer.wrap(
-                Frames.chunkSnapshot(
-                    ++sequence, dx, dz, Frames.readChunk(run.world, chunkX, chunkZ))));
-      }
+    if (!node.assigned()) {
+      return List.of("cannot compare state: " + node.id() + " holds no region");
     }
-
-    if (!node.hasState() || !fresh.hasState()) {
-      return List.of("cannot compare state: one node holds no region");
-    }
-    if (node.stateDigest() != fresh.stateDigest()) {
+    long expected = freshDigest(run, region);
+    if (node.stateDigest() != expected) {
       return List.of(
           "region state differs after failover: "
               + node.id()
               + " "
               + Long.toHexString(node.stateDigest())
               + " vs fresh "
-              + Long.toHexString(fresh.stateDigest()));
+              + Long.toHexString(expected));
     }
     return List.of();
+  }
+
+  /**
+   * The state a node assigned {@code region} holds once it has every frame: each block of a chunk
+   * the server holds, and air elsewhere, as vanilla reads a chunk it could not fetch.
+   */
+  private static long freshDigest(SimRun run, int region) {
+    SimWorld world = run.world;
+    int size = run.regions.topology().regionSize();
+    int height = world.height();
+    byte[] cells = new byte[size * size * height];
+    byte[] floors = new byte[cells.length];
+    Arrays.fill(cells, (byte) PathType.OPEN);
+    int originX = run.regions.minX(region);
+    int originZ = run.regions.minZ(region);
+    for (int x = 0; x < size; x++) {
+      for (int z = 0; z < size; z++) {
+        int worldX = originX + x;
+        int worldZ = originZ + z;
+        if (!world.chunkLoaded(Chunks.of(worldX), Chunks.of(worldZ))) {
+          continue;
+        }
+        for (int dy = 0; dy < height; dy++) {
+          int index = (x * size + z) * height + dy;
+          cells[index] = world.pathTypeAt(worldX, world.minY() + dy, worldZ);
+          floors[index] = (byte) world.floorAt(worldX, world.minY() + dy, worldZ);
+        }
+      }
+    }
+    return ModeledNode.digest(region, size, world.minY(), height, cells, floors);
   }
 }

@@ -63,15 +63,20 @@ class FuzzTest {
   @Test
   @Tag(SHALLOW)
   void invariantsHoldOnAReliableNetwork() {
+    int heldToTheSlo = 0;
     for (int i = 0; i < SimRun.runCount(); i++) {
       SimRun run = SimRun.of(SimRun.baseSeed() + i, FaultPlan.reliable(), TICKS).go();
       assertEquals(List.of(), run.violations(), run.describe());
+      heldToTheSlo += run.fitsCapacity() ? 1 : 0;
       assertTrue(run.out.answered() > 0, run.describe());
       assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
-      assertEquals(0, run.out.dropped(DropReason.SHED), run.describe());
+      assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
       // Nothing delays the control channel, so every profile arrives before a request names it.
       assertEquals(0, run.sim.metrics().total("path.profile.unknown"), run.describe());
     }
+    // The default fleet has spare capacity, so the SLO applies to nearly every run.
+    assertTrue(
+        heldToTheSlo > SimRun.runCount() / 2, "the SLO applied to " + heldToTheSlo + " runs");
   }
 
   @Test
@@ -133,10 +138,9 @@ class FuzzTest {
       scenarios.add(run.scenario);
       answered += run.out.answered();
 
-      // The fleet may be saturated at these settings, so check the bound that
-      // admission control promises. The 3-tick SLO is promised only for a fleet
-      // with spare capacity.
-      assertEquals(List.of(), run.violations(ProbeController.MAX_TICKS_LATE), run.describe());
+      // The SLO is checked only when the run fits the fleet's capacity and nothing
+      // in its fault plan can delay or lose a request.
+      assertEquals(List.of(), run.violations(), run.describe());
       assertEquals(
           run.sim.digest().value(), SimRun.fuzzed(seed).go().sim.digest().value(), run.describe());
     }
@@ -159,10 +163,15 @@ class FuzzTest {
     long linkResets = 0;
     long overtakenProfiles = 0;
     long encodeRetries = 0;
+    long resends = 0;
     long nodesCompared = 0;
     long deepWorlds = 0;
     long slowFleets = 0;
     long emptyServers = 0;
+    long heldToTheSlo = 0;
+    long heldAtTheEdge = 0;
+    long abandonedAnswers = 0;
+    long answersBehindTheirChunk = 0;
 
     // This checks what the sampler reaches, not any one run, so it uses its own size
     // regardless of `maestro.dst.runs`. A few seeds cannot reach every outcome, and a
@@ -170,9 +179,15 @@ class FuzzTest {
     int seeds = Math.clamp(SimRun.runCount(), MIN_COVERAGE_SEEDS, MAX_COVERAGE_SEEDS);
     for (int i = 0; i < seeds; i++) {
       SimRun run = SimRun.fuzzed(SimRun.baseSeed() + i).go();
-      assertEquals(List.of(), run.violations(ProbeController.MAX_TICKS_LATE), run.describe());
+      assertEquals(List.of(), run.violations(), run.describe());
 
       drops.addAll(run.out.drops().keySet());
+      boolean held = run.fitsCapacity() && run.out.answered() > 0;
+      heldToTheSlo += held ? 1 : 0;
+      heldAtTheEdge +=
+          held && run.faults.maxLatencySteps() == FaultPlan.MAX_ONE_WAY_LATENCY_STEPS ? 1 : 0;
+      abandonedAnswers += run.sim.metrics().total("path.response.abandoned");
+      answersBehindTheirChunk += run.sim.metrics().total("path.response.behind");
       regionSizes.add(run.topology.regionSize());
       gridWidths.add(run.topology.regionsPerSide());
       deepWorlds += run.topology.minY() < 0 ? 1 : 0;
@@ -180,17 +195,22 @@ class FuzzTest {
       emptyServers += run.scenario.counts().get(Count.PLAYERS) == 0 ? 1 : 0;
       resumes += run.sim.metrics().total("world.resume");
       resnapshots += run.sim.metrics().total("world.resnapshot");
-      duplicates += run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum();
+      duplicates += run.fleetCounter("transport.duplicated", Channel.REQUEST);
       linkResets += run.sim.metrics().total("transport.link.reset");
       overtakenProfiles += run.sim.metrics().total("path.profile.unknown");
       encodeRetries += run.sim.metrics().total("offload.retried");
+      resends += run.sim.metrics().total("path.resent");
       framesHeld += run.fleetCounter("transport.held", Channel.WORLD);
       for (ModeledNode node : run.sim.nodes()) {
         nodesCompared += Invariants.caughtUp(run.controller, node) ? 1 : 0;
       }
     }
 
-    assertEquals(EnumSet.allOf(DropReason.class), drops, "a drop reason the sweep never reaches");
+    // Nothing sheds load yet.
+    assertEquals(
+        EnumSet.complementOf(EnumSet.of(DropReason.SHED)),
+        drops,
+        "a drop reason the sweep never reaches");
     assertTrue(regionSizes.size() > 1, "region size never varied");
     assertTrue(gridWidths.size() > 1, "the region grid never changed shape");
     assertTrue(deepWorlds > 0, "no run put the world floor below zero");
@@ -198,11 +218,16 @@ class FuzzTest {
     assertTrue(emptyServers > 0, "no run ran without a player online");
     assertTrue(resumes > 0, "no node ever resumed its world stream");
     assertTrue(resnapshots > 0, "no node was ever resnapshotted");
-    assertTrue(duplicates > 0, "no request was ever delivered twice");
+    assertTrue(duplicates > 0, "the network never delivered a request frame twice");
     assertTrue(framesHeld > 0, "no world frame was ever held behind a partition");
     assertTrue(linkResets > 0, "no connection was ever reset with the process alive");
     assertTrue(overtakenProfiles > 0, "no request ever overtook the profile it names");
     assertTrue(encodeRetries > 0, "no failed encode was ever retried");
+    assertTrue(resends > 0, "no unanswered request was ever sent again");
     assertTrue(nodesCompared > 0, "no node ever caught up far enough to compare its state");
+    assertTrue(heldToTheSlo > 0, "no run that answered requests was held to the latency SLO");
+    assertTrue(heldAtTheEdge > 0, "no run at the latency edge was held to the SLO");
+    assertTrue(abandonedAnswers > 0, "no node ever answered a request after it was abandoned");
+    assertTrue(answersBehindTheirChunk > 0, "no node ever searched before its start chunk arrived");
   }
 }

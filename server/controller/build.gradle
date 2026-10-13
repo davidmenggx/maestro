@@ -54,11 +54,16 @@ def forwardSweepProperties = { Test task, String defaultRuns ->
   }
 }
 
+// Parity fixtures recorded from vanilla by `make capture`, shared with the node.
+def parityFixtures = file("${rootDir}/../fixtures/parity")
+
 test {
   useJUnitPlatform {
     excludeTags 'fuzz'
   }
   forwardSweepProperties(delegate, null)
+  systemProperty 'maestro.fixtures', parityFixtures.absolutePath
+  inputs.dir(parityFixtures).withPropertyName('parityFixtures').optional()
 }
 
 // One task per tier.

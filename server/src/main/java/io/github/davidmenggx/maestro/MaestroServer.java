@@ -21,40 +21,15 @@ public final class MaestroServer implements DedicatedServerModInitializer {
 
   private static final Logger LOG = LoggerFactory.getLogger(MOD_ID);
 
-  private static MaestroConfig config;
-  private static ServerClock clock;
-  private static PoolOffload offload;
-
-  public static MaestroConfig config() {
-    return initialized(config, "config");
-  }
-
-  /** Production half of the controller's time seam. */
-  public static ServerClock clock() {
-    return initialized(clock, "clock");
-  }
-
-  /** Production half of the controller's off-main-thread seam. */
-  public static PoolOffload offload() {
-    return initialized(offload, "offload");
-  }
-
-  private static <T> T initialized(T value, String name) {
-    if (value == null) {
-      throw new IllegalStateException("Maestro " + name + " read before initialization");
-    }
-    return value;
-  }
-
   @Override
   public void onInitializeServer() {
-    config =
+    MaestroConfig config =
         MaestroConfig.load(
             FabricLoader.getInstance().getConfigDir().resolve(MaestroConfig.FILE_NAME));
     Telemetry.init(config, VERSION);
 
-    clock = new ServerClock();
-    offload = new PoolOffload(OFFLOAD_THREADS);
+    ServerClock clock = new ServerClock();
+    PoolOffload offload = new PoolOffload(OFFLOAD_THREADS);
     // Offloaded results are published on the server thread at the tick boundary,
     // before the counter advances, so a completion counts toward the tick that
     // just ran, not the next one.
@@ -70,11 +45,10 @@ public final class MaestroServer implements DedicatedServerModInitializer {
         });
 
     LOG.info(
-        "Maestro {} initializing: mode={} subMode={} otlp={} dev={}",
+        "Maestro {} initializing: mode={} subMode={} otlp={}",
         VERSION,
         config.mode(),
         config.subMode(),
-        config.otlpEndpoint(),
-        config.devMode());
+        config.otlpEndpoint());
   }
 }

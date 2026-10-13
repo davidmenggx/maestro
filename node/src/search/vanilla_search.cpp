@@ -25,7 +25,7 @@ void VanillaSearch::find(const world::Area &Area, const Profile &Mob,
 
   int Count = 0;
   bool Reached = false;
-  // Vanilla scales the budget by a multiplier, which is 1 for every land mob.
+  // The wire carries the budget already multiplied.
   const int MaxVisitedNodes = Call.MaxVisitedNodes;
   while (!OpenSet.empty()) {
     if (++Count >= MaxVisitedNodes)

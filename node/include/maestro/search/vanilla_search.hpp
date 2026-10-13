@@ -17,6 +17,11 @@ class VanillaSearch final : public Search {
 public:
   VanillaSearch() : OpenSet(Evaluator.nodes()) {}
 
+  /// `OpenSet` points into `Evaluator`'s node table, so a copy or a move would
+  /// point into the original's.
+  VanillaSearch(const VanillaSearch &) = delete;
+  VanillaSearch &operator=(const VanillaSearch &) = delete;
+
   fbs::Pathfinder kind() const override { return fbs::Pathfinder::VANILLA; }
 
   void find(const world::Area &Area, const Profile &Mob, const Request &Call,

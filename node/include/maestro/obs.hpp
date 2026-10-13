@@ -10,7 +10,8 @@ namespace maestro::obs {
 /// nothing.
 void init(std::string_view ServiceName, std::string_view OtlpEndpoint);
 
-/// Flushes and shuts down the tracer provider.
+/// Flushes and shuts down the tracer provider. Spans started afterwards are
+/// dropped.
 void shutdown();
 
 } // namespace maestro::obs

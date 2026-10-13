@@ -10,7 +10,7 @@ import java.util.List;
  * The faults the network, the fleet and the controller's encode workers may inject into a run. The
  * drop and duplicate rates apply to unordered channels only, because an ordered channel cannot lose
  * a frame without breaking the connection. {@code offloadFailureRate} is the probability that an
- * offloaded encode throws.
+ * offloaded encode throws, until the run settles ({@link Simulation#settleFrom}).
  */
 public record FaultPlan(
     int minLatencySteps,
@@ -66,6 +66,12 @@ public record FaultPlan(
   static final double MAX_SAMPLED_RATE = 0.1;
 
   /**
+   * Share of sampled plans with nothing that can delay or lose a request, so a sweep has runs the
+   * latency SLO applies to. They still draw a latency range and a duplicate rate.
+   */
+  static final double CLEAN_CHANCE = 0.25;
+
+  /**
    * Faults drawn per run. Several may hit one node, so the sweep covers a failure during a
    * recovery. Raising this makes the average run harsher without widening the space, trading runs
    * that get far enough to answer requests for runs that spend their whole length recovering.
@@ -82,11 +88,29 @@ public record FaultPlan(
 
   /**
    * Widest sampled range. The worst case a draw can reach, {@code MAX_MIN_LATENCY_STEPS +
-   * MAX_LATENCY_SPAN_STEPS}, must stay well inside {@link Simulation#STEPS_PER_TICK}. Otherwise a
-   * request is always late and the latency invariant says nothing about the controller. At 1000
+   * MAX_LATENCY_SPAN_STEPS}, must not pass {@link #MAX_ONE_WAY_LATENCY_STEPS}. Otherwise a request
+   * is late whatever the controller does, and the latency invariant says nothing about it. At 1000
    * steps per tick, 400 is 20ms.
    */
   static final int MAX_LATENCY_SPAN_STEPS = 400;
+
+  /**
+   * Longest one-way latency at which a correct controller still meets the SLO. A batch leaves at a
+   * tick boundary, must arrive by the fleet's service step to be served in the next tick, and its
+   * answer must arrive before that tick ends, where the controller also checks what to resend.
+   */
+  static final int MAX_ONE_WAY_LATENCY_STEPS =
+      Simulation.STEPS_PER_TICK - Simulation.SERVICE_STEP - 2;
+
+  /**
+   * Share of clean plans whose latency sits just under {@link #MAX_ONE_WAY_LATENCY_STEPS} each way,
+   * so a round trip takes nearly a tick. Such a run has no slack: a tick added by the controller
+   * misses the SLO.
+   */
+  static final double EDGE_CHANCE = 0.5;
+
+  /** Width of the latency range in an edge plan. */
+  static final int EDGE_SPAN_STEPS = 100;
 
   /** No faults; latency is a few hundred microseconds. */
   public static FaultPlan reliable() {
@@ -94,19 +118,37 @@ public record FaultPlan(
   }
 
   /**
+   * Whether nothing in the plan can delay or lose a request: no loss, no failed encode, and no
+   * fleet fault. Latency and duplicates are allowed, because neither can.
+   */
+  public boolean clean() {
+    return dropRate == 0 && offloadFailureRate == 0 && faults.isEmpty();
+  }
+
+  /**
    * One draw from the full range of latency, loss, duplication and encode failure, plus up to
    * {@link #MAX_FAULTS} fleet faults that may overlap on one node or hit several nodes at once.
    * Each fault starts inside {@code activeTicks} and, unless the node is permanently lost, ends
-   * there too, so the quiet tail of the run can settle.
+   * there too, so the quiet tail of the run can settle. One plan in {@link #CLEAN_CHANCE} has only
+   * latency and duplication, and a share {@link #EDGE_CHANCE} of those has latency at the edge.
    */
   public static FaultPlan sample(Rng rng, int nodeCount, long activeTicks) {
     int minLatency = 1 + rng.nextInt(MAX_MIN_LATENCY_STEPS);
+    int maxLatency = minLatency + rng.nextInt(MAX_LATENCY_SPAN_STEPS);
+    double duplicateRate = rng.nextDouble() * MAX_SAMPLED_RATE;
+    if (rng.nextDouble() < CLEAN_CHANCE) {
+      if (rng.nextDouble() < EDGE_CHANCE) {
+        maxLatency = MAX_ONE_WAY_LATENCY_STEPS;
+        minLatency = maxLatency - rng.nextInt(EDGE_SPAN_STEPS);
+      }
+      return new FaultPlan(minLatency, maxLatency, 0.0, duplicateRate, 0.0, List.of());
+    }
     FaultPlan plan =
         new FaultPlan(
             minLatency,
-            minLatency + rng.nextInt(MAX_LATENCY_SPAN_STEPS),
+            maxLatency,
             rng.nextDouble() * MAX_SAMPLED_RATE,
-            rng.nextDouble() * MAX_SAMPLED_RATE,
+            duplicateRate,
             rng.nextDouble() * MAX_SAMPLED_RATE,
             List.of());
     if (nodeCount < 1 || activeTicks <= MAX_FAULT_SPAN_TICKS) {

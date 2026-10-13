@@ -492,7 +492,7 @@ TEST(Search, AResultEncodesAsAResponseFrame) {
   Path.Reached = true;
   Path.Cost = 1.5F;
   flatbuffers::FlatBufferBuilder Builder;
-  encodeResponse(Builder, 7, Path, 99);
+  ASSERT_TRUE(encodeResponse(Builder, 7, Path, 99));
 
   flatbuffers::Verifier Verifier(Builder.GetBufferPointer(), Builder.GetSize());
   ASSERT_TRUE(Verifier.VerifyBuffer<fbs::ResponseFrame>(nullptr));
@@ -509,6 +509,16 @@ TEST(Search, AResultEncodesAsAResponseFrame) {
   EXPECT_EQ(Response->nodes()->Get(1)->type(), PathType::WALKABLE_DOOR);
 }
 
+TEST(Search, APathPastTheWireRangeIsNotEncoded) {
+  // Truncating a position would send a path through the wrong blocks.
+  Result Path;
+  Path.Nodes = {{{0, 1, 0}, PathType::WALKABLE},
+                {{40000, 1, 0}, PathType::WALKABLE}};
+  flatbuffers::FlatBufferBuilder Builder;
+  EXPECT_FALSE(encodeResponse(Builder, 7, Path, 99));
+  EXPECT_EQ(Builder.GetSize(), 0u);
+}
+
 TEST(Search, OneBuilderServesEveryResponse) {
   // A reused builder is cleared each time, so the second frame holds only its
   // own response.
@@ -518,8 +528,8 @@ TEST(Search, OneBuilderServesEveryResponse) {
   Result Short;
   Short.Nodes = {{{-5, -64, 5}, PathType::OPEN}};
   flatbuffers::FlatBufferBuilder Builder;
-  encodeResponse(Builder, 1, Long, 3);
-  encodeResponse(Builder, 2, Short, 4);
+  ASSERT_TRUE(encodeResponse(Builder, 1, Long, 3));
+  ASSERT_TRUE(encodeResponse(Builder, 2, Short, 4));
 
   flatbuffers::Verifier Verifier(Builder.GetBufferPointer(), Builder.GetSize());
   ASSERT_TRUE(Verifier.VerifyBuffer<fbs::ResponseFrame>(nullptr));
@@ -534,7 +544,7 @@ TEST(Search, OneBuilderServesEveryResponse) {
   EXPECT_EQ(Response->nodes()->Get(0)->pos().z(), 5);
   EXPECT_EQ(Response->nodes()->Get(0)->type(), PathType::OPEN);
 
-  encodeResponse(Builder, 1, Long, 3);
+  ASSERT_TRUE(encodeResponse(Builder, 1, Long, 3));
   const auto *Again =
       flatbuffers::GetRoot<fbs::ResponseFrame>(Builder.GetBufferPointer())
           ->body_as_PathResponse();
@@ -547,7 +557,7 @@ TEST(Search, OneBuilderServesEveryResponse) {
 
 TEST(Search, AnUnknownProfileEncodesAsAResponseFrame) {
   flatbuffers::FlatBufferBuilder Builder;
-  encodeResponse(Builder, 1, Result{}, 3);
+  ASSERT_TRUE(encodeResponse(Builder, 1, Result{}, 3));
   encodeUnknownProfile(Builder, 8, 41);
 
   flatbuffers::Verifier Verifier(Builder.GetBufferPointer(), Builder.GetSize());
@@ -594,4 +604,13 @@ TEST(Profile, RefusesAMobClassThatBreaksTheContract) {
   EXPECT_FALSE(Decode(world::PathTypeCount, 0.0F, 1.8F, 0.6F).has_value());
   EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, NAN, 0.6F).has_value());
   EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 1.8F, -1.0F).has_value());
+  // A footprint past vanilla's largest would make every search crawl.
+  EXPECT_TRUE(Decode(world::PathTypeCount, Profile::WidthLimit,
+                     Profile::HeightLimit, Profile::UpStepLimit)
+                  .has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, 2000.0F, 1.8F, 0.6F).has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 300.0F, 0.6F).has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 1.8F, 20.0F).has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, INFINITY, 1.8F, 0.6F).has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 1.8F, NAN).has_value());
 }
