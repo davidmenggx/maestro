@@ -27,6 +27,7 @@ import maestro.fbs.ControlReplyMsg;
 import maestro.fbs.Heartbeat;
 import maestro.fbs.Hello;
 import maestro.fbs.MobClass;
+import maestro.fbs.PathCancel;
 import maestro.fbs.PathNode;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
@@ -54,7 +55,8 @@ import maestro.fbs.WorldMsg;
  * same way: nothing in the frame is applied, all held state is dropped, and the link is reset so
  * the node reconnects reporting nothing held. A correct controller never sends such a frame, so
  * each refusal is recorded in {@link #violations()} instead of thrown, and one run reports every
- * problem it hit.
+ * problem it hit. Like the real node, it forgets its profiles and requests with its link, and keeps
+ * its world state.
  */
 public final class ModeledNode {
 
@@ -74,16 +76,16 @@ public final class ModeledNode {
   private final Set<Long> queued = new LinkedHashSet<>();
 
   /**
-   * Answers kept for retries. A real node would limit this by tick, but a run is short enough not
-   * to.
+   * Answers kept for retries. The real node keeps them for a while, but a link is short enough here
+   * not to.
    */
   private final Map<Long, byte[]> answered = new LinkedHashMap<>();
 
+  /** Requests canceled before they were answered. A later copy of one is dropped. */
+  private final Set<Long> canceled = new LinkedHashSet<>();
+
   private final Set<Short> knownClasses = new LinkedHashSet<>();
   private final List<String> violations = new ArrayList<>();
-
-  /** Set by a fresh assignment: the next frame's sequence becomes the baseline. */
-  private boolean awaitingBaseline;
 
   private long run;
   private long regionId;
@@ -94,6 +96,7 @@ public final class ModeledNode {
   private byte[] floors = new byte[0];
   private long lastSequence;
   private long duplicateRequests;
+  private long canceledRequests;
   private int servicedTicks;
   private boolean backlogged;
 
@@ -124,6 +127,11 @@ public final class ModeledNode {
 
   public long duplicateRequests() {
     return duplicateRequests;
+  }
+
+  /** Requests a cancel removed from the queue before they were served. */
+  public long canceledRequests() {
+    return canceledRequests;
   }
 
   /** Whether a service ever ended with requests still queued, because more came than it serves. */
@@ -166,15 +174,23 @@ public final class ModeledNode {
 
   /** Process death, or a full reset after a refused frame: all held state is lost. */
   void kill() {
-    awaitingBaseline = false;
     run = 0;
     regionId = 0;
     cells = new byte[0];
     floors = new byte[0];
     lastSequence = 0;
+    linkDown();
+  }
+
+  /**
+   * The link is gone. Profiles and request ids belong to it, since the next link may come from
+   * another controller run, so they are forgotten. The world state stays, to be resumed.
+   */
+  void linkDown() {
     queue.clear();
     queued.clear();
     answered.clear();
+    canceled.clear();
     knownClasses.clear();
   }
 
@@ -251,6 +267,12 @@ public final class ModeledNode {
           enqueue(batch.requests(scratch, i));
         }
       }
+      case RequestMsg.PathCancel -> {
+        PathCancel cancel = (PathCancel) request.body(new PathCancel());
+        for (int i = 0; i < cancel.requestIdsLength(); i++) {
+          cancel(cancel.requestIds(i));
+        }
+      }
       default -> violations.add(id + ": unknown request body " + request.bodyType());
     }
   }
@@ -292,10 +314,11 @@ public final class ModeledNode {
 
     if (assignment.resume()) {
       // Resuming keeps the held state, so it must be the stream the controller
-      // is continuing.
+      // is continuing, at the position it holds.
       if (!hasState()
           || assignment.run() != run
           || assignment.regionId() != regionId
+          || assignment.sequence() != lastSequence
           || newSize != size
           || newBaseY != baseY
           || newHeight != height) {
@@ -314,28 +337,24 @@ public final class ModeledNode {
     cells = new byte[size * size * height];
     floors = new byte[cells.length];
     Arrays.fill(cells, (byte) PathType.OPEN);
-    lastSequence = 0;
-    awaitingBaseline = true;
+    // The controller's sequence continues across a reassignment, so the
+    // assignment says where it stands.
+    lastSequence = assignment.sequence();
     return null;
   }
 
-  /**
-   * The reason {@code sequence} cannot follow the held state, or null if it can. The first frame
-   * after a fresh assignment sets the baseline, because the controller's sequence continues across
-   * a reset and the node cannot know where it was.
-   */
+  /** The reason {@code sequence} cannot follow the held state, or null if it can. */
   private String admit(long sequence) {
     if (sequence == 0) {
       return "world frame with sequence 0";
     }
-    if (!awaitingBaseline && sequence != lastSequence + 1) {
+    if (sequence != lastSequence + 1) {
       return "world sequence gap, expected " + (lastSequence + 1) + " got " + sequence;
     }
     return null;
   }
 
   private void advance(long sequence) {
-    awaitingBaseline = false;
     lastSequence = sequence;
     sim.applied(id, regionId, sequence);
   }
@@ -494,6 +513,9 @@ public final class ModeledNode {
       transport.toController(id, Channel.REQUEST, ByteBuffer.wrap(prior));
       return;
     }
+    if (canceled.contains(requestId)) {
+      return;
+    }
     if (!queued.add(requestId)) {
       duplicateRequests++;
       return;
@@ -503,6 +525,21 @@ public final class ModeledNode {
             requestId,
             new Pos(request.start().x(), request.start().y(), request.start().z()),
             new Pos(request.target().x(), request.target().y(), request.target().z())));
+  }
+
+  /**
+   * Drops a request that has not been served, and any copy that arrives later. One already answered
+   * is left alone, as the real node leaves one it has started.
+   */
+  private void cancel(long requestId) {
+    if (answered.containsKey(requestId)) {
+      return;
+    }
+    canceled.add(requestId);
+    if (queued.remove(requestId)) {
+      queue.removeIf(pending -> pending.requestId() == requestId);
+      canceledRequests++;
+    }
   }
 
   private void heartbeat() {

@@ -126,10 +126,17 @@ public final class SimTransport implements Transport {
     }
   }
 
-  /** The connection breaks but the process lives, so the node keeps its state. */
+  /**
+   * The connection breaks but the process lives, so the node keeps its world state and forgets what
+   * belonged to the link.
+   */
   public void resetLink(NodeId node) {
     bumpEpoch(node);
     backlog.keySet().removeIf(link -> link.node().equals(node));
+    ModeledNode modeled = nodes.get(node);
+    if (modeled != null) {
+      modeled.linkDown();
+    }
     if (connected.remove(node)) {
       sim.metrics().count("transport.link.reset", 1, "node", node.toString());
       sim.schedule(latency(), "link-reset:" + node, () -> listener.onDisconnected(node));

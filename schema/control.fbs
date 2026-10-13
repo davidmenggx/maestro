@@ -15,6 +15,9 @@ namespace maestro.fbs;
 // area as air before any chunk arrives. If `resume` is set, the node keeps its
 // state and deltas continue after the `last_sequence` it reported. Otherwise
 // it drops its state and every resident chunk is sent again.
+// `sequence` is the stream position the assignment stands at, so the next
+// frame is `sequence + 1`. A fresh area is all air as of `sequence`, and a
+// resume repeats the `last_sequence` the node reported.
 table RegionAssignment {
   run:ulong;
   region_id:uint;
@@ -22,13 +25,14 @@ table RegionAssignment {
   min_y:int;
   height:ushort;
   resume:bool;
+  sequence:ulong;
 }
 
-// A node's first frame on a new connection: the search it runs, the region it
-// still holds, the controller run that region came from, and its last applied
-// world sequence. `last_sequence` is 0 if the node holds no state, as after a
-// restart. The controller replies with a `RegionAssignment` saying whether the
-// stream resumes.
+// A node's first frame on a new control connection: the search it runs, the
+// region it still holds, the controller run that region came from, and its
+// last applied world sequence. `last_sequence` is 0 if the node holds no
+// state, as after a restart. The controller replies with a `RegionAssignment`
+// saying whether the stream resumes.
 table Hello {
   run:ulong;
   region_id:uint;
@@ -49,7 +53,7 @@ table Heartbeat {
 union WorldMsg { WorldDelta, RegionAssignment, ChunkSnapshot }
 table WorldFrame { body:WorldMsg; }
 
-union RequestMsg { PathRequestBatch }
+union RequestMsg { PathRequestBatch, PathCancel }
 table RequestFrame { body:RequestMsg; }
 
 union ResponseMsg { PathResponse, UnknownProfile }

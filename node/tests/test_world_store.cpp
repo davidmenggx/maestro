@@ -135,8 +135,9 @@ TEST(WorldStore, AnAssignmentStartsTheAreaAsAir) {
 
 TEST(WorldStore, EveryVersionNamesTheStreamItBelongsTo) {
   WorldStore Store;
-  ASSERT_EQ(Store.apply(flatWorld().assignment(false, 9, 4)),
+  ASSERT_EQ(Store.apply(flatWorld().assignment(false, 9, 4, 2)),
             ApplyStatus::Applied);
+  EXPECT_EQ(sequenceOf(Store), 2u);
   ASSERT_EQ(Store.apply(flatWorld().chunk(3, 0, 0)), ApplyStatus::Applied);
   const CellEdit Edit{0, 10, 0, Water};
   ASSERT_EQ(Store.apply(test::delta(4, {&Edit, 1})), ApplyStatus::Applied);
@@ -170,17 +171,30 @@ TEST(WorldStore, IdenticalColumnsInAChunkShareOneCopy) {
   EXPECT_NE(Held->column(0, 2), Held->column(0, 1));
 }
 
-TEST(WorldStore, TheFirstFrameAfterAnAssignmentIsTheBaseline) {
+TEST(WorldStore, TheFirstFrameFollowsTheAssignment) {
   const DenseWorld World = flatWorld();
   WorldStore Store;
-  ASSERT_EQ(Store.apply(World.assignment()), ApplyStatus::Applied);
-  // The controller's sequence continues across a reassignment, so the first
-  // frame may have any sequence.
+  // The controller's sequence continues across a reassignment, so the
+  // assignment says where the stream stands.
+  ASSERT_EQ(Store.apply(World.assignment(false, 1, 0, 40)),
+            ApplyStatus::Applied);
   EXPECT_EQ(Store.apply(World.chunk(41, 0, 0)), ApplyStatus::Applied);
   EXPECT_EQ(sequenceOf(Store), 41u);
   EXPECT_EQ(Store.pin()->at(0, 0, 16), Air);
   EXPECT_EQ(Store.apply(World.chunk(42, 0, 1)), ApplyStatus::Applied);
   EXPECT_EQ(Store.pin()->at(0, 0, 16), Stone);
+}
+
+TEST(WorldStore, AFirstFrameThatSkipsPastTheAssignmentIsRefused) {
+  const DenseWorld World = flatWorld();
+  for (const std::uint64_t First : {40u, 42u}) {
+    WorldStore Store;
+    ASSERT_EQ(Store.apply(World.assignment(false, 1, 0, 40)),
+              ApplyStatus::Applied);
+    EXPECT_EQ(Store.apply(World.chunk(First, 0, 0)), ApplyStatus::OutOfSequence)
+        << First;
+    EXPECT_EQ(Store.pin(), nullptr);
+  }
 }
 
 TEST(WorldStore, AFrameOutOfSequenceDropsWhatIsHeld) {
@@ -235,9 +249,10 @@ TEST(WorldStore, AFreshAssignmentDropsWhatIsHeld) {
   const DenseWorld World = flatWorld();
   WorldStore Store;
   load(Store, World);
-  ASSERT_EQ(Store.apply(World.assignment(false, 2, 0)), ApplyStatus::Applied);
+  ASSERT_EQ(Store.apply(World.assignment(false, 2, 0, 89)),
+            ApplyStatus::Applied);
   EXPECT_EQ(Store.pin()->at(0, 0, 0), Air);
-  EXPECT_EQ(sequenceOf(Store), 0u);
+  EXPECT_EQ(sequenceOf(Store), 89u);
   EXPECT_EQ(Store.pin()->run(), 2u);
   EXPECT_EQ(Store.apply(World.chunk(90, 0, 0)), ApplyStatus::Applied);
 }
@@ -247,7 +262,7 @@ TEST(WorldStore, AResumeKeepsWhatIsHeldAndContinuesTheStream) {
   WorldStore Store;
   load(Store, World);
   const auto Held = Store.pin();
-  ASSERT_EQ(Store.apply(World.assignment(true)), ApplyStatus::Applied);
+  ASSERT_EQ(Store.apply(World.assignment(true, 1, 0, 4)), ApplyStatus::Applied);
   EXPECT_EQ(Store.pin(), Held);
   EXPECT_EQ(Store.apply(World.chunk(5, 0, 0)), ApplyStatus::Applied);
 }
@@ -264,12 +279,17 @@ TEST(WorldStore, AResumeOfAStreamNotHeldIsRefused) {
   EXPECT_EQ(NoFrames.apply(World.assignment(true)), ApplyStatus::CannotResume);
   EXPECT_EQ(NoFrames.pin(), nullptr);
 
-  // Another run, another region, and another shape.
-  expectRefusedAndReset(World.assignment(true, /*Run=*/2),
+  // Another run, another region, another shape, and another position in the
+  // stream. `load` leaves the store at sequence 4.
+  expectRefusedAndReset(World.assignment(true, /*Run=*/2, 0, 4),
                         ApplyStatus::CannotResume);
-  expectRefusedAndReset(World.assignment(true, 1, /*RegionId=*/3),
+  expectRefusedAndReset(World.assignment(true, 1, /*RegionId=*/3, 4),
                         ApplyStatus::CannotResume);
-  expectRefusedAndReset(DenseWorld(48, 0, 24).assignment(true),
+  expectRefusedAndReset(DenseWorld(48, 0, 24).assignment(true, 1, 0, 4),
+                        ApplyStatus::CannotResume);
+  expectRefusedAndReset(World.assignment(true, 1, 0, /*Sequence=*/3),
+                        ApplyStatus::CannotResume);
+  expectRefusedAndReset(World.assignment(true, 1, 0, /*Sequence=*/5),
                         ApplyStatus::CannotResume);
 }
 
@@ -279,7 +299,8 @@ TEST(WorldStore, AfterARejectionTheNextStreamStartsClean) {
   load(Store, World);
   ASSERT_EQ(Store.apply(World.chunk(9, 0, 0)), ApplyStatus::OutOfSequence);
   // What the controller sends a node whose `Hello` reported nothing held.
-  ASSERT_EQ(Store.apply(World.assignment(false, 1, 0)), ApplyStatus::Applied);
+  ASSERT_EQ(Store.apply(World.assignment(false, 1, 0, 19)),
+            ApplyStatus::Applied);
   ASSERT_EQ(Store.apply(World.chunk(20, 0, 0)), ApplyStatus::Applied);
   EXPECT_EQ(Store.pin()->at(0, 0, 0), Stone);
   EXPECT_EQ(Store.pin()->at(20, 0, 20), Air);

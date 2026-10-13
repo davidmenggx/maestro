@@ -14,12 +14,14 @@ import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import maestro.fbs.PathCancel;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
 import maestro.fbs.PathResponse;
 import maestro.fbs.PathType;
 import maestro.fbs.RegionAssignment;
 import maestro.fbs.RequestFrame;
+import maestro.fbs.RequestMsg;
 import maestro.fbs.ResponseFrame;
 import maestro.fbs.WorldFrame;
 import org.junit.jupiter.api.Test;
@@ -64,6 +66,27 @@ class FramesTest {
 
     batch.add(batch.get(0));
     assertThrows(IllegalArgumentException.class, () -> Frames.requests(batch, 0, 0));
+  }
+
+  @Test
+  void aFullFrameOfCancelsFitsOneDatagramAndCarriesEveryId() {
+    List<Long> ids = new ArrayList<>();
+    for (int i = 0; i < Frames.MAX_CANCELS_PER_FRAME; i++) {
+      ids.add(Long.MAX_VALUE - i);
+    }
+    byte[] bytes = Frames.cancels(ids);
+    assertTrue(bytes.length <= Frames.MAX_REQUEST_FRAME_BYTES, bytes.length + " bytes");
+
+    RequestFrame frame = RequestFrame.getRootAsRequestFrame(ByteBuffer.wrap(bytes));
+    assertEquals(RequestMsg.PathCancel, frame.bodyType());
+    PathCancel cancel = (PathCancel) frame.body(new PathCancel());
+    assertEquals(ids.size(), cancel.requestIdsLength());
+    for (int i = 0; i < ids.size(); i++) {
+      assertEquals(ids.get(i), cancel.requestIds(i));
+    }
+
+    ids.add(1L);
+    assertThrows(IllegalArgumentException.class, () -> Frames.cancels(ids));
   }
 
   @Test
@@ -154,20 +177,27 @@ class FramesTest {
   @Test
   void anAreaIsWholeChunks() {
     WorldSource world = flat();
-    ByteBuffer frame = ByteBuffer.wrap(Frames.assignment(3, 4, 96, false, world));
+    ByteBuffer frame = ByteBuffer.wrap(Frames.assignment(3, 4, 96, 17, false, world));
     RegionAssignment decoded =
         (RegionAssignment) WorldFrame.getRootAsWorldFrame(frame).body(new RegionAssignment());
+    assertEquals(3, decoded.run());
+    assertEquals(4, decoded.regionId());
     assertEquals(96, decoded.size());
+    assertEquals(17, decoded.sequence());
     assertEquals(world.minY(), decoded.minY());
     assertEquals(world.height(), decoded.height());
 
-    assertThrows(IllegalArgumentException.class, () -> Frames.assignment(3, 4, 40, false, world));
-    assertThrows(IllegalArgumentException.class, () -> Frames.assignment(3, 4, 0, false, world));
+    assertThrows(
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 40, 0, false, world));
+    assertThrows(IllegalArgumentException.class, () -> Frames.assignment(3, 4, 0, 0, false, world));
     // The node indexes the area with shorts.
     assertThrows(
-        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 32768, false, world));
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 32768, 0, false, world));
     WorldSource tooHigh = source(32000, 1024, (x, y, z) -> 0);
-    assertThrows(IllegalArgumentException.class, () -> Frames.assignment(3, 4, 96, false, tooHigh));
+    assertThrows(
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 96, 0, false, tooHigh));
+    assertThrows(
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 96, -1, false, world));
   }
 
   @Test

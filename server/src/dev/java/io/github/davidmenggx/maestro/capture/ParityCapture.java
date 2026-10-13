@@ -157,7 +157,7 @@ final class ParityCapture implements Searches.Observer {
     forgetCachedTypes();
 
     List<byte[]> worldFrames = new ArrayList<>();
-    worldFrames.add(Frames.assignment(RUN, REGION, SIZE, false, world));
+    worldFrames.add(Frames.assignment(RUN, REGION, SIZE, 0, false, world));
     long sequence = 0;
     int firstChunk = Chunks.of(ORIGIN);
     for (int dx = 0; dx < AREA_CHUNKS; dx++) {

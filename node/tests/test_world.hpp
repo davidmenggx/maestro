@@ -40,8 +40,10 @@ public:
   /// Sets every cell in the box between the two corners, inclusive.
   void fill(int X0, int Y0, int Z0, int X1, int Y1, int Z1, world::Cell Value);
 
+  /// An assignment standing at `Sequence` of the stream.
   Frame assignment(bool Resume = false, std::uint64_t Run = 1,
-                   std::uint32_t RegionId = 0) const;
+                   std::uint32_t RegionId = 0,
+                   std::uint64_t Sequence = 0) const;
 
   /// One chunk's state, run-length encoded as the controller encodes it.
   Frame chunk(std::uint64_t Sequence, int ChunkX, int ChunkZ) const;

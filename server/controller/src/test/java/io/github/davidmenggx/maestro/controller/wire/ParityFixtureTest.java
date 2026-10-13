@@ -65,6 +65,7 @@ class ParityFixtureTest {
       String name = fixture.file().getFileName().toString();
       RegionAssignment assignment = assignment(fixture.world().get(0));
       assertFalse(assignment.resume(), name);
+      assertEquals(0, assignment.sequence(), name + ": the stream starts at the assignment");
       assertEquals(0, assignment.size() % Chunks.SIZE, name);
       int chunksPerSide = assignment.size() / Chunks.SIZE;
       int chunks = chunksPerSide * chunksPerSide;
@@ -156,6 +157,7 @@ class ParityFixtureTest {
               assignment.run(),
               (int) assignment.regionId(),
               assignment.size(),
+              assignment.sequence(),
               assignment.resume(),
               new ChunkWorld(null, assignment.minY(), assignment.height())),
           name);

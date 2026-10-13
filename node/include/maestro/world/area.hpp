@@ -83,9 +83,10 @@ struct CellEdit {
 /// one version always describe the same stream position.
 class Area {
 public:
-  /// An all-air area, before the first frame of the stream named by
-  /// `ControllerRun` and `RegionId`.
-  Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId);
+  /// An all-air area at position `Sequence` of the stream named by
+  /// `ControllerRun` and `RegionId`, before any frame after it.
+  Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId,
+       std::uint64_t Sequence = 0);
 
   const Geometry &geometry() const { return Geo; }
 
@@ -94,7 +95,8 @@ public:
 
   std::uint32_t regionId() const { return RegionId; }
 
-  /// Sequence of the last world frame applied, or 0 before the first.
+  /// Sequence of the last world frame applied, or the assignment's before
+  /// the first.
   std::uint64_t sequence() const { return Sequence; }
 
   Cell at(int X, int Y, int Z) const;

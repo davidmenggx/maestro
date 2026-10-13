@@ -15,6 +15,8 @@ import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.wire.Frames;
 import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
+import io.github.davidmenggx.maestro.controller.world.MobClass;
+import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput;
@@ -176,7 +178,7 @@ class HarnessGuardsTest {
     node.receive(
         Channel.WORLD,
         ByteBuffer.wrap(
-            Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), true, world)));
+            Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), 0, true, world)));
 
     assertEquals(1, node.violations().size(), node.violations().toString());
     assertTrue(node.violations().get(0).contains("resume"), node.violations().toString());
@@ -192,7 +194,7 @@ class HarnessGuardsTest {
     node.receive(
         Channel.WORLD,
         ByteBuffer.wrap(
-            Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), false, world)));
+            Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), 0, false, world)));
     node.receive(
         Channel.WORLD,
         ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
@@ -231,13 +233,16 @@ class HarnessGuardsTest {
     refused.put("repeated sequence", Frames.chunkCleared(1, 0, 0));
     refused.put(
         "resume of another region",
-        Frames.assignment(RUN, 1, grid.topology().regionSize(), true, world));
+        Frames.assignment(RUN, 1, grid.topology().regionSize(), 1, true, world));
     refused.put(
         "resume of another run",
-        Frames.assignment(RUN + 1, 0, grid.topology().regionSize(), true, world));
+        Frames.assignment(RUN + 1, 0, grid.topology().regionSize(), 1, true, world));
     refused.put(
         "resume of another shape",
-        Frames.assignment(RUN, 0, grid.topology().regionSize(), true, taller));
+        Frames.assignment(RUN, 0, grid.topology().regionSize(), 1, true, taller));
+    refused.put(
+        "resume from another sequence",
+        Frames.assignment(RUN, 0, grid.topology().regionSize(), 2, true, world));
     refused.put("chunk a column short", chunkWithColumns(2, Chunks.SIZE * Chunks.SIZE - 1, 0));
     refused.put(
         "chunk run too tall", chunkWithColumns(2, Chunks.SIZE * Chunks.SIZE, Cells.MAX_FLOOR + 1));
@@ -248,7 +253,8 @@ class HarnessGuardsTest {
       ModeledNode node = sim.addNode(NodeId.of(0), 4);
       node.receive(
           Channel.WORLD,
-          ByteBuffer.wrap(Frames.assignment(RUN, 0, grid.topology().regionSize(), false, world)));
+          ByteBuffer.wrap(
+              Frames.assignment(RUN, 0, grid.topology().regionSize(), 0, false, world)));
       node.receive(
           Channel.WORLD,
           ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
@@ -263,6 +269,74 @@ class HarnessGuardsTest {
       assertEquals(0, node.lastSequence(), entry.getKey());
       assertTrue(before != node.stateDigest(), entry.getKey());
     }
+  }
+
+  @Test
+  void theFirstFrameMustFollowTheAssignment() {
+    Simulation sim = new Simulation(3L, FaultPlan.reliable());
+    ModeledNode node = sim.addNode(NodeId.of(0), 4);
+    SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
+    world.loadChunk(0, 0);
+    int size = ONE_REGION.topology().regionSize();
+
+    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 7, false, world)));
+    assertEquals(7, node.lastSequence());
+    node.receive(
+        Channel.WORLD,
+        ByteBuffer.wrap(Frames.chunkSnapshot(9, 0, 0, Frames.readChunk(world, 0, 0))));
+
+    assertEquals(1, node.violations().size(), node.violations().toString());
+    assertTrue(node.violations().get(0).contains("gap"), node.violations().toString());
+    assertFalse(node.assigned());
+  }
+
+  @Test
+  void aCanceledRequestIsNeverServed() {
+    Simulation sim = new Simulation(9L, FaultPlan.reliable());
+    ModeledNode node = sim.addNode(NodeId.of(0), 4);
+    node.receive(Channel.CONTROL, ByteBuffer.wrap(Frames.mobClass(profile((short) 3))));
+    node.receive(
+        Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(walk(5), walk(6)), 0, 0)));
+
+    // An unknown id is remembered, so its request is dropped when it arrives after the cancel.
+    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.cancels(List.of(5L, 9L))));
+    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(walk(9)), 0, 0)));
+    node.service();
+
+    assertEquals(List.of(), node.violations());
+    assertEquals(1, node.canceledRequests());
+    assertEquals(1, requestFramesSent(sim));
+    // An answered request is left alone, and a copy still gets its answer.
+    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.cancels(List.of(6L))));
+    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(walk(6)), 0, 0)));
+    assertEquals(2, requestFramesSent(sim));
+  }
+
+  @Test
+  void aLinkResetForgetsProfilesAndRequestsButKeepsTheWorld() {
+    Simulation sim = new Simulation(9L, FaultPlan.reliable());
+    NodeId id = NodeId.of(0);
+    ModeledNode node = sim.addNode(id, 4);
+    SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
+    world.loadChunk(0, 0);
+    node.receive(
+        Channel.WORLD,
+        ByteBuffer.wrap(
+            Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), 0, false, world)));
+    node.receive(
+        Channel.WORLD,
+        ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
+    node.receive(Channel.CONTROL, ByteBuffer.wrap(Frames.mobClass(profile((short) 3))));
+    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(walk(5)), 0, 0)));
+    long digest = node.stateDigest();
+
+    sim.transport().resetLink(id);
+    node.service();
+
+    assertEquals(0, node.knownClassCount());
+    assertEquals(0, requestFramesSent(sim), "a request from the old link was served");
+    assertTrue(node.hasState());
+    assertEquals(digest, node.stateDigest());
   }
 
   @Test
@@ -365,16 +439,17 @@ class HarnessGuardsTest {
     ModeledNode node = sim.addNode(NodeId.of(0), 4);
     SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
     world.loadChunk(0, 0);
-    byte[] assignment = Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), false, world);
+    int size = ONE_REGION.topology().regionSize();
 
-    node.receive(Channel.WORLD, ByteBuffer.wrap(assignment));
+    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 4, false, world)));
     node.receive(
         Channel.WORLD,
         ByteBuffer.wrap(Frames.chunkSnapshot(5, 0, 0, Frames.readChunk(world, 0, 0))));
     assertEquals(List.of(), sim.streamViolations());
 
-    // A fresh snapshot starts a new baseline, which the node cannot check against the old one.
-    node.receive(Channel.WORLD, ByteBuffer.wrap(assignment));
+    // A fresh assignment may start the stream anywhere, so the node cannot check it against the
+    // old one.
+    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 2, false, world)));
     node.receive(
         Channel.WORLD,
         ByteBuffer.wrap(Frames.chunkSnapshot(3, 0, 0, Frames.readChunk(world, 0, 0))));
@@ -697,6 +772,26 @@ class HarnessGuardsTest {
     int delta = WorldDelta.createWorldDelta(builder, sequence, cells);
     builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.WorldDelta, delta));
     return builder.sizedByteArray();
+  }
+
+  private static MobClass profile(short classId) {
+    return new MobClass(
+        classId,
+        new MobClass.Shape(0.6f, 1.8f, 0.6f),
+        new MobClass.Abilities(true, false, false, false),
+        new float[PathTypes.count()]);
+  }
+
+  /** A request of class 3 from {@link #ORIGIN} to {@link #FAR}. */
+  private static Frames.Request walk(long requestId) {
+    return new Frames.Request(
+        requestId, (short) 3, ORIGIN, FAR, new WorldEvent.Search(0, 16f, 256, 3));
+  }
+
+  /** Frames the node has sent on the request channel: answers and refusals. */
+  private static long requestFramesSent(Simulation sim) {
+    return sim.metrics()
+        .counter("transport.sent", "node", NodeId.of(0).toString(), "channel", "REQUEST");
   }
 
   private static Scenario scenario(int capacity, int slowNodes) {

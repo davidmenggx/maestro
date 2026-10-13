@@ -26,6 +26,7 @@ endif()
 # --- Core library shared by the node binary and the tests --------------------
 add_library(maestro_core
   src/net/framing.cpp
+  src/net/server.cpp
   src/obs.cpp
   src/search/binary_heap.cpp
   src/search/path_types.cpp
@@ -33,6 +34,8 @@ add_library(maestro_core
   src/search/search.cpp
   src/search/vanilla_search.cpp
   src/search/walk_node_evaluator.cpp
+  src/serve/request_queue.cpp
+  src/serve/workers.cpp
   src/world/area.cpp
   src/world/world_store.cpp
 )
@@ -85,7 +88,9 @@ if(MAESTRO_BUILD_TESTS)
     tests/test_obs.cpp
     tests/test_parity.cpp
     tests/test_path_types.cpp
+    tests/test_request_queue.cpp
     tests/test_schema.cpp
+    tests/test_server.cpp
     tests/test_vanilla_search.cpp
     tests/test_world.cpp
     tests/test_world_store.cpp

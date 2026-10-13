@@ -241,6 +241,19 @@ class SimulationTest {
   }
 
   @Test
+  void aSaturatedNodeDropsTheRequestsItsMobsNoLongerWant() {
+    SimRun run = SimRun.of(SimRun.baseSeed(), FaultPlan.reliable(), TICKS, Scenario.SATURATED).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    // Mobs ask again while their older requests still wait behind a backlog, so the
+    // cancels reach requests the node has not started.
+    assertTrue(run.sim.metrics().total("path.cancels") > 0, run.describe());
+    assertTrue(
+        run.sim.nodes().stream().mapToLong(ModeledNode::canceledRequests).sum() > 0,
+        run.describe());
+  }
+
+  @Test
   void nodeDeathDropsItsRequestsAndTheRunStaysDeterministic() {
     NodeId victim = NodeId.of(0);
     FaultPlan plan =

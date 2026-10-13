@@ -172,6 +172,7 @@ class FuzzTest {
     long heldAtTheEdge = 0;
     long abandonedAnswers = 0;
     long answersBehindTheirChunk = 0;
+    long canceledInQueue = 0;
 
     // This checks what the sampler reaches, not any one run, so it uses its own size
     // regardless of `maestro.dst.runs`. A few seeds cannot reach every outcome, and a
@@ -203,6 +204,7 @@ class FuzzTest {
       framesHeld += run.fleetCounter("transport.held", Channel.WORLD);
       for (ModeledNode node : run.sim.nodes()) {
         nodesCompared += Invariants.caughtUp(run.controller, node) ? 1 : 0;
+        canceledInQueue += node.canceledRequests();
       }
     }
 
@@ -229,5 +231,6 @@ class FuzzTest {
     assertTrue(heldAtTheEdge > 0, "no run at the latency edge was held to the SLO");
     assertTrue(abandonedAnswers > 0, "no node ever answered a request after it was abandoned");
     assertTrue(answersBehindTheirChunk > 0, "no node ever searched before its start chunk arrived");
+    assertTrue(canceledInQueue > 0, "no cancel ever reached a request still waiting on its node");
   }
 }

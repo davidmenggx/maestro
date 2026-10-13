@@ -48,11 +48,12 @@ void DenseWorld::fill(int X0, int Y0, int Z0, int X1, int Y1, int Z1,
 }
 
 Frame DenseWorld::assignment(bool Resume, std::uint64_t Run,
-                             std::uint32_t RegionId) const {
+                             std::uint32_t RegionId,
+                             std::uint64_t Sequence) const {
   flatbuffers::FlatBufferBuilder Builder;
   const auto Body = fbs::CreateRegionAssignment(
       Builder, Run, RegionId, static_cast<std::uint16_t>(Geo.Size), Geo.MinY,
-      static_cast<std::uint16_t>(Geo.Height), Resume);
+      static_cast<std::uint16_t>(Geo.Height), Resume, Sequence);
   Builder.Finish(fbs::CreateWorldFrame(Builder, fbs::WorldMsg::RegionAssignment,
                                        Body.Union()));
   return finish(Builder);

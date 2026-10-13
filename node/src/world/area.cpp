@@ -49,9 +49,10 @@ std::shared_ptr<const Column> Column::with(int Offset, Cell Value) const {
   return std::make_shared<const Column>(std::move(Out));
 }
 
-Area::Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId)
+Area::Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId,
+           std::uint64_t Sequence)
     : Geo(Geo), ControllerRun(ControllerRun), RegionId(RegionId),
-      Rows(static_cast<std::size_t>(Geo.chunksPerSide())),
+      Sequence(Sequence), Rows(static_cast<std::size_t>(Geo.chunksPerSide())),
       AirColumn(std::make_shared<const Column>(
           std::vector<Run>{Run{static_cast<std::uint16_t>(Geo.Height), Air}})) {
 }

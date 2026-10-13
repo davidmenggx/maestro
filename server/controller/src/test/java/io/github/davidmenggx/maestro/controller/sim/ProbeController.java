@@ -38,8 +38,9 @@ import maestro.fbs.UnknownProfile;
 /**
  * Minimal controller used to check that the seams can carry a real workload. It assigns regions,
  * snapshots them, streams deltas in sequence, batches requests per tick into datagram-sized frames,
- * resends the ones left unanswered and applies responses. Sharding, failover and the failure
- * detector are absent, because that is the logic this harness is meant to test.
+ * resends the ones left unanswered, cancels the ones no longer wanted and applies responses.
+ * Sharding, failover and the failure detector are absent, because that is the logic this harness is
+ * meant to test.
  *
  * <p>Encoding is offloaded and can finish out of order, but the world stream must leave in sequence
  * order, so finished frames wait in an outbox until the earlier gap is filled. A failed encode is
@@ -159,6 +160,9 @@ public final class ProbeController implements WorldInput, Transport.Listener {
 
     private List<Frames.Request> requests = new ArrayList<>();
 
+    /** Requests abandoned since the last flush whose copies may still wait on the node. */
+    private List<Long> cancels = new ArrayList<>();
+
     /** Profiles this node has been sent on the current connection. */
     private final Set<Short> registeredClasses = new LinkedHashSet<>();
 
@@ -166,6 +170,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     private void resetConnection() {
       reportedDepth = 0;
       requests.clear();
+      cancels.clear();
       registeredClasses.clear();
     }
   }
@@ -265,16 +270,12 @@ public final class ProbeController implements WorldInput, Transport.Listener {
 
   /**
    * The world sequence a node reports once it has applied everything produced for its region: the
-   * last one produced, or 0 if nothing was produced since its snapshot began, which leaves the node
-   * holding its assignment alone.
+   * last one produced. An assignment stands at the stream's position, so this holds for a node that
+   * holds its assignment alone too.
    */
   public long heldSequence(NodeId node) {
     int region = regions.indexOf(node);
-    if (region < 0) {
-      return 0;
-    }
-    RegionStream stream = streams.get(region);
-    return stream.lastSequence >= stream.logBase ? stream.lastSequence : 0;
+    return region < 0 ? 0 : streams.get(region).lastSequence;
   }
 
   /**
@@ -521,10 +522,13 @@ public final class ProbeController implements WorldInput, Transport.Listener {
 
     // Sent on the world channel, not the control channel. The assignment must
     // arrive before the frames it applies to, and only one channel orders them.
+    // It says where the stream stands, so the node refuses a first frame that
+    // does not follow it.
+    long sequence = resume ? nodeSequence : stream.lastSequence;
     send(
         node,
         Channel.WORLD,
-        Frames.assignment(run, region, regions.topology().regionSize(), resume, world));
+        Frames.assignment(run, region, regions.topology().regionSize(), sequence, resume, world));
     drainOutbox(region);
   }
 
@@ -741,8 +745,9 @@ public final class ProbeController implements WorldInput, Transport.Listener {
 
   /**
    * Reports a live request dropped because its mob no longer wants it. A copy may already be on its
-   * way to the node or in the node's queue, so the request keeps counting against the node until
-   * its answer is due or arrives. One that never left the controller is simply removed.
+   * way to the node or in the node's queue, so the node is told to drop it, and the request keeps
+   * counting against the node until its answer is due or arrives, since the cancel may be lost or
+   * come too late. One that never left the controller is simply removed.
    */
   private void abandon(long requestId, DropReason reason) {
     Outstanding request = outstanding.get(requestId);
@@ -750,9 +755,15 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       return;
     }
     requestByMob.remove(request.mobId());
+    NodeState state = state(request.node());
     // A copy waiting for the next batch never leaves. Any earlier copy was overdue, or there
-    // would be no resend, so the node is taken to be done with it.
-    if (state(request.node()).requests.remove(request.request())) {
+    // would be no resend, so the node is taken to be done with it, though a slow node may still
+    // hold it.
+    boolean waiting = state.requests.remove(request.request());
+    if (!waiting || request.resends() > 0) {
+      state.cancels.add(requestId);
+    }
+    if (waiting) {
       release(requestId, request);
     } else {
       outstanding.put(requestId, request.abandon());
@@ -891,17 +902,19 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   }
 
   /**
-   * Each node's requests for the tick, in frames that each fit one datagram. They leave together,
-   * so they may arrive in any order, and each request may wait behind the whole batch.
+   * Each node's requests and cancels for the tick, in frames that each fit one datagram. They leave
+   * together, so they may arrive in any order, and each request may wait behind the whole batch.
    */
   private void flushRequests() {
     for (Map.Entry<NodeId, NodeState> entry : nodes.entrySet()) {
       NodeState state = entry.getValue();
-      if (state.requests.isEmpty()) {
+      if (state.requests.isEmpty() && state.cancels.isEmpty()) {
         continue;
       }
       List<Frames.Request> batch = state.requests;
+      List<Long> cancels = state.cancels;
       state.requests = new ArrayList<>();
+      state.cancels = new ArrayList<>();
       NodeId node = entry.getKey();
       int region = regions.indexOf(node);
       int originX = regions.minX(region);
@@ -909,7 +922,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       long connection = state.connection;
       encode(
           "requests",
-          () -> requestFrames(batch, originX, originZ),
+          () -> requestFrames(batch, cancels, originX, originZ),
           frames -> {
             // A retried encode can finish after the connection it was built for ended. Its
             // requests were dropped with that connection, and the profiles they name may not
@@ -921,7 +934,18 @@ public final class ProbeController implements WorldInput, Transport.Listener {
             for (byte[] frame : frames) {
               send(node, Channel.REQUEST, frame);
             }
-            env.metrics().count("requests.frames", frames.size(), "node", node.toString());
+            if (!cancels.isEmpty()) {
+              env.metrics().count("path.cancels", cancels.size(), "node", node.toString());
+            }
+            if (batch.isEmpty()) {
+              return;
+            }
+            env.metrics()
+                .count(
+                    "requests.frames",
+                    frameCount(batch.size(), Frames.MAX_REQUESTS_PER_FRAME),
+                    "node",
+                    node.toString());
             // The node serves requests in the order they arrive, after the ones it is still
             // expected to hold. Timing starts when the batch leaves, not when it is built.
             long tick = env.clock().tick();
@@ -934,14 +958,26 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     }
   }
 
-  /** {@code batch} in frames of at most {@link Frames#MAX_REQUESTS_PER_FRAME}. */
-  private static List<byte[]> requestFrames(List<Frames.Request> batch, int originX, int originZ) {
+  /**
+   * {@code batch} in frames of at most {@link Frames#MAX_REQUESTS_PER_FRAME}, then {@code cancels}
+   * in frames of at most {@link Frames#MAX_CANCELS_PER_FRAME}.
+   */
+  private static List<byte[]> requestFrames(
+      List<Frames.Request> batch, List<Long> cancels, int originX, int originZ) {
     List<byte[]> frames = new ArrayList<>();
     for (int from = 0; from < batch.size(); from += Frames.MAX_REQUESTS_PER_FRAME) {
       int to = Math.min(batch.size(), from + Frames.MAX_REQUESTS_PER_FRAME);
       frames.add(Frames.requests(batch.subList(from, to), originX, originZ));
     }
+    for (int from = 0; from < cancels.size(); from += Frames.MAX_CANCELS_PER_FRAME) {
+      int to = Math.min(cancels.size(), from + Frames.MAX_CANCELS_PER_FRAME);
+      frames.add(Frames.cancels(cancels.subList(from, to)));
+    }
     return frames;
+  }
+
+  private static int frameCount(int items, int perFrame) {
+    return (items + perFrame - 1) / perFrame;
   }
 
   /**

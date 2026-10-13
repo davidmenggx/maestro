@@ -77,10 +77,8 @@ ChunkPtr decodeChunk(const fbs::ChunkSnapshot &Snapshot, int Height,
 
 ApplyStatus WorldStore::apply(std::span<const std::uint8_t> Frame) {
   const ApplyStatus Status = applyFrame(Frame);
-  if (Status != ApplyStatus::Applied) {
+  if (Status != ApplyStatus::Applied)
     Current.store(nullptr);
-    AwaitingBaseline = false;
-  }
   return Status;
 }
 
@@ -124,15 +122,16 @@ ApplyStatus WorldStore::assign(const fbs::RegionAssignment &Assignment) {
     // Resuming keeps the held state, so it must be the stream the controller
     // is continuing.
     const auto Held = pin();
-    if (!Held || Held->sequence() == 0 || Held->run() != Assignment.run() ||
+    if (!Held || Held->sequence() == 0 ||
+        Held->sequence() != Assignment.sequence() ||
+        Held->run() != Assignment.run() ||
         Held->regionId() != Assignment.region_id() || Held->geometry() != Geo)
       return ApplyStatus::CannotResume;
     return ApplyStatus::Applied;
   }
 
-  AwaitingBaseline = true;
-  Current.store(std::make_shared<const Area>(Geo, Assignment.run(),
-                                             Assignment.region_id()));
+  Current.store(std::make_shared<const Area>(
+      Geo, Assignment.run(), Assignment.region_id(), Assignment.sequence()));
   return ApplyStatus::Applied;
 }
 
@@ -155,7 +154,6 @@ ApplyStatus WorldStore::applyChunk(const fbs::ChunkSnapshot &Snapshot) {
   if (const ApplyStatus Status = admit(Snapshot.sequence());
       Status != ApplyStatus::Applied)
     return Status;
-  AwaitingBaseline = false;
   Current.store(Held->withChunk(Position->x(), Position->z(),
                                 std::move(Content), Snapshot.sequence()));
   return ApplyStatus::Applied;
@@ -182,7 +180,6 @@ ApplyStatus WorldStore::applyDelta(const fbs::WorldDelta &Delta) {
   if (const ApplyStatus Status = admit(Delta.sequence());
       Status != ApplyStatus::Applied)
     return Status;
-  AwaitingBaseline = false;
   Current.store(Held->withCells(Edits, Delta.sequence()));
   return ApplyStatus::Applied;
 }
@@ -190,8 +187,6 @@ ApplyStatus WorldStore::applyDelta(const fbs::WorldDelta &Delta) {
 ApplyStatus WorldStore::admit(std::uint64_t Sequence) const {
   if (Sequence == 0)
     return ApplyStatus::Malformed;
-  if (AwaitingBaseline)
-    return ApplyStatus::Applied;
   return Sequence == pin()->sequence() + 1 ? ApplyStatus::Applied
                                            : ApplyStatus::OutOfSequence;
 }

@@ -56,8 +56,6 @@ private:
   ApplyStatus admit(std::uint64_t Sequence) const;
 
   std::atomic<std::shared_ptr<const Area>> Current;
-  /// Set by a fresh assignment: the next frame's sequence becomes the baseline.
-  bool AwaitingBaseline = false;
 };
 
 } // namespace maestro::world

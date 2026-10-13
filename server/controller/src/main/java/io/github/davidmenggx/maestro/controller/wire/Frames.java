@@ -16,6 +16,7 @@ import maestro.fbs.CellRun;
 import maestro.fbs.ChunkSnapshot;
 import maestro.fbs.ControlFrame;
 import maestro.fbs.ControlMsg;
+import maestro.fbs.PathCancel;
 import maestro.fbs.PathNode;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
@@ -68,6 +69,9 @@ public final class Frames {
    * #MAX_REQUEST_FRAME_BYTES}.
    */
   public static final int MAX_REQUESTS_PER_FRAME = 24;
+
+  /** Request ids in one cancel frame. A full frame fits {@link #MAX_REQUEST_FRAME_BYTES}. */
+  public static final int MAX_CANCELS_PER_FRAME = 128;
 
   /** Block changes in one delta. A delta of this many is 512 KiB, well below the frame limit. */
   public static final int MAX_CELLS_PER_DELTA = 1 << 16;
@@ -245,11 +249,31 @@ public final class Frames {
   }
 
   /**
+   * Requests the controller no longer wants, at most {@link #MAX_CANCELS_PER_FRAME}, so the frame
+   * fits one datagram.
+   */
+  public static byte[] cancels(List<Long> requestIds) {
+    if (requestIds.size() > MAX_CANCELS_PER_FRAME) {
+      throw new IllegalArgumentException("a cancel frame carries at most " + MAX_CANCELS_PER_FRAME);
+    }
+    FlatBufferBuilder builder = builder();
+    long[] ids = new long[requestIds.size()];
+    for (int i = 0; i < ids.length; i++) {
+      ids[i] = requestIds.get(i);
+    }
+    int vector = PathCancel.createRequestIdsVector(builder, ids);
+    int cancel = PathCancel.createPathCancel(builder, vector);
+    builder.finish(RequestFrame.createRequestFrame(builder, RequestMsg.PathCancel, cancel));
+    return builder.sizedByteArray();
+  }
+
+  /**
    * {@code size} is the side of the square area, a multiple of {@link Chunks#SIZE}. Every position
-   * in the area must fit the wire's 16 bits, as the node requires.
+   * in the area must fit the wire's 16 bits, as the node requires. {@code sequence} is where the
+   * region's stream stands, so its next frame is {@code sequence + 1}.
    */
   public static byte[] assignment(
-      long run, int regionId, int size, boolean resume, WorldSource world) {
+      long run, int regionId, int size, long sequence, boolean resume, WorldSource world) {
     if (size <= 0 || size % Chunks.SIZE != 0 || size > Short.MAX_VALUE) {
       throw new IllegalArgumentException("an area is whole chunks a short can index: " + size);
     }
@@ -258,9 +282,13 @@ public final class Frames {
     if (height <= 0 || !fitsInt16(minY) || !fitsInt16((long) minY + height - 1)) {
       throw new IllegalArgumentException("a column a short cannot index: " + minY + " + " + height);
     }
+    if (sequence < 0) {
+      throw new IllegalArgumentException("a stream position is never negative: " + sequence);
+    }
     FlatBufferBuilder builder = builder();
     RegionAssignment.startRegionAssignment(builder);
     RegionAssignment.addRun(builder, run);
+    RegionAssignment.addSequence(builder, sequence);
     RegionAssignment.addRegionId(builder, regionId);
     RegionAssignment.addSize(builder, size);
     RegionAssignment.addMinY(builder, minY);

@@ -49,6 +49,14 @@ table PathRequestBatch {
   requests:[PathRequest];
 }
 
+// Requests the controller no longer wants, because their mobs asked again,
+// stopped or left. Best effort, like every request frame. A node drops such a
+// request if it has not started it, and ignores a copy that arrives later. A
+// dropped request is never answered.
+table PathCancel {
+  request_ids:[ulong];
+}
+
 // One node of a Minecraft `Path`. `type` is the resolved `PathType`, which
 // the navigation reads while following the path.
 struct PathNode {
