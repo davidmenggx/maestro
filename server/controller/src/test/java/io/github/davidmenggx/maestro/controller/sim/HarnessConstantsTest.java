@@ -40,8 +40,8 @@ class HarnessConstantsTest {
 
   @Test
   void theSloIsTighterThanTheAdmissionBound() {
-    // A saturated fleet is held only to the bound that admission control promises,
-    // so the default invariant budget must be the stricter of the two.
+    // Answers later than the admission bound are abandoned, so an SLO at or past it
+    // could never fail.
     assertTrue(
         SimRun.TICK_BUDGET < ProbeController.MAX_TICKS_LATE,
         "the SLO budget is no tighter than what admission control already guarantees");

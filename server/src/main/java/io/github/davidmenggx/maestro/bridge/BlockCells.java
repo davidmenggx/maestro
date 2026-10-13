@@ -19,8 +19,8 @@ public final class BlockCells {
   }
 
   /**
-   * Top of the block's collision shape in sixteenths, rounded up, or 0 if it has none. This is the
-   * shape {@code getFloorLevel} reads.
+   * Top of the block's collision shape in sixteenths, rounded up and capped at {@link
+   * Cells#MAX_FLOOR}, or 0 if it has none. This is the shape {@code getFloorLevel} reads.
    */
   public static int floor(BlockGetter level, BlockPos pos) {
     VoxelShape shape = level.getBlockState(pos).getCollisionShape(level, pos);

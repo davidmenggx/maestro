@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
+import maestro.fbs.CellDelta;
 import maestro.fbs.ChunkSnapshot;
 import maestro.fbs.ControlFrame;
 import maestro.fbs.ParityCase;
@@ -36,6 +37,7 @@ import maestro.fbs.PathResponse;
 import maestro.fbs.RegionAssignment;
 import maestro.fbs.RequestFrame;
 import maestro.fbs.ResponseFrame;
+import maestro.fbs.WorldDelta;
 import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 import org.junit.jupiter.api.Test;
@@ -65,10 +67,11 @@ class ParityFixtureTest {
       assertFalse(assignment.resume(), name);
       assertEquals(0, assignment.size() % Chunks.SIZE, name);
       int chunksPerSide = assignment.size() / Chunks.SIZE;
-      assertEquals(chunksPerSide * chunksPerSide + 1, fixture.world().size(), name);
+      int chunks = chunksPerSide * chunksPerSide;
+      assertTrue(fixture.world().size() > chunks + 1, name + ": the stream has deltas");
 
-      boolean[] seen = new boolean[chunksPerSide * chunksPerSide];
-      for (int i = 1; i < fixture.world().size(); i++) {
+      boolean[] seen = new boolean[chunks];
+      for (int i = 1; i <= chunks; i++) {
         ChunkSnapshot chunk = chunk(fixture.world().get(i));
         assertEquals(i, chunk.sequence(), name + ": sequences start at 1 with no gap");
         int index = chunk.chunkXz().x() * chunksPerSide + chunk.chunkXz().z();
@@ -88,18 +91,39 @@ class ParityFixtureTest {
         }
         assertEquals(chunk.runsLength(), run, name);
       }
+
+      for (int i = chunks + 1; i < fixture.world().size(); i++) {
+        WorldDelta delta = delta(fixture.world().get(i));
+        assertEquals(i, delta.sequence(), name + ": sequences continue with no gap");
+        assertTrue(delta.cellsLength() > 0, name);
+        for (int c = 0; c < delta.cellsLength(); c++) {
+          CellDelta cell = delta.cells(c);
+          assertTrue(PathTypes.isPerBlock((byte) cell.nodeType()), name);
+          assertTrue(cell.floor() <= Cells.MAX_FLOOR, name);
+          assertTrue(cell.pos().x() >= 0 && cell.pos().x() < assignment.size(), name);
+          assertTrue(cell.pos().z() >= 0 && cell.pos().z() < assignment.size(), name);
+          assertTrue(
+              cell.pos().y() >= assignment.minY()
+                  && cell.pos().y() < assignment.minY() + assignment.height(),
+              name);
+        }
+      }
     }
   }
 
   @Test
-  void everyCaseNamesOneConsistentProfileAndAnswersFromTheWholeStream() {
+  void everyCaseNamesOneConsistentProfileAndAnswersFromTheStreamSoFar() {
     for (Fixture fixture : fixtures()) {
       String name = fixture.file().getFileName().toString();
-      long lastSequence = fixture.world().size() - 1;
       Map<Integer, MobClass> profiles = new HashMap<>();
       assertTrue(fixture.root().casesLength() > 0, name);
+      long previousFrames = 0;
       for (int i = 0; i < fixture.root().casesLength(); i++) {
         ParityCase recorded = fixture.root().cases(i);
+        // Frame `n` of the stream has sequence `n`, so the frames applied name the sequence.
+        assertTrue(recorded.worldFrames() >= previousFrames, name + ": frames only accumulate");
+        assertTrue(recorded.worldFrames() <= fixture.world().size(), name);
+        previousFrames = recorded.worldFrames();
         MobClass profile = profile(recorded);
         MobClass known = profiles.putIfAbsent((int) profile.classId(), profile);
         if (known != null) {
@@ -112,7 +136,7 @@ class ParityFixtureTest {
         assertEquals(profile.classId(), request.classId(), name);
         PathResponse response = response(recorded);
         assertEquals(request.requestId(), response.requestId(), name);
-        assertEquals(lastSequence, response.worldSequence(), name);
+        assertEquals(recorded.worldFrames() - 1, response.worldSequence(), name);
         assertTrue(response.nodesLength() > 0, name + ": vanilla always returns a path");
         PathNode first = response.nodes(0);
         assertEquals(pos(request.start()), pos(first.pos()), name + ": a path starts at its start");
@@ -137,6 +161,18 @@ class ParityFixtureTest {
           name);
 
       for (byte[] frame : fixture.world().subList(1, fixture.world().size())) {
+        if (isDelta(frame)) {
+          WorldDelta delta = delta(frame);
+          List<WorldEvent.BlockChanged> cells = new ArrayList<>();
+          for (int c = 0; c < delta.cellsLength(); c++) {
+            CellDelta cell = delta.cells(c);
+            cells.add(
+                new WorldEvent.BlockChanged(
+                    0, pos(cell.pos()), (byte) cell.nodeType(), cell.floor()));
+          }
+          assertArrayEquals(frame, Frames.delta(delta.sequence(), cells, 0, 0), name);
+          continue;
+        }
         ChunkSnapshot chunk = chunk(frame);
         int chunkX = chunk.chunkXz().x();
         int chunkZ = chunk.chunkXz().z();
@@ -285,9 +321,19 @@ class ParityFixtureTest {
     return (RegionAssignment) root.body(new RegionAssignment());
   }
 
+  private static boolean isDelta(byte[] frame) {
+    return WorldFrame.getRootAsWorldFrame(ByteBuffer.wrap(frame)).bodyType() == WorldMsg.WorldDelta;
+  }
+
+  private static WorldDelta delta(byte[] frame) {
+    WorldFrame root = WorldFrame.getRootAsWorldFrame(ByteBuffer.wrap(frame));
+    assertEquals(WorldMsg.WorldDelta, root.bodyType(), "then only block changes");
+    return (WorldDelta) root.body(new WorldDelta());
+  }
+
   private static ChunkSnapshot chunk(byte[] frame) {
     WorldFrame root = WorldFrame.getRootAsWorldFrame(ByteBuffer.wrap(frame));
-    assertEquals(WorldMsg.ChunkSnapshot, root.bodyType(), "then carries only chunks");
+    assertEquals(WorldMsg.ChunkSnapshot, root.bodyType(), "then the chunks");
     return (ChunkSnapshot) root.body(new ChunkSnapshot());
   }
 

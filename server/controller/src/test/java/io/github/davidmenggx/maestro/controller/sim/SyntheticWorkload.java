@@ -16,11 +16,18 @@ import java.util.Set;
 
 /**
  * Generated replacement for a recorded server trace, and the fuzzer of the suite. Every event the
- * boundary defines can be generated here, and the seed sweep explores their orderings. {@code
- * quietAfter} stops all world activity so the end of a run can drain. By then every request has
- * been answered or dropped, so the invariants can require it.
+ * boundary defines can be generated here. The kinds of activity in a tick run in an order drawn per
+ * tick, so the sweep covers how they interleave, such as a block change followed by its chunk
+ * leaving. {@code quietAfter} stops all world activity so the end of a run can drain. By then every
+ * request has been answered or dropped, so the invariants can require it.
  */
 public final class SyntheticWorkload implements Workload {
+
+  /** One kind of activity in a tick. */
+  @FunctionalInterface
+  private interface Activity {
+    void run(long tick, WorldInput input);
+  }
 
   private static final int PLAYER_MOVE_INTERVAL_TICKS = 5;
 
@@ -61,6 +68,16 @@ public final class SyntheticWorkload implements Workload {
 
   private final SimWorld world;
   private final Rng rng;
+  private final Rng order;
+  private final Activity[] activities = {
+    this::churnChunks,
+    this::changeBlocks,
+    this::churnMobs,
+    (tick, input) -> moveMobs(),
+    this::requestPaths,
+    this::cancelPath,
+    this::movePlayers
+  };
   private final long quietAfter;
   private final Scenario scenario;
   private final int classCount;
@@ -72,6 +89,7 @@ public final class SyntheticWorkload implements Workload {
   public SyntheticWorkload(SimWorld world, Rng rng, long quietAfter, Scenario scenario) {
     this.world = world;
     this.rng = rng;
+    this.order = rng.derive("order");
     this.quietAfter = quietAfter;
     this.scenario = scenario;
     this.classCount = world.mobClassCount();
@@ -84,22 +102,22 @@ public final class SyntheticWorkload implements Workload {
       return;
     }
     if (tick >= quietAfter) {
-      // Everything unloaded during the run is loaded again, so the final state can be
-      // compared with a fresh snapshot of the same world.
-      reloadEverything(tick, input);
+      // Chunks that left stay unloaded, and are air in the final comparison too.
       return;
     }
-    churnChunks(tick, input);
-    changeBlocks(tick, input);
-    churnMobs(tick, input);
-    moveMobs();
-    requestPaths(tick, input);
-    cancelPath(tick, input);
-    movePlayers(tick, input);
+    for (int i = activities.length - 1; i > 0; i--) {
+      int j = order.nextInt(i + 1);
+      Activity swapped = activities[i];
+      activities[i] = activities[j];
+      activities[j] = swapped;
+    }
+    for (Activity activity : activities) {
+      activity.run(tick, input);
+    }
   }
 
   private void start(WorldInput input) {
-    reloadEverything(0, input);
+    loadEverything(input);
     for (int i = 0; i < scenario.counts().get(Count.MOBS); i++) {
       spawn(0, input);
     }
@@ -109,14 +127,11 @@ public final class SyntheticWorkload implements Workload {
     }
   }
 
-  private void reloadEverything(long tick, WorldInput input) {
+  private void loadEverything(WorldInput input) {
     for (int chunkX = 0; chunkX < world.chunksPerSide(); chunkX++) {
       for (int chunkZ = 0; chunkZ < world.chunksPerSide(); chunkZ++) {
-        if (world.chunkLoaded(chunkX, chunkZ)) {
-          continue;
-        }
         world.loadChunk(chunkX, chunkZ);
-        input.accept(new WorldEvent.ChunkLoaded(tick, chunkX, chunkZ));
+        input.accept(new WorldEvent.ChunkLoaded(0, chunkX, chunkZ));
       }
     }
   }

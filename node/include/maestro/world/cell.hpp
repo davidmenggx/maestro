@@ -14,6 +14,11 @@ inline constexpr int PathTypeCount = static_cast<int>(PathType::MAX) + 1;
 /// Collision height of a full cube, in sixteenths of a block.
 inline constexpr std::uint8_t FullFloor = 16;
 
+/// Tallest collision height a cell may carry. `hasCollisions` looks one layer
+/// below a box, which sees every cell up to two blocks tall. Vanilla's tallest,
+/// fences and walls, is 24.
+inline constexpr std::uint8_t MaxFloor = 32;
+
 /// One block as the node holds it: the per-block `PathType` and `Floor`, the
 /// top of the block's collision shape in sixteenths (0 if it has none),
 /// rounded up.

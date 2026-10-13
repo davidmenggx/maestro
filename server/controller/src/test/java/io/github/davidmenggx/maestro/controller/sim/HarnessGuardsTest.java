@@ -16,7 +16,9 @@ import io.github.davidmenggx.maestro.controller.wire.Frames;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
+import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
@@ -265,6 +267,111 @@ class HarnessGuardsTest {
   }
 
   @Test
+  void theSloIsStrictAndCountsATimeoutAsAMiss() {
+    SimMetrics fast = new SimMetrics();
+    for (int i = 0; i < 200; i++) {
+      fast.record("path.latency.ticks", 2);
+    }
+    assertEquals(List.of(), Invariants.checkSlo(fast));
+
+    // Two timeouts in 202 requests leave the p99 on an answer, and a third puts it on a miss.
+    fast.count("path.expired", 2);
+    assertEquals(List.of(), Invariants.checkSlo(fast));
+    fast.count("path.expired", 1);
+    assertEquals(1, Invariants.checkSlo(fast).size());
+
+    // The SLO is below 3 ticks, so a p99 of exactly 3 misses it.
+    SimMetrics late = new SimMetrics();
+    for (int i = 0; i < 200; i++) {
+      late.record("path.latency.ticks", 3);
+    }
+    assertEquals(1, Invariants.checkSlo(late).size());
+  }
+
+  @Test
+  void theLedgerMatchesEachOutcomeToOneRequest() {
+    RecordingOutput out = new RecordingOutput(new Simulation(1L, FaultPlan.reliable()));
+    out.issued(1);
+    out.issued(1);
+    out.pathDropped(1, DropReason.SUPERSEDED);
+    assertEquals(1, out.ledgerViolations().size(), out.ledgerViolations().toString());
+    out.pathDropped(1, DropReason.CANCELED);
+    assertEquals(List.of(), out.ledgerViolations());
+
+    // The totals match, but one mob has an outcome too many and another one too few.
+    out.issued(2);
+    out.pathDropped(3, DropReason.MOB_GONE);
+    assertEquals(2, out.ledgerViolations().size(), out.ledgerViolations().toString());
+  }
+
+  @Test
+  void aRegionStreamThatGoesBackIsReported() {
+    Simulation sim = new Simulation(3L, FaultPlan.reliable());
+    ModeledNode node = sim.addNode(NodeId.of(0), 4);
+    SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
+    world.loadChunk(0, 0);
+    byte[] assignment = Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), false, world);
+
+    node.receive(Channel.WORLD, ByteBuffer.wrap(assignment));
+    node.receive(
+        Channel.WORLD,
+        ByteBuffer.wrap(Frames.chunkSnapshot(5, 0, 0, Frames.readChunk(world, 0, 0))));
+    assertEquals(List.of(), sim.streamViolations());
+
+    // A fresh snapshot starts a new baseline, which the node cannot check against the old one.
+    node.receive(Channel.WORLD, ByteBuffer.wrap(assignment));
+    node.receive(
+        Channel.WORLD,
+        ByteBuffer.wrap(Frames.chunkSnapshot(3, 0, 0, Frames.readChunk(world, 0, 0))));
+    assertEquals(List.of(), node.violations());
+    assertEquals(1, sim.streamViolations().size(), sim.streamViolations().toString());
+  }
+
+  @Test
+  void aNodeLeftBehindWhenTheRunEndsIsReported() {
+    // A one-tick run ends with the chunks encoded but not yet delivered.
+    List<WorldEvent> loads = new ArrayList<>();
+    for (int chunkX = 0; chunkX < Topology.DEFAULT.chunksPerSide(); chunkX++) {
+      for (int chunkZ = 0; chunkZ < Topology.DEFAULT.chunksPerSide(); chunkZ++) {
+        loads.add(new WorldEvent.ChunkLoaded(0, chunkX, chunkZ));
+      }
+    }
+
+    List<String> violations = SimRun.scripted(1L, FaultPlan.reliable(), 1, loads).go().violations();
+
+    assertTrue(
+        violations.stream().anyMatch(v -> v.contains("has not caught up")), violations.toString());
+  }
+
+  @Test
+  void theWorkloadVariesWhichKindOfEventComesFirstInATick() {
+    SimWorld world = new SimWorld(Topology.DEFAULT, 2, SeededRng.of(1).derive("terrain"));
+    Workload workload =
+        new SyntheticWorkload(
+            world,
+            SeededRng.of(1).derive("workload"),
+            Long.MAX_VALUE,
+            Scenario.DEFAULT.with(Chance.CHUNK_CHURN, 1.0));
+    boolean changeFirst = false;
+    boolean chunkFirst = false;
+    for (long tick = 0; tick < DRAWS; tick++) {
+      List<WorldEvent> events = new ArrayList<>();
+      workload.tick(tick, events::add);
+      int change = firstIndex(events, WorldEvent.BlockChanged.class);
+      int chunk =
+          Math.max(
+              firstIndex(events, WorldEvent.ChunkLoaded.class),
+              firstIndex(events, WorldEvent.ChunkUnloaded.class));
+      if (tick > 0 && change >= 0 && chunk >= 0) {
+        changeFirst |= change < chunk;
+        chunkFirst |= chunk < change;
+      }
+    }
+    assertTrue(changeFirst, "a block change never came before a chunk event");
+    assertTrue(chunkFirst, "a chunk event never came before a block change");
+  }
+
+  @Test
   void theMetricsTheAssertionsLeanOnAreRight() {
     SimMetrics metrics = new SimMetrics();
     for (int i = 1; i <= 100; i++) {
@@ -276,6 +383,11 @@ class HarnessGuardsTest {
     assertEquals(100.0, metrics.percentile("latency", 1.0));
     assertEquals(1.0, metrics.percentile("latency", 0.0));
     assertTrue(Double.isNaN(metrics.percentile("nothing", 0.99)));
+    // Misses rank above every recorded value.
+    assertEquals(100.0, metrics.percentileWithMisses("latency", 0.99, 1));
+    assertEquals(Double.POSITIVE_INFINITY, metrics.percentileWithMisses("latency", 0.99, 2));
+    assertEquals(Double.POSITIVE_INFINITY, metrics.percentileWithMisses("nothing", 0.5, 1));
+    assertTrue(Double.isNaN(metrics.percentileWithMisses("nothing", 0.99, 0)));
 
     metrics.count("frames", 2, "node", "node-0");
     metrics.count("frames", 5, "node", "node-1");
@@ -430,6 +542,15 @@ class HarnessGuardsTest {
 
   private static List<NodeId> nodes(int count) {
     return IntStream.range(0, count).mapToObj(NodeId::of).toList();
+  }
+
+  private static int firstIndex(List<WorldEvent> events, Class<? extends WorldEvent> kind) {
+    for (int i = 0; i < events.size(); i++) {
+      if (kind.isInstance(events.get(i))) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   /** Lowest and highest value a sampler produced, so a range can be checked in one place. */

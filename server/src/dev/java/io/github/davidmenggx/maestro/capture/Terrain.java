@@ -47,7 +47,7 @@ final class Terrain {
   private static final int BASE = 10;
 
   /** Writes blocks as they are, without updates that would change or break them. */
-  private static final int FLAGS = Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS;
+  static final int FLAGS = Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS;
 
   private static final Direction[] HORIZONTAL = {
     Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST
@@ -238,10 +238,7 @@ final class Terrain {
     }
   }
 
-  /**
-   * Blocks whose collision shape is not a full-width box ending on a sixteenth, which the node only
-   * approximates.
-   */
+  /** Rooms, pens, fences, doors and blocks whose collision shape is not a full-width box. */
   private void decorateShapes() {
     for (int i = rng.nextInt(9); i > 0; i--) {
       room();
@@ -346,7 +343,7 @@ final class Terrain {
             set(x, top + 1, z, Blocks.COCOA.defaultBlockState().setValue(CocoaBlock.FACING, toLog));
           }
         });
-    // Lily pads float on whatever water the exact pass left.
+    // Lily pads float on the water already placed.
     scatter(
         12,
         1,

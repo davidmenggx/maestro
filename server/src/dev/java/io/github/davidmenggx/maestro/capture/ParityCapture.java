@@ -9,10 +9,15 @@ import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.ProfileTable;
 import io.github.davidmenggx.maestro.controller.world.SearchReach;
+import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput;
+import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.SplittableRandom;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -28,6 +33,8 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.entity.decoration.ArmorStand;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.level.pathfinder.PathType;
@@ -37,10 +44,10 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * Runs vanilla searches on seeded terrain and records each as a parity case. Everything happens in
  * one call on the server thread, so no tick changes the world between building it and searching it.
  */
-final class ParityCapture {
+final class ParityCapture implements Searches.Observer {
 
-  /** Side of the area in chunks. Large enough for the villager's 48 block follow range. */
-  static final int AREA_CHUNKS = 8;
+  /** Side of the area in chunks. Large enough for a follow range of 64 blocks. */
+  static final int AREA_CHUNKS = 10;
 
   static final int SIZE = AREA_CHUNKS * Chunks.SIZE;
 
@@ -51,10 +58,18 @@ final class ParityCapture {
   private static final int REGION = 0;
   private static final int ATTEMPTS_PER_CASE = 50;
 
+  /** Block change frames in a capture, each between two batches of searches. */
+  private static final int DELTA_BATCHES = 3;
+
   private static final Difficulty[] DIFFICULTIES = {
     Difficulty.EASY, Difficulty.NORMAL, Difficulty.HARD
   };
+  private static final float[] BUDGET_MULTIPLIERS = {0.02f, 0.05f, 0.1f, 0.25f};
   private static final float[] MALUS_VALUES = {-1.0f, 0.0f, 2.0f, 4.0f, 8.0f, 16.0f};
+
+  /** Two and above give a jump of more than one block. */
+  private static final double[] STEP_HEIGHTS = {1.0, 1.5, 2.0, 2.5};
+
   private static final int[] REACH_RANGES = {0, 1, 1, 1, 2, 3};
   private static final PathType[] TYPES = PathType.values();
 
@@ -76,10 +91,11 @@ final class ParityCapture {
   }
 
   /**
-   * {@code offStart} cases are approximated because the mob did not stand at its start node, {@code
-   * modelDiffered} because a collision or floor query got a different answer from the model.
+   * {@code offStart} cases are approximated because the node's stand-in for the mob's position
+   * differs from it where that matters, {@code modelDiffered} because a collision or floor query
+   * got a different answer from the model. {@code deltas} is the number of block change frames.
    */
-  record Summary(int cases, int exact, int reached, int offStart, int modelDiffered) {}
+  record Summary(int cases, int exact, int reached, int offStart, int modelDiffered, int deltas) {}
 
   private record Recorded(
       SearchCall call, List<WorldOutput.Node> nodes, boolean reached, float cost) {}
@@ -96,6 +112,7 @@ final class ParityCapture {
   private final List<Terrain.Enclosure> enclosures;
   private final List<Recorded> recorded = new ArrayList<>();
   private final ArmorStand quarry;
+  private int lastDeltaAt = -1;
 
   private ParityCapture(ServerLevel level, long seed, List<Terrain.Enclosure> enclosures) {
     this.level = level;
@@ -146,7 +163,19 @@ final class ParityCapture {
     for (int dx = 0; dx < AREA_CHUNKS; dx++) {
       for (int dz = 0; dz < AREA_CHUNKS; dz++) {
         Frames.ChunkRuns runs = Frames.readChunk(world, firstChunk + dx, firstChunk + dz);
-        worldFrames.add(Frames.chunkSnapshot(++sequence, dx, dz, runs));
+        byte[] frame = Frames.chunkSnapshot(++sequence, dx, dz, runs);
+        // The section shortcut must give what reading every block gives.
+        byte[] reference =
+            Frames.chunkSnapshot(
+                sequence,
+                dx,
+                dz,
+                Frames.readChunk(new BlockByBlock(world), firstChunk + dx, firstChunk + dz));
+        if (!Arrays.equals(frame, reference)) {
+          throw new IllegalStateException(
+              "sections and blocks disagree in chunk " + dx + ", " + dz);
+        }
+        worldFrames.add(frame);
       }
     }
 
@@ -155,12 +184,24 @@ final class ParityCapture {
     int reached = 0;
     int offStart = 0;
     int modelDiffered = 0;
+    int deltas = 0;
+    // Block changes between batches of searches, so the node is also checked against a world it
+    // reached by deltas.
+    int batch = Math.max(1, count / (DELTA_BATCHES + 1));
     ApproximationProbe probe = ApproximationProbe.start(world);
     try {
       for (int attempt = 0;
           cases.size() < count && attempt < count * ATTEMPTS_PER_CASE;
           attempt++) {
-        Captured captured = attempt(cases.size() + 1, sequence, probe);
+        if (!cases.isEmpty()
+            && cases.size() % batch == 0
+            && deltas < DELTA_BATCHES
+            && lastDeltaAt != cases.size()) {
+          lastDeltaAt = cases.size();
+          worldFrames.add(Frames.delta(++sequence, mutate(), ORIGIN, ORIGIN));
+          deltas++;
+        }
+        Captured captured = attempt(cases.size() + 1, sequence, worldFrames.size(), probe);
         if (captured != null) {
           cases.add(captured.recorded());
           exact += captured.recorded().exact() ? 1 : 0;
@@ -176,11 +217,65 @@ final class ParityCapture {
       throw new IllegalStateException("only " + cases.size() + " of " + count + " cases found");
     }
     FixtureFile.write(file, seed, FixtureFile.frame(worldFrames), cases);
-    return new Summary(cases.size(), exact, reached, offStart, modelDiffered);
+    return new Summary(cases.size(), exact, reached, offStart, modelDiffered, deltas);
+  }
+
+  /**
+   * Changes a few blocks near the surface and returns the changes as the controller would report
+   * them. Cached path types are cleared for the changed blocks, as for the terrain.
+   */
+  private List<WorldEvent.BlockChanged> mutate() {
+    BlockState[] placed = {
+      Blocks.STONE.defaultBlockState(),
+      Blocks.OAK_FENCE.defaultBlockState(),
+      Blocks.WHITE_CARPET.defaultBlockState(),
+      Blocks.WATER.defaultBlockState(),
+      Blocks.LAVA.defaultBlockState(),
+      Blocks.MAGMA_BLOCK.defaultBlockState(),
+      Blocks.AIR.defaultBlockState()
+    };
+    Map<Long, BlockPos> changed = new LinkedHashMap<>();
+    for (int i = 4 + rng.nextInt(40); i > 0; i--) {
+      int x = ORIGIN + rng.nextInt(SIZE);
+      int z = ORIGIN + rng.nextInt(SIZE);
+      int top = topBlock(x, z);
+      BlockState state = placed[rng.nextInt(placed.length)];
+      // Air digs the surface. Everything else is placed on it or in place of it.
+      int y = state.isAir() || state.is(Blocks.WATER) || state.is(Blocks.LAVA) ? top : top + 1;
+      if (y <= minY || y >= minY + Terrain.BAND) {
+        continue;
+      }
+      BlockPos pos = new BlockPos(x, y, z);
+      level.setBlock(pos, state, Terrain.FLAGS);
+      changed.put(pos.asLong(), pos);
+    }
+    List<WorldEvent.BlockChanged> events = new ArrayList<>();
+    for (BlockPos pos : changed.values()) {
+      level.getPathTypeCache().invalidate(pos);
+      events.add(
+          new WorldEvent.BlockChanged(
+              0,
+              pos(pos),
+              world.pathTypeAt(pos.getX(), pos.getY(), pos.getZ()),
+              world.floorAt(pos.getX(), pos.getY(), pos.getZ())));
+    }
+    return events;
+  }
+
+  /** Height of the highest block in the column that is not air. */
+  private int topBlock(int x, int z) {
+    BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+    for (int y = maxY; y > minY; y--) {
+      if (!level.getBlockState(pos.set(x, y, z)).isAir()) {
+        return y;
+      }
+    }
+    return minY;
   }
 
   /** One drawn mob and target. Null if vanilla did not search or the case cannot be replayed. */
-  private Captured attempt(long requestId, long worldSequence, ApproximationProbe probe) {
+  private Captured attempt(
+      long requestId, long worldSequence, int worldFrames, ApproximationProbe probe) {
     Kind kind = Kind.values()[rng.nextInt(Kind.values().length)];
     Mob mob = kind.type.create(level, EntitySpawnReason.COMMAND);
     if (mob == null) {
@@ -198,7 +293,8 @@ final class ParityCapture {
     int z = column[1];
     double standing = standingY(x, z);
     mob.snapTo(ORIGIN + x + 0.5, standing, ORIGIN + z + 0.5, rng.nextInt(360), 0.0f);
-    if (!level.noCollision(mob)) {
+    // Blocks only: vanilla's search does not see entities, so they must not decide a case.
+    if (!level.noBlockCollision(mob, mob.getBoundingBox())) {
       return null;
     }
     mob.setOnGround(true);
@@ -208,7 +304,7 @@ final class ParityCapture {
     PathNavigation navigation = mob.getNavigation();
     recorded.clear();
     probe.reset();
-    Searches.observe(this::record);
+    Searches.observe(this);
     try {
       if (rng.nextInt(4) == 0) {
         int maxPathLength = 8 + rng.nextInt((int) defaultLength - 7);
@@ -225,12 +321,12 @@ final class ParityCapture {
 
     Recorded search = recorded.get(0);
     SearchCall call = search.call();
+    MobClass profile = call.profile();
     Pos start = pos(call.start());
     if (!SearchReach.fits(
-        ORIGIN, ORIGIN, SIZE, start, call.search().maxPathLength(), call.shape().width())) {
+        ORIGIN, ORIGIN, SIZE, start, call.search().maxPathLength(), profile.shape().width())) {
       return null;
     }
-    MobClass profile = profiles.intern(call.shape(), call.abilities(), call.malus());
     byte[] request =
         Frames.requests(
             List.of(
@@ -249,7 +345,7 @@ final class ParityCapture {
             ORIGIN);
     // The node puts the mob at its start node and models every cell as a box of its floor
     // height. Either may change the answer, and the case is exact only if neither did.
-    boolean offStart = !standsAtStart(mob, call.start());
+    boolean offStart = !positionIsStandIn(mob, call.start(), probe);
     boolean exact = !offStart && !probe.disagreed();
     return new Captured(
         new FixtureFile.Case(
@@ -257,13 +353,20 @@ final class ParityCapture {
             exact,
             Frames.mobClass(profile),
             request,
-            response),
+            response,
+            worldFrames),
         search.reached(),
         offStart,
         probe.disagreed());
   }
 
-  private void record(SearchCall call, Path vanilla) {
+  @Override
+  public ProfileTable profiles() {
+    return profiles;
+  }
+
+  @Override
+  public void searched(SearchCall call, Path vanilla) {
     List<WorldOutput.Node> nodes = new ArrayList<>(vanilla.getNodeCount());
     for (int i = 0; i < vanilla.getNodeCount(); i++) {
       Node node = vanilla.getNode(i);
@@ -289,12 +392,17 @@ final class ParityCapture {
       mob.setTarget(quarry);
       mob.setHealth(1 + rng.nextInt((int) mob.getMaxHealth()));
     }
-    if (rng.nextInt(10) < 3) {
-      setBase(mob, Attributes.FOLLOW_RANGE, 16 + rng.nextInt(33));
+    if (rng.nextBoolean()) {
+      setBase(mob, Attributes.FOLLOW_RANGE, 16 + rng.nextInt(49));
       mob.getNavigation().updatePathfinderMaxVisitedNodes();
     }
+    if (rng.nextInt(5) == 0) {
+      // A budget the search can run out of.
+      mob.getNavigation()
+          .setMaxVisitedNodesMultiplier(BUDGET_MULTIPLIERS[rng.nextInt(BUDGET_MULTIPLIERS.length)]);
+    }
     if (rng.nextInt(10) < 2) {
-      setBase(mob, Attributes.STEP_HEIGHT, rng.nextBoolean() ? 1.0 : 1.5);
+      setBase(mob, Attributes.STEP_HEIGHT, STEP_HEIGHTS[rng.nextInt(STEP_HEIGHTS.length)]);
     }
 
     PathNavigation navigation = mob.getNavigation();
@@ -379,11 +487,18 @@ final class ParityCapture {
     return minY;
   }
 
-  /** The node uses the start node as the mob's position, which is exact only in this case. */
-  private static boolean standsAtStart(Mob mob, BlockPos start) {
-    return mob.getX() == start.getX() + 0.5
-        && mob.getY() == start.getY()
-        && mob.getZ() == start.getZ() + 0.5;
+  /**
+   * Whether the node's stand-in for the mob's position, the bottom centre of the start node, gives
+   * the search what the mob's position did. Vanilla reads the position for a sweep, which the
+   * stand-in matches only at the bottom centre, and for the block the mob is in, which it matches
+   * whenever the mob is in the start block.
+   */
+  private static boolean positionIsStandIn(Mob mob, BlockPos start, ApproximationProbe probe) {
+    boolean atBottomCentre =
+        mob.getX() == start.getX() + 0.5
+            && mob.getY() == start.getY()
+            && mob.getZ() == start.getZ() + 0.5;
+    return atBottomCentre || (mob.blockPosition().equals(start) && !probe.swept());
   }
 
   /**
@@ -399,6 +514,35 @@ final class ParityCapture {
           level.getPathTypeCache().invalidate(pos.set(ORIGIN + x, y, ORIGIN + z));
         }
       }
+    }
+  }
+
+  /** A source that does not know about sections, so every block is read. */
+  private record BlockByBlock(WorldSource inner) implements WorldSource {
+
+    @Override
+    public MobClass mobClass(short classId) {
+      return inner.mobClass(classId);
+    }
+
+    @Override
+    public int minY() {
+      return inner.minY();
+    }
+
+    @Override
+    public int height() {
+      return inner.height();
+    }
+
+    @Override
+    public byte pathTypeAt(int x, int y, int z) {
+      return inner.pathTypeAt(x, y, z);
+    }
+
+    @Override
+    public int floorAt(int x, int y, int z) {
+      return inner.floorAt(x, y, z);
     }
   }
 

@@ -12,6 +12,10 @@ import net.minecraft.world.phys.AABB;
  * water, so it can answer a collision or floor query differently. A search where every query got
  * the same answer cannot have been changed by the model.
  *
+ * <p>It also notes when the search reads the mob's own position for a sweep, which the node
+ * replaces with its start node. The world border is not compared: the node ignores it, so a capture
+ * runs far inside it. Entities need no comparison, since vanilla's search does not see them.
+ *
  * <p>Fed from {@code WalkNodeEvaluatorMixin} on the server thread.
  */
 public final class ApproximationProbe {
@@ -20,6 +24,7 @@ public final class ApproximationProbe {
 
   private final WorldSource world;
   private boolean disagreed;
+  private boolean swept;
 
   private ApproximationProbe(WorldSource world) {
     this.world = world;
@@ -40,8 +45,21 @@ public final class ApproximationProbe {
     return disagreed;
   }
 
+  /** Whether the search swept a box from the mob's position since the last {@link #reset}. */
+  boolean swept() {
+    return swept;
+  }
+
   void reset() {
     disagreed = false;
+    swept = false;
+  }
+
+  /** The search is about to sweep a box from the mob's position. */
+  public static void sweep() {
+    if (active != null) {
+      active.swept = true;
+    }
   }
 
   /** A {@code hasCollisions} answer from vanilla. */

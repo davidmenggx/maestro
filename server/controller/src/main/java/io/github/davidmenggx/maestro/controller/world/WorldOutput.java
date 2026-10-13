@@ -13,7 +13,10 @@ public interface WorldOutput {
   enum DropReason {
     /** Rejected before sending because the owning node would answer past the tick budget. */
     QUEUE_DEPTH,
-    /** No node owns the region. */
+    /**
+     * No node can take the request now: none owns the region, the owner has not been sent the chunk
+     * the search starts in, or a position does not fit the wire.
+     */
     NO_NODE,
     /**
      * The owning node did not have this mob profile yet. It is registered as part of the send, and
@@ -22,6 +25,11 @@ public interface WorldOutput {
     CLASS_UNREGISTERED,
     /** The owning node died before answering. */
     NODE_LOST,
+    /**
+     * No answer arrived in time, resends included: the request or its answers were lost, or the
+     * node stopped answering while its connection stayed up.
+     */
+    TIMEOUT,
     /** The mob was removed while the request was in flight. */
     MOB_GONE,
     /** The mob withdrew the request before it was answered. */

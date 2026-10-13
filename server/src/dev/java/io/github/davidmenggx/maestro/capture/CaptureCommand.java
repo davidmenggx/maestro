@@ -16,8 +16,8 @@ import org.slf4j.LoggerFactory;
 /**
  * {@code /maestro capture <seed> <cases>}: builds the terrain for {@code seed} in the overworld,
  * records {@code cases} vanilla searches on it, and writes them to {@code
- * maestro-capture/seed-<seed>.bin} in the game directory. Registered in dev mode only, since it
- * overwrites part of the world.
+ * maestro-capture/seed-<seed>.bin} in the game directory. Registered by the development mod only,
+ * since it overwrites part of the world.
  */
 public final class CaptureCommand {
 
@@ -61,7 +61,8 @@ public final class CaptureCommand {
           ParityCapture.run(source.getServer().overworld(), seed, cases, file);
       String message =
           String.format(
-              "%s: seed=%d cases=%d exact=%d reached=%d offStart=%d modelDiffered=%d file=%s",
+              "%s: seed=%d cases=%d exact=%d reached=%d offStart=%d modelDiffered=%d deltas=%d"
+                  + " file=%s",
               DONE,
               seed,
               summary.cases(),
@@ -69,6 +70,7 @@ public final class CaptureCommand {
               summary.reached(),
               summary.offStart(),
               summary.modelDiffered(),
+              summary.deltas(),
               file);
       LOG.info(message);
       source.sendSuccess(() -> Component.literal(message), false);

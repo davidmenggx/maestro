@@ -1,9 +1,12 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -56,14 +59,12 @@ template <typename T> const T *verified(const Bytes &Frame) {
   return flatbuffers::GetRoot<T>(Frame.data());
 }
 
-/// Splits the framed world stream and applies each frame, as the node's world
-/// channel would.
-testing::AssertionResult load(const flatbuffers::Vector<std::uint8_t> *Stream,
-                              world::WorldStore &Store) {
+/// Splits the framed world stream into its frames.
+testing::AssertionResult split(const flatbuffers::Vector<std::uint8_t> *Stream,
+                               std::vector<Bytes> &Frames) {
   if (!Stream)
     return testing::AssertionFailure() << "no world stream";
   std::size_t Offset = 0;
-  int Frames = 0;
   while (Offset < Stream->size()) {
     const std::span<const std::uint8_t> Rest(Stream->data() + Offset,
                                              Stream->size() - Offset);
@@ -71,12 +72,10 @@ testing::AssertionResult load(const flatbuffers::Vector<std::uint8_t> *Stream,
     if (Header.Status != maestro::net::HeaderStatus::Ready ||
         Rest.size() < maestro::net::HeaderSize + Header.Length)
       return testing::AssertionFailure() << "torn frame at byte " << Offset;
-    const Bytes Frame(Rest.begin() + maestro::net::HeaderSize,
-                      Rest.begin() + maestro::net::HeaderSize + Header.Length);
-    if (Store.apply(Frame) != world::ApplyStatus::Applied)
-      return testing::AssertionFailure() << "frame " << Frames << " refused";
+    Frames.emplace_back(Rest.begin() + maestro::net::HeaderSize,
+                        Rest.begin() + maestro::net::HeaderSize +
+                            Header.Length);
     Offset += maestro::net::HeaderSize + Header.Length;
-    ++Frames;
   }
   return testing::AssertionSuccess();
 }
@@ -110,6 +109,19 @@ std::string describe(const std::vector<search::PathPoint> &Nodes) {
   return Out.str();
 }
 
+bool sameAnswer(const search::Result &A, const search::Result &B) {
+  return A.Nodes == B.Nodes && A.Reached == B.Reached && A.Cost == B.Cost;
+}
+
+/// Whether the path climbs two or more blocks between two nodes, which takes a
+/// jump of at least two.
+bool climbsTwo(const std::vector<search::PathPoint> &Nodes) {
+  for (std::size_t I = 1; I < Nodes.size(); ++I)
+    if (Nodes[I].Pos.Y - Nodes[I - 1].Pos.Y >= 2)
+      return true;
+  return false;
+}
+
 /// How the node's answer differs from vanilla's, or empty if it does not.
 std::string difference(const search::Result &Node, const Recorded &Vanilla) {
   std::ostringstream Out;
@@ -126,9 +138,28 @@ std::string difference(const search::Result &Node, const Recorded &Vanilla) {
 
 struct Tally {
   int Exact = 0;
+  /// Exact cases that cover what the rest of the suite barely reaches: long
+  /// paths, an answer that a block change decided, an answer that the visit
+  /// budget decided, and a climb that takes a jump of two.
+  int ExactLong = 0;
+  int ExactChangedByDelta = 0;
+  int ExactBudgetBound = 0;
+  int ExactHighJump = 0;
   int Approximated = 0;
   int ApproximatedMatched = 0;
+  /// How far the node's approximated answers land from vanilla's: the node's
+  /// cost and node count minus vanilla's, summed, and the largest of each.
+  double CostDifference = 0.0;
+  double LargestCostDifference = 0.0;
+  std::int64_t LengthDifference = 0;
+  std::int64_t LargestLengthDifference = 0;
 };
+
+std::string text(double Value) {
+  std::ostringstream Out;
+  Out << Value;
+  return Out.str();
+}
 
 /// Replays every case of one fixture file and checks it against vanilla.
 void replay(const std::filesystem::path &Path, Tally &Count) {
@@ -139,17 +170,35 @@ void replay(const std::filesystem::path &Path, Tally &Count) {
   const fbs::ParityFixture *Fixture = fbs::GetParityFixture(File.data());
   ASSERT_NE(Fixture->cases(), nullptr);
 
+  std::vector<Bytes> WorldFrames;
+  ASSERT_TRUE(split(Fixture->world(), WorldFrames));
   world::WorldStore Store;
-  ASSERT_TRUE(load(Fixture->world(), Store));
-  const std::shared_ptr<const world::Area> Area = Store.pin();
-  ASSERT_NE(Area, nullptr);
+  std::size_t Applied = 0;
+  // The world as it was before the first block change, to tell which answers
+  // a change decided.
+  std::shared_ptr<const world::Area> BeforeDeltas;
 
   const auto Search = search::makeSearch(fbs::Pathfinder::VANILLA);
   search::Result Result;
+  search::Result Other;
   for (flatbuffers::uoffset_t I = 0; I < Fixture->cases()->size(); ++I) {
     const fbs::ParityCase *Case = Fixture->cases()->Get(I);
     const std::string Entity = Case->entity() ? Case->entity()->str() : "?";
     SCOPED_TRACE("case " + std::to_string(I) + " (" + Entity + ")");
+
+    // A case sees the world as of the frames applied before it.
+    ASSERT_GE(Case->world_frames(), Applied);
+    ASSERT_LE(Case->world_frames(), WorldFrames.size());
+    for (; Applied < Case->world_frames(); ++Applied) {
+      const auto *Frame = verified<fbs::WorldFrame>(WorldFrames[Applied]);
+      ASSERT_NE(Frame, nullptr);
+      if (!BeforeDeltas && Frame->body_type() == fbs::WorldMsg::WorldDelta)
+        BeforeDeltas = Store.pin();
+      ASSERT_EQ(Store.apply(WorldFrames[Applied]), world::ApplyStatus::Applied)
+          << "frame " << Applied << " refused";
+    }
+    const std::shared_ptr<const world::Area> Area = Store.pin();
+    ASSERT_NE(Area, nullptr);
 
     const Bytes ProfileFrame = copy(Case->mob_class());
     const Bytes RequestFrame = copy(Case->request());
@@ -176,10 +225,29 @@ void replay(const std::filesystem::path &Path, Tally &Count) {
     const std::string Diff = difference(Result, *Vanilla);
     if (Case->exact()) {
       ++Count.Exact;
+      Count.ExactLong += Vanilla->Nodes.size() > 40 ? 1 : 0;
+      Count.ExactHighJump += climbsTwo(Vanilla->Nodes) ? 1 : 0;
+      if (BeforeDeltas) {
+        Search->find(*BeforeDeltas, *Profile, *Call, Other);
+        Count.ExactChangedByDelta += sameAnswer(Result, Other) ? 0 : 1;
+      }
+      search::Request Unbounded = *Call;
+      Unbounded.MaxVisitedNodes = std::numeric_limits<int>::max();
+      Search->find(*Area, *Profile, Unbounded, Other);
+      Count.ExactBudgetBound += sameAnswer(Result, Other) ? 0 : 1;
       EXPECT_TRUE(Diff.empty()) << "differs from vanilla:" << Diff;
     } else {
       ++Count.Approximated;
       Count.ApproximatedMatched += Diff.empty() ? 1 : 0;
+      const double Cost = static_cast<double>(Result.Cost) - Vanilla->Cost;
+      const auto Length = static_cast<std::int64_t>(Result.Nodes.size()) -
+                          static_cast<std::int64_t>(Vanilla->Nodes.size());
+      Count.CostDifference += Cost;
+      Count.LargestCostDifference =
+          std::max(Count.LargestCostDifference, std::abs(Cost));
+      Count.LengthDifference += Length;
+      Count.LargestLengthDifference =
+          std::max(Count.LargestLengthDifference, std::abs(Length));
       if (!Diff.empty())
         std::cout << "[ parity   ] approximated " << Path.filename().string()
                   << " case " << I << " (" << Entity << ") differs:" << Diff
@@ -199,13 +267,40 @@ TEST(Parity, ReproducesEveryExactVanillaSearch) {
     replay(Path, Count);
 
   EXPECT_GT(Count.Exact, 0) << "no exact case to check";
+  EXPECT_GT(Count.ExactLong, 0) << "no long path among the exact cases";
+  EXPECT_GT(Count.ExactChangedByDelta, 0)
+      << "no block change decided an exact case";
+  EXPECT_GT(Count.ExactBudgetBound, 0)
+      << "the visit budget decided no exact case";
+  EXPECT_GT(Count.ExactHighJump, 0) << "no exact path climbs two blocks";
   // Approximated cases may differ by design, so they are measured, not
-  // asserted.
+  // asserted. The measures are also test properties, which the XML report
+  // keeps, so they can be followed across runs.
+  const int Approximated = std::max(Count.Approximated, 1);
+  const double MeanCost = Count.CostDifference / Approximated;
+  const double MeanLength =
+      static_cast<double>(Count.LengthDifference) / Approximated;
   std::cout << "[ parity   ] " << Count.Exact << " exact cases from "
             << Files.size() << " fixtures; " << Count.ApproximatedMatched
             << " of " << Count.Approximated
             << " approximated cases match vanilla\n";
+  std::cout << "[ parity   ] exact cases: " << Count.ExactLong
+            << " with a path over 40 nodes, " << Count.ExactChangedByDelta
+            << " decided by a block change, " << Count.ExactBudgetBound
+            << " decided by the visit budget, " << Count.ExactHighJump
+            << " climbing two blocks\n";
+  std::cout << "[ parity   ] approximated cases, node minus vanilla: cost "
+            << MeanCost << " on average (largest "
+            << Count.LargestCostDifference << "), nodes " << MeanLength
+            << " on average (largest " << Count.LargestLengthDifference
+            << ")\n";
   RecordProperty("exact", Count.Exact);
   RecordProperty("approximated", Count.Approximated);
   RecordProperty("approximated_matched", Count.ApproximatedMatched);
+  RecordProperty("approximated_cost_difference_mean", text(MeanCost));
+  RecordProperty("approximated_cost_difference_largest",
+                 text(Count.LargestCostDifference));
+  RecordProperty("approximated_length_difference_mean", text(MeanLength));
+  RecordProperty("approximated_length_difference_largest",
+                 std::to_string(Count.LargestLengthDifference));
 }

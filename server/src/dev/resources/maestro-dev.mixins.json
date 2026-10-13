@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "minVersion": "0.8.7",
+  "package": "io.github.davidmenggx.maestro.capture.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "server": [
+    "WalkNodeEvaluatorMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

@@ -94,6 +94,7 @@ public final class ModeledNode {
   private long lastSequence;
   private long duplicateRequests;
   private int servicedTicks;
+  private boolean backlogged;
 
   ModeledNode(Simulation sim, SimTransport transport, NodeId id, int capacityPerTick) {
     if (capacityPerTick < 1) {
@@ -124,12 +125,22 @@ public final class ModeledNode {
     return duplicateRequests;
   }
 
+  /** Whether a service ever ended with requests still queued, because more came than it serves. */
+  public boolean backlogged() {
+    return backlogged;
+  }
+
   public List<String> violations() {
     return List.copyOf(violations);
   }
 
   public boolean hasState() {
     return cells.length > 0 && lastSequence > 0;
+  }
+
+  /** Holds an assigned area, possibly still all air because no chunk has arrived since. */
+  public boolean assigned() {
+    return cells.length > 0;
   }
 
   /** Region state only. Two nodes with the same world have equal state, however they got there. */
@@ -195,6 +206,7 @@ public final class ModeledNode {
       transport.toController(id, Channel.REQUEST, ByteBuffer.wrap(response));
       served++;
     }
+    backlogged |= !queue.isEmpty();
     sim.metrics().gauge("node.queue.depth", queue.size(), "node", id.toString());
   }
 
@@ -316,6 +328,10 @@ public final class ModeledNode {
   private void advance(long sequence) {
     awaitingBaseline = false;
     lastSequence = sequence;
+    // A node built outside the fleet, such as a fresh one to compare against, starts its own count.
+    if (sim.node(id) == this) {
+      sim.applied(id, regionId, sequence);
+    }
   }
 
   private String applyChunkSnapshot(ChunkSnapshot snapshot) {

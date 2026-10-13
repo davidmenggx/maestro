@@ -8,8 +8,7 @@
     "EntityMixin",
     "MinecraftServerMixin",
     "PathFinderMixin",
-    "PortalShapeMixin",
-    "WalkNodeEvaluatorMixin"
+    "PortalShapeMixin"
   ],
   "injectors": {
     "defaultRequire": 1

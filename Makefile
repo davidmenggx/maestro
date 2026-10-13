@@ -11,7 +11,7 @@
 #   make test       run both unit test suites
 #   make fuzz       run the controller's deterministic simulation seed sweeps
 #                   (TIER=shallow|deep|coverage narrows it to one tier)
-#   make test-boot  boot a dev server and assert the mixins applied
+#   make test-boot  boot the released mod and assert the mixins applied
 #   make capture    record vanilla parity fixtures (SEED="1 2" N=cases)
 #   make clean      remove build outputs (keeps fetched deps)
 #   make help       list targets
@@ -105,7 +105,7 @@ fuzz: schema-java ## Run the DST seed sweeps (TIER=shallow|deep|coverage SEED=n 
 run-server: schema-java ## Boot a dev server (WORLD=<name> loads worlds/<name>)
 	cd server && $(GRADLE) runServer $(if $(WORLD),-Pworld=$(WORLD)) $(if $(KEEP_WORLD),-PkeepWorld)
 
-test-boot: schema-java ## Boot the dev server and assert the mixins applied
+test-boot: schema-java ## Boot the released mod and assert the mixins applied
 	tools/boot-smoke-test.sh
 
 capture: schema-java ## Record parity fixtures into fixtures/parity (SEED="1 2" N=cases)

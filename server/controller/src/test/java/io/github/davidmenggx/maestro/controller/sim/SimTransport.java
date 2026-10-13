@@ -97,6 +97,11 @@ public final class SimTransport implements Transport {
     transmit(node, channel, frame, Direction.TO_CONTROLLER);
   }
 
+  /** Whether the node's process is running, whatever the state of its link. */
+  public boolean alive(NodeId node) {
+    return !dead.contains(node);
+  }
+
   /** Process death: node state is lost and the controller sees a reset. */
   public void kill(NodeId node) {
     if (!dead.add(node)) {

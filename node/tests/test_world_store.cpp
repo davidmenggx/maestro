@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <thread>
 #include <vector>
@@ -279,6 +280,10 @@ TEST(WorldStore, RejectsAnAreaThatDoesNotTileIntoChunks) {
   expectRefusedAndReset(assignmentOf(32, 0, 0), ApplyStatus::Malformed);
   // Wire positions are shorts, so the top of the area must fit in one.
   expectRefusedAndReset(assignmentOf(32, 32700, 100), ApplyStatus::Malformed);
+  // Even when the sum would overflow an `int`.
+  expectRefusedAndReset(
+      assignmentOf(32, std::numeric_limits<int>::max() - 10, 100),
+      ApplyStatus::Malformed);
 }
 
 TEST(WorldStore, RejectsChunksThatBreakTheContract) {
@@ -306,6 +311,11 @@ TEST(WorldStore, RejectsChunksThatBreakTheContract) {
       uniformChunk(
           5, {fbs::CellRun(4, static_cast<fbs::PathType>(200), 0), Air20}),
       ApplyStatus::Malformed);
+  // A collision height taller than the collision check can see.
+  expectRefusedAndReset(
+      uniformChunk(
+          5, {fbs::CellRun(4, fbs::PathType::BLOCKED, MaxFloor + 1), Air20}),
+      ApplyStatus::Malformed);
 
   WorldStore Store;
   load(Store, flatWorld());
@@ -328,6 +338,9 @@ TEST(WorldStore, RejectsADeltaThatBreaksTheContract) {
   const std::vector<CellEdit> Derived = {
       {1, 4, 1, Cell{PathType::WATER_BORDER, 0}}};
   expectRefusedAndReset(test::delta(5, Derived), ApplyStatus::Malformed);
+  const std::vector<CellEdit> TooTall = {
+      {1, 4, 1, Cell{PathType::FENCE, MaxFloor + 1}}};
+  expectRefusedAndReset(test::delta(5, TooTall), ApplyStatus::Malformed);
 }
 
 TEST(WorldStore, MatchesADenseModelUnderRandomFrames) {

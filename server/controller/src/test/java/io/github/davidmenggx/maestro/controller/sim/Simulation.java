@@ -51,6 +51,11 @@ public final class Simulation {
   private final PriorityQueue<Scheduled> queue = new PriorityQueue<>();
   private final Map<NodeId, ModeledNode> nodes = new LinkedHashMap<>();
   private final Map<Long, List<FaultPlan.Fault>> faultsByTick = new LinkedHashMap<>();
+
+  /** Highest world sequence a fleet node applied, per region. */
+  private final Map<Long, Long> appliedByRegion = new LinkedHashMap<>();
+
+  private final List<String> streamViolations = new ArrayList<>();
   private final SimMetrics metrics = new SimMetrics();
   private final Digest digest = new Digest();
   private final SimTransport transport;
@@ -60,6 +65,7 @@ public final class Simulation {
   private long now;
   private long order;
   private long tick = -1;
+  private long settleFrom = Long.MAX_VALUE;
 
   public Simulation(long seed, FaultPlan faults) {
     this.rng = SeededRng.of(seed);
@@ -97,6 +103,33 @@ public final class Simulation {
   /** Absolute step time. */
   public long now() {
     return now;
+  }
+
+  /**
+   * From {@code tick} on, no encode fails. Fleet faults end before a run's quiet tail, and this
+   * ends the last fault that could hold a world frame back, so every live node can catch up before
+   * the run ends.
+   */
+  public void settleFrom(long tick) {
+    settleFrom = tick;
+  }
+
+  /**
+   * Records that a fleet node applied {@code sequence} of a region's world stream. The sequence of
+   * a region only rises, whichever node holds it and however often it is sent again.
+   */
+  void applied(NodeId node, long region, long sequence) {
+    long highest = appliedByRegion.getOrDefault(region, 0L);
+    if (sequence <= highest) {
+      streamViolations.add(
+          node + " applied sequence " + sequence + " of region " + region + " after " + highest);
+    }
+    appliedByRegion.put(region, Math.max(highest, sequence));
+  }
+
+  /** Every time a region's world stream went backwards. */
+  public List<String> streamViolations() {
+    return List.copyOf(streamViolations);
   }
 
   public ModeledNode addNode(NodeId id, int capacityPerTick) {
@@ -220,7 +253,9 @@ public final class Simulation {
       long drainAt = (ready / STEPS_PER_TICK) * STEPS_PER_TICK + STEPS_PER_TICK - 1;
       metrics.count("offload.submitted", 1, "job", name);
       // Drawn only when failures are possible, so a plan without them replays unchanged.
-      if (offloadFailureRate > 0 && offloadRng.nextDouble() < offloadFailureRate) {
+      if (tick < settleFrom
+          && offloadFailureRate > 0
+          && offloadRng.nextDouble() < offloadFailureRate) {
         metrics.count("offload.failed", 1, "job", name);
         scheduleAt(drainAt, "offload-failed:" + name, failure);
         return;

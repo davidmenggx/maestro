@@ -1,5 +1,6 @@
 package io.github.davidmenggx.maestro.controller.wire;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -108,6 +109,119 @@ class FramesTest {
 
     assertThrows(IllegalArgumentException.class, () -> Frames.assignment(3, 4, 40, false, world));
     assertThrows(IllegalArgumentException.class, () -> Frames.assignment(3, 4, 0, false, world));
+  }
+
+  @Test
+  void uniformSectionsGiveTheSameChunkWithFarFewerReads() {
+    int[] plainReads = {0};
+    int[] sectionReads = {0};
+    byte[] expected =
+        Frames.chunkSnapshot(
+            1, 0, 0, Frames.readChunk(counting(terrain(false), plainReads), 2, -1));
+    byte[] actual =
+        Frames.chunkSnapshot(
+            1, 0, 0, Frames.readChunk(counting(terrain(true), sectionReads), 2, -1));
+
+    assertArrayEquals(expected, actual);
+    assertEquals(256 * 384 * 2, plainReads[0]);
+    // Only the section holding the surface and the post is read block by block.
+    assertEquals(256 * 16 * 2, sectionReads[0]);
+  }
+
+  private static WorldSource counting(WorldSource inner, int[] reads) {
+    return new WorldSource() {
+      @Override
+      public MobClass mobClass(short classId) {
+        return null;
+      }
+
+      @Override
+      public int minY() {
+        return inner.minY();
+      }
+
+      @Override
+      public int height() {
+        return inner.height();
+      }
+
+      @Override
+      public byte pathTypeAt(int x, int y, int z) {
+        reads[0]++;
+        return inner.pathTypeAt(x, y, z);
+      }
+
+      @Override
+      public int floorAt(int x, int y, int z) {
+        reads[0]++;
+        return inner.floorAt(x, y, z);
+      }
+
+      @Override
+      public int uniformCell(int chunkX, int chunkZ, int section) {
+        return inner.uniformCell(chunkX, chunkZ, section);
+      }
+    };
+  }
+
+  /**
+   * Solid up to y = 5 and open above, with a fence post. Uniform sections are reported if asked.
+   */
+  private static WorldSource terrain(boolean reportUniform) {
+    return new WorldSource() {
+      private byte type(int x, int y, int z) {
+        if (x == 35 && z == -12 && y == 6) {
+          return (byte) PathType.FENCE;
+        }
+        return (byte) (y <= 5 ? PathType.BLOCKED : PathType.OPEN);
+      }
+
+      private int floor(int x, int y, int z) {
+        if (x == 35 && z == -12 && y == 6) {
+          return 24;
+        }
+        return y <= 5 ? 16 : 0;
+      }
+
+      @Override
+      public MobClass mobClass(short classId) {
+        return null;
+      }
+
+      @Override
+      public int minY() {
+        return -64;
+      }
+
+      @Override
+      public int height() {
+        return 384;
+      }
+
+      @Override
+      public byte pathTypeAt(int x, int y, int z) {
+        return type(x, y, z);
+      }
+
+      @Override
+      public int floorAt(int x, int y, int z) {
+        return floor(x, y, z);
+      }
+
+      @Override
+      public int uniformCell(int chunkX, int chunkZ, int section) {
+        if (!reportUniform) {
+          return NOT_UNIFORM;
+        }
+        int low = minY() + section * SECTION_HEIGHT;
+        int high = low + SECTION_HEIGHT - 1;
+        // The section holding the surface and the post (y 0..15) is mixed.
+        if (low <= 6 && high >= 5) {
+          return NOT_UNIFORM;
+        }
+        return (floor(0, low, 0) << 8) | type(0, low, 0);
+      }
+    };
   }
 
   private static Pos pos(maestro.fbs.Vec3s wire) {

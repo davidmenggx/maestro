@@ -5,6 +5,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.llamalad7.mixinextras.sugar.Local;
 import io.github.davidmenggx.maestro.bridge.SearchCall;
 import io.github.davidmenggx.maestro.bridge.Searches;
+import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import java.util.Map;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Mob;
@@ -16,10 +17,14 @@ import net.minecraft.world.level.pathfinder.Target;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 
 @Mixin(PathFinder.class)
 public abstract class PathFinderMixin {
+
+  /** Scratch for reading a malus table. Calls are made on the server thread only. */
+  @Unique private static final float[] MALUS = new float[PathTypes.count()];
 
   @Shadow @Final private NodeEvaluator nodeEvaluator;
 
@@ -56,7 +61,16 @@ public abstract class PathFinderMixin {
     int budget = (int) (maxVisitedNodes * maxVisitedNodesMultiplier);
     BlockPos target = targets.values().iterator().next();
     SearchCall call =
-        SearchCall.read(mob, nodeEvaluator, from, target, maxPathLength, reachRange, budget);
+        SearchCall.read(
+            mob,
+            nodeEvaluator,
+            from,
+            target,
+            maxPathLength,
+            reachRange,
+            budget,
+            observer.profiles(),
+            MALUS);
     if (call != null) {
       observer.searched(call, vanilla);
     }

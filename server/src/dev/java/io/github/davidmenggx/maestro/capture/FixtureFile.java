@@ -12,8 +12,17 @@ import maestro.fbs.ParityFixture;
 /** Writes a {@code ParityFixture}. */
 final class FixtureFile {
 
-  /** One recorded search, as the three frames that replay it. */
-  record Case(String entity, boolean exact, byte[] mobClass, byte[] request, byte[] response) {}
+  /**
+   * One recorded search, as the three frames that replay it, made after the first {@code
+   * worldFrames} frames of the world stream.
+   */
+  record Case(
+      String entity,
+      boolean exact,
+      byte[] mobClass,
+      byte[] request,
+      byte[] response,
+      int worldFrames) {}
 
   private FixtureFile() {}
 
@@ -30,7 +39,8 @@ final class FixtureFile {
               recorded.exact(),
               ParityCase.createMobClassVector(builder, recorded.mobClass()),
               ParityCase.createRequestVector(builder, recorded.request()),
-              ParityCase.createResponseVector(builder, recorded.response()));
+              ParityCase.createResponseVector(builder, recorded.response()),
+              recorded.worldFrames());
     }
     int casesVector = ParityFixture.createCasesVector(builder, offsets);
     int worldVector = ParityFixture.createWorldVector(builder, world);

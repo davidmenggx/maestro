@@ -22,7 +22,10 @@ public final class SimRun {
    */
   public static final long DRAIN_TICKS = 25;
 
-  /** p99 target from the SLO, in ticks. Looser than the admission bound in `ProbeController`. */
+  /**
+   * The SLO: p99 latency must be below this many ticks. Tighter than the admission bound in
+   * `ProbeController`, which only keeps a saturated fleet from falling further behind.
+   */
   public static final double TICK_BUDGET = 3.0;
 
   /** Sweep size when nothing sets {@code maestro.dst.runs}. */
@@ -38,6 +41,7 @@ public final class SimRun {
 
   public final long seed;
   public final long ticks;
+  public final FaultPlan faults;
   public final Topology topology;
   public final Scenario scenario;
   public final Simulation sim;
@@ -47,18 +51,25 @@ public final class SimRun {
   public final ProbeController controller;
   public final Workload workload;
 
+  /**
+   * {@code quietAfter} is the tick the workload stops changing the world, from which the run
+   * settles.
+   */
   private SimRun(
       long seed,
       FaultPlan faults,
       long ticks,
+      long quietAfter,
       Topology topology,
       Scenario scenario,
       BiFunction<SimWorld, Rng, Workload> workloadFactory) {
     this.seed = seed;
     this.ticks = ticks;
+    this.faults = faults;
     this.topology = topology;
     this.scenario = scenario;
     this.sim = new Simulation(seed, faults);
+    sim.settleFrom(quietAfter);
 
     List<NodeId> nodes = new ArrayList<>();
     for (int i = 0; i < topology.nodeCount(); i++) {
@@ -92,6 +103,7 @@ public final class SimRun {
         seed,
         faults,
         ticks,
+        ticks - DRAIN_TICKS,
         topology,
         scenario,
         (world, rng) -> new SyntheticWorkload(world, rng, ticks - DRAIN_TICKS, scenario));
@@ -117,22 +129,38 @@ public final class SimRun {
         seed,
         faults,
         ticks,
+        ticks,
         Topology.DEFAULT,
         Scenario.DEFAULT,
         (world, rng) -> new ScriptedWorkload(world, events));
   }
 
   public SimRun go() {
-    sim.run(controller, workload, ticks);
+    // A request enters the ledger before the controller sees it, because a drop can come
+    // back within the same call.
+    sim.run(
+        event -> {
+          if (event instanceof WorldEvent.PathRequested requested) {
+            out.issued(requested.mobId());
+          }
+          controller.accept(event);
+        },
+        workload,
+        ticks);
     return this;
   }
 
   public List<String> violations() {
-    return violations(TICK_BUDGET);
+    return Invariants.check(this);
   }
 
-  public List<String> violations(double tickBudget) {
-    return Invariants.check(this, tickBudget);
+  /**
+   * Whether the run is one the latency SLO applies to: nothing in the fault plan could delay or
+   * lose a request, and no node was ever offered more than it serves in a tick. A run that was
+   * saturated, or hit a fault, is held only to the other invariants.
+   */
+  public boolean fitsCapacity() {
+    return faults.clean() && sim.nodes().stream().noneMatch(ModeledNode::backlogged);
   }
 
   /** Chunks the fleet covers, which is the number of frames in one full send of the world. */

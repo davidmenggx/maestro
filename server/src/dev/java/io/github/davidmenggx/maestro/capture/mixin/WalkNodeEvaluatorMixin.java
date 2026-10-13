@@ -1,7 +1,8 @@
-package io.github.davidmenggx.maestro.mixin;
+package io.github.davidmenggx.maestro.capture.mixin;
 
 import io.github.davidmenggx.maestro.capture.ApproximationProbe;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.NodeEvaluator;
 import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
 import net.minecraft.world.phys.AABB;
@@ -11,8 +12,8 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Reports vanilla's collision and floor answers to the {@link ApproximationProbe}, which does
- * nothing unless a capture is running.
+ * Reports vanilla's collision and floor answers, and its reads of the mob's position, to the {@link
+ * ApproximationProbe}, which does nothing unless a capture is running.
  */
 @Mixin(WalkNodeEvaluator.class)
 public abstract class WalkNodeEvaluatorMixin {
@@ -29,6 +30,14 @@ public abstract class WalkNodeEvaluatorMixin {
     if ((Object) this.getClass() == WalkNodeEvaluator.class) {
       ApproximationProbe.floor(
           pos, ((NodeEvaluator) (Object) this).canFloat(), cir.getReturnValueD());
+    }
+  }
+
+  /** The sweep starts from the mob's own position, which the node replaces with the start node. */
+  @Inject(method = "canReachWithoutCollision", at = @At("HEAD"))
+  private void maestro$probeSweep(Node target, CallbackInfoReturnable<Boolean> cir) {
+    if ((Object) this.getClass() == WalkNodeEvaluator.class) {
+      ApproximationProbe.sweep();
     }
   }
 }

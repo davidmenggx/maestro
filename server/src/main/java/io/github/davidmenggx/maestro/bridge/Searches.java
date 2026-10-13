@@ -1,5 +1,6 @@
 package io.github.davidmenggx.maestro.bridge;
 
+import io.github.davidmenggx.maestro.controller.world.ProfileTable;
 import net.minecraft.world.level.pathfinder.NodeEvaluator;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.level.pathfinder.PathFinder;
@@ -12,8 +13,11 @@ import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
 public final class Searches {
 
   /** Told about each intercepted search and vanilla's answer to it. */
-  @FunctionalInterface
   public interface Observer {
+
+    /** Where the profiles of the searches this observer is told about are interned. */
+    ProfileTable profiles();
+
     void searched(SearchCall call, Path vanilla);
   }
 

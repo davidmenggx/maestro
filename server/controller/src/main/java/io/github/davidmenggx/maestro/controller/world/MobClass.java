@@ -1,5 +1,6 @@
 package io.github.davidmenggx.maestro.controller.world;
 
+import java.util.Arrays;
 import java.util.Objects;
 
 /**
@@ -43,12 +44,42 @@ public record MobClass(short classId, Shape shape, Abilities abilities, float[] 
     malus = malus.clone();
   }
 
-  /**
-   * Copied on the way in and out, so the array cannot be modified through the record. Equality
-   * compares the array by reference, so do not use a profile as a map key.
-   */
+  /** Whether the profile has exactly these inputs, whatever its id. Does not allocate. */
+  public boolean matches(Shape otherShape, Abilities otherAbilities, float[] otherMalus) {
+    return shape.equals(otherShape)
+        && abilities.equals(otherAbilities)
+        && Arrays.equals(malus, otherMalus);
+  }
+
+  /** Copied on the way in and out, so the array cannot be modified through the record. */
   @Override
   public float[] malus() {
     return malus.clone();
+  }
+
+  /** Compares {@code malus} by content, as the other components are. */
+  @Override
+  public boolean equals(Object other) {
+    return other instanceof MobClass profile
+        && classId == profile.classId
+        && matches(profile.shape, profile.abilities, profile.malus);
+  }
+
+  @Override
+  public int hashCode() {
+    return 31 * Objects.hash(classId, shape, abilities) + Arrays.hashCode(malus);
+  }
+
+  @Override
+  public String toString() {
+    return "MobClass[classId="
+        + classId
+        + ", shape="
+        + shape
+        + ", abilities="
+        + abilities
+        + ", malus="
+        + Arrays.toString(malus)
+        + "]";
   }
 }

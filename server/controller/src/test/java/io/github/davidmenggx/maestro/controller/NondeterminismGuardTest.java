@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.env.Clock;
+import io.github.davidmenggx.maestro.controller.sim.ProbeController;
 import java.io.IOException;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
@@ -16,8 +17,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
@@ -25,12 +29,14 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 /**
- * Reads the compiled controller and fails if it directly references a clock, a random source, a
- * thread pool or a socket. These must come through {@code ControllerEnv}, or replay breaks.
+ * Reads the compiled controller, and the simulated controller that will become it, and fails if
+ * either directly references a clock, a random source, a thread pool or a socket. These must come
+ * through {@code ControllerEnv}, or replay breaks.
  *
- * <p>Iteration order cannot be checked this way. The repeated-run digest in {@code SimulationTest}
- * covers it: identity hash codes differ between two runs in one JVM, so an identity-ordered
- * collection produces different digests.
+ * <p>It also refuses collections whose iteration order is neither insertion nor key order: hashed
+ * ones, whose order follows identity hash codes for most keys, and the immutable {@code Set.of} and
+ * {@code Map.of} family, whose order is randomized per JVM. The repeated-run digest in {@code
+ * SimulationTest} catches the first kind but not the second, since both of its runs share a JVM.
  */
 class NondeterminismGuardTest {
 
@@ -65,7 +71,25 @@ class NondeterminismGuardTest {
           new Rule("java/net/http/HttpClient", "*"),
           new Rule("java/nio/channels/SocketChannel", "*"),
           new Rule("java/nio/channels/ServerSocketChannel", "*"),
-          new Rule("java/nio/channels/DatagramChannel", "*"));
+          new Rule("java/nio/channels/DatagramChannel", "*"),
+          new Rule("java/util/HashMap", "*"),
+          new Rule("java/util/HashSet", "*"),
+          new Rule("java/util/IdentityHashMap", "*"),
+          new Rule("java/util/WeakHashMap", "*"),
+          new Rule("java/util/concurrent/ConcurrentHashMap", "*"),
+          new Rule("java/util/Set", "of"),
+          new Rule("java/util/Set", "copyOf"),
+          new Rule("java/util/Map", "of"),
+          new Rule("java/util/Map", "ofEntries"),
+          new Rule("java/util/Map", "copyOf"),
+          new Rule("java/util/stream/Collectors", "toSet"),
+          new Rule("java/util/stream/Collectors", "toUnmodifiableSet"),
+          new Rule("java/util/stream/Collectors", "toMap"),
+          new Rule("java/util/stream/Collectors", "toUnmodifiableMap"),
+          new Rule("java/util/stream/Collectors", "groupingBy"));
+
+  /** The simulated controller, which is to become the production one. */
+  private static final Class<?> SIMULATED_CONTROLLER = ProbeController.class;
 
   /** flatc output is not controller code, so the rule does not apply. */
   private static final String GENERATED = "maestro/fbs/";
@@ -82,11 +106,20 @@ class NondeterminismGuardTest {
           OwnThread.class,
           ThreadPool.class,
           AsyncFuture.class,
-          RawSocket.class);
+          RawSocket.class,
+          HashOrdered.class,
+          SaltedOrder.class);
 
   @Test
   void controllerCodeTakesItsNondeterminismFromTheSeams() throws IOException, URISyntaxException {
     assertEquals(List.of(), scanTree(classesRoot(Clock.class)));
+  }
+
+  @Test
+  void theSimulatedControllerTakesItsNondeterminismFromTheSeams()
+      throws IOException, URISyntaxException {
+    List<String> findings = scanClassAndNested(SIMULATED_CONTROLLER);
+    assertEquals(List.of(), findings);
   }
 
   @Test
@@ -185,6 +218,20 @@ class NondeterminismGuardTest {
     }
   }
 
+  @SuppressWarnings("unused")
+  static final class HashOrdered {
+    Map<Object, Integer> index() {
+      return new HashMap<>();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class SaltedOrder {
+    Set<String> names() {
+      return Set.of("a", "b");
+    }
+  }
+
   /** The negative control: takes time from the seam and uses nothing forbidden. */
   @SuppressWarnings("unused")
   static final class Wellbehaved {
@@ -202,6 +249,29 @@ class NondeterminismGuardTest {
     assertTrue(Files.exists(file), "expected a compiled sample at " + file);
     List<String> findings = new ArrayList<>();
     inspect(file, target.getSimpleName(), findings);
+    return findings;
+  }
+
+  /** {@code target} and the classes nested in it, which compile to files of their own. */
+  private static List<String> scanClassAndNested(Class<?> target)
+      throws IOException, URISyntaxException {
+    Path file = classesRoot(target).resolve(target.getName().replace('.', '/') + ".class");
+    assertTrue(Files.exists(file), "expected compiled classes at " + file);
+    String prefix = target.getSimpleName();
+    List<String> findings = new ArrayList<>();
+    try (Stream<Path> siblings = Files.list(file.getParent())) {
+      for (Path sibling :
+          siblings
+              .filter(
+                  path -> {
+                    String name = path.getFileName().toString();
+                    return name.equals(prefix + ".class") || name.startsWith(prefix + "$");
+                  })
+              .sorted()
+              .toList()) {
+        inspect(sibling, sibling.getFileName().toString(), findings);
+      }
+    }
     return findings;
   }
 

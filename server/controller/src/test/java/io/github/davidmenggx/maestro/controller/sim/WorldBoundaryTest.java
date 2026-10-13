@@ -4,13 +4,21 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.google.flatbuffers.FlatBufferBuilder;
+import io.github.davidmenggx.maestro.controller.env.NodeId;
+import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import maestro.fbs.PathNode;
+import maestro.fbs.PathResponse;
 import maestro.fbs.PathType;
+import maestro.fbs.ResponseFrame;
+import maestro.fbs.ResponseMsg;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -27,6 +35,12 @@ class WorldBoundaryTest {
   private static final Pos HERE = new Pos(4, 40, 4);
   private static final Pos THERE = new Pos(20, 40, 20);
   private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256, 3);
+
+  /** Registration spends a request without an id, so the first one admitted gets 1. */
+  private static final long FIRST_REQUEST = 1;
+
+  /** Owns the region holding {@code HERE}. */
+  private static final NodeId OWNER = NodeId.of(0);
 
   @Test
   void aMobRemovedWhileWaitingIsDroppedExactlyOnce() {
@@ -179,7 +193,115 @@ class WorldBoundaryTest {
     assertTrue(
         run.violations().stream().anyMatch(v -> v.contains("which the world does not hold")),
         "an unproducible profile went unreported: " + run.violations());
-    assertEquals(1, run.out.dropped(DropReason.MOB_GONE), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.CLASS_UNREGISTERED), run.describe());
+  }
+
+  /** Encoding such a target would fail on every retry, so the request is never sent. */
+  @Test
+  void aRequestTheWireCannotCarryIsDroppedBeforeItIsEncoded() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(
+        new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, new Pos(40_000, 40, 4), SEARCH));
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.NO_NODE), run.describe());
+    assertEquals(0, run.sim.metrics().total("offload.retried"), run.describe());
+  }
+
+  @Test
+  void aMalformedAnswerLeavesItsRequestOutstanding() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    // Ends before the node serves the request.
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 3, script).go();
+    assertEquals(1, run.controller.outstandingCount(), run.describe());
+    NodeId owner = run.regions.owner(run.regions.regionAt(HERE.x(), HERE.z()));
+
+    run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST, 200));
+    assertEquals(1, run.controller.outstandingCount(), run.describe());
+    assertEquals(1, run.sim.metrics().total("path.response.malformed"), run.describe());
+
+    run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST, PathType.WALKABLE));
+    assertEquals(0, run.controller.outstandingCount(), run.describe());
+    assertEquals(1, run.out.answered(), run.describe());
+  }
+
+  /** A region with every chunk unloaded is all air on its node and on a fresh one alike. */
+  @Test
+  void aNodeWhoseChunksAreAllUnloadedMatchesAFreshOne() {
+    List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
+    script.addAll(chunkUnloads(2));
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(
+        run.sim.nodes().stream().anyMatch(node -> Invariants.caughtUp(run.controller, node)),
+        run.describe());
+  }
+
+  /**
+   * The chunk leaves after the change, so the node is sent it as cleared. The change must not
+   * follow as a delta, which would put the block back into a chunk the node holds as air.
+   */
+  @Test
+  void aBlockChangedInAChunkThatLeavesInTheSameTickIsNotSentAfterIt() {
+    List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
+    script.add(new WorldEvent.BlockChanged(3, HERE, (byte) PathType.WATER, 0));
+    script.add(new WorldEvent.ChunkUnloaded(3, Chunks.of(HERE.x()), Chunks.of(HERE.z())));
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(0, run.sim.metrics().counter("offload.submitted", "job", "delta"), run.describe());
+    assertEquals(
+        List.of(), Invariants.checkAgainstFreshSnapshot(run, run.sim.node(OWNER)), run.describe());
+  }
+
+  /**
+   * The request leaves at a tick boundary that the partition covers, so it is lost, and a resend
+   * after the partition is answered.
+   */
+  @Test
+  void aLostRequestIsSentAgainAndAnswered() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(4, MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(
+                new FaultPlan.Partitioned(4, OWNER, true),
+                new FaultPlan.Partitioned(6, OWNER, false));
+
+    SimRun run = SimRun.scripted(1L, plan, TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, run.out.answered(), run.describe());
+    assertTrue(run.sim.metrics().total("path.resent") > 0, run.describe());
+    assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
+  }
+
+  @Test
+  void aRequestIsSentAgainAFewTimesAtMostThenTimesOut() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(4, MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(
+                new FaultPlan.Partitioned(4, OWNER, true),
+                new FaultPlan.Partitioned(20, OWNER, false));
+
+    SimRun run = SimRun.scripted(1L, plan, TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(ProbeController.MAX_RESENDS, run.sim.metrics().total("path.resent"));
+    assertEquals(1, run.out.dropped(DropReason.TIMEOUT), run.describe());
+    assertEquals(0, run.out.answered(), run.describe());
   }
 
   /**
@@ -192,6 +314,26 @@ class WorldBoundaryTest {
     script.add(new WorldEvent.PathRequested(1, WARMUP_MOB, MOB_CLASS, HERE, THERE, SEARCH));
     script.add(new WorldEvent.MobRemoved(1, WARMUP_MOB));
     return script;
+  }
+
+  /** An answer to {@code requestId} whose one node has the type {@code type}. */
+  private static ByteBuffer answer(long requestId, int type) {
+    FlatBufferBuilder builder = new FlatBufferBuilder(128);
+    PathResponse.startNodesVector(builder, 1);
+    PathNode.createPathNode(builder, (short) HERE.x(), (short) HERE.y(), (short) HERE.z(), type);
+    int nodes = builder.endVector();
+    int body = PathResponse.createPathResponse(builder, requestId, true, nodes, 1.0f, 1);
+    builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, body));
+    return ByteBuffer.wrap(builder.sizedByteArray());
+  }
+
+  private static List<WorldEvent> chunkUnloads(long tick) {
+    List<WorldEvent> events = new ArrayList<>();
+    for (WorldEvent loaded : chunkLoads(tick)) {
+      WorldEvent.ChunkLoaded chunk = (WorldEvent.ChunkLoaded) loaded;
+      events.add(new WorldEvent.ChunkUnloaded(tick, chunk.chunkX(), chunk.chunkZ()));
+    }
+    return events;
   }
 
   private static List<WorldEvent> chunkLoads(long tick) {

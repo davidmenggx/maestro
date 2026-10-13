@@ -10,7 +10,7 @@ import java.util.List;
  * The faults the network, the fleet and the controller's encode workers may inject into a run. The
  * drop and duplicate rates apply to unordered channels only, because an ordered channel cannot lose
  * a frame without breaking the connection. {@code offloadFailureRate} is the probability that an
- * offloaded encode throws.
+ * offloaded encode throws, until the run settles ({@link Simulation#settleFrom}).
  */
 public record FaultPlan(
     int minLatencySteps,
@@ -66,6 +66,12 @@ public record FaultPlan(
   static final double MAX_SAMPLED_RATE = 0.1;
 
   /**
+   * Share of sampled plans with nothing that can delay or lose a request, so a sweep has runs the
+   * latency SLO applies to. They still draw a latency range and a duplicate rate.
+   */
+  static final double CLEAN_CHANCE = 0.25;
+
+  /**
    * Faults drawn per run. Several may hit one node, so the sweep covers a failure during a
    * recovery. Raising this makes the average run harsher without widening the space, trading runs
    * that get far enough to answer requests for runs that spend their whole length recovering.
@@ -94,19 +100,33 @@ public record FaultPlan(
   }
 
   /**
+   * Whether nothing in the plan can delay or lose a request: no loss, no failed encode, and no
+   * fleet fault. Latency and duplicates are allowed, because neither can.
+   */
+  public boolean clean() {
+    return dropRate == 0 && offloadFailureRate == 0 && faults.isEmpty();
+  }
+
+  /**
    * One draw from the full range of latency, loss, duplication and encode failure, plus up to
    * {@link #MAX_FAULTS} fleet faults that may overlap on one node or hit several nodes at once.
    * Each fault starts inside {@code activeTicks} and, unless the node is permanently lost, ends
-   * there too, so the quiet tail of the run can settle.
+   * there too, so the quiet tail of the run can settle. One plan in {@link #CLEAN_CHANCE} has only
+   * latency and duplication.
    */
   public static FaultPlan sample(Rng rng, int nodeCount, long activeTicks) {
     int minLatency = 1 + rng.nextInt(MAX_MIN_LATENCY_STEPS);
+    int maxLatency = minLatency + rng.nextInt(MAX_LATENCY_SPAN_STEPS);
+    double duplicateRate = rng.nextDouble() * MAX_SAMPLED_RATE;
+    if (rng.nextDouble() < CLEAN_CHANCE) {
+      return new FaultPlan(minLatency, maxLatency, 0.0, duplicateRate, 0.0, List.of());
+    }
     FaultPlan plan =
         new FaultPlan(
             minLatency,
-            minLatency + rng.nextInt(MAX_LATENCY_SPAN_STEPS),
+            maxLatency,
             rng.nextDouble() * MAX_SAMPLED_RATE,
-            rng.nextDouble() * MAX_SAMPLED_RATE,
+            duplicateRate,
             rng.nextDouble() * MAX_SAMPLED_RATE,
             List.of());
     if (nodeCount < 1 || activeTicks <= MAX_FAULT_SPAN_TICKS) {

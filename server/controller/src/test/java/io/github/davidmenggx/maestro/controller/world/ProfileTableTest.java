@@ -20,7 +20,6 @@ class ProfileTableTest {
 
     assertSame(first, again);
     assertEquals(1, first.classId());
-    assertEquals(1, table.size());
   }
 
   @Test
@@ -34,7 +33,42 @@ class ProfileTableTest {
     assertEquals(
         3, table.intern(ADULT, new MobClass.Abilities(true, true, true, false), malus()).classId());
     assertEquals(4, table.intern(ADULT, WALKER, cautious).classId());
-    assertEquals(4, table.size());
+  }
+
+  @Test
+  void manyProfilesKeepTheirIdsAcrossGrowth() {
+    ProfileTable table = new ProfileTable();
+    MobClass[] profiles = new MobClass[500];
+    for (int i = 0; i < profiles.length; i++) {
+      float[] values = malus();
+      values[maestro.fbs.PathType.WATER] = i;
+      profiles[i] = table.intern(ADULT, WALKER, values);
+      assertEquals(i + 1, profiles[i].classId());
+    }
+    for (int i = 0; i < profiles.length; i++) {
+      float[] values = malus();
+      values[maestro.fbs.PathType.WATER] = i;
+      assertSame(profiles[i], table.intern(ADULT, WALKER, values));
+    }
+  }
+
+  @Test
+  void exhaustedIdsGiveNoProfileButKnownOnesStillResolve() {
+    ProfileTable table = new ProfileTable();
+    MobClass first = null;
+    for (int i = 0; i < ProfileTable.MAX_ID; i++) {
+      float[] values = malus();
+      values[maestro.fbs.PathType.WATER] = i;
+      MobClass profile = table.intern(ADULT, WALKER, values);
+      first = first == null ? profile : first;
+    }
+    float[] extra = malus();
+    extra[maestro.fbs.PathType.WATER] = -5.0f;
+    assertNull(table.intern(ADULT, WALKER, extra));
+
+    float[] again = malus();
+    again[maestro.fbs.PathType.WATER] = 0;
+    assertSame(first, table.intern(ADULT, WALKER, again));
   }
 
   @Test

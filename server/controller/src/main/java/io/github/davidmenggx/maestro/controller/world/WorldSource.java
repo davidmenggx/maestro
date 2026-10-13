@@ -35,4 +35,21 @@ public interface WorldSource {
    * WorldEvent.BlockChanged} would carry.
    */
   int floorAt(int x, int y, int z);
+
+  /** Blocks in one section, the unit of {@link #uniformCell}. */
+  int SECTION_HEIGHT = 16;
+
+  /** Returned by {@link #uniformCell} for a section that is not known to be uniform. */
+  int NOT_UNIFORM = -1;
+
+  /**
+   * The cell, as {@code (floor << 8) | pathType}, shared by every block of one section of the
+   * chunk, or {@link #NOT_UNIFORM} if the blocks differ or the source cannot tell cheaply. Section
+   * {@code n} covers the {@link #SECTION_HEIGHT} blocks from {@code minY() + n * SECTION_HEIGHT}.
+   * Must agree with {@link #pathTypeAt} and {@link #floorAt} for every block in the section. It
+   * only saves reading them one at a time, so the default knows nothing.
+   */
+  default int uniformCell(int chunkX, int chunkZ, int section) {
+    return NOT_UNIFORM;
+  }
 }

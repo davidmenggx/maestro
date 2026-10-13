@@ -24,7 +24,7 @@ public final class Invariants {
 
   private Invariants() {}
 
-  public static List<String> check(SimRun run, double tickBudget) {
+  public static List<String> check(SimRun run) {
     List<String> violations = new ArrayList<>();
 
     // Every world frame the real node would refuse: a sequence gap, a malformed
@@ -34,7 +34,10 @@ public final class Invariants {
       violations.addAll(node.violations());
     }
 
-    // The controller's own bookkeeping, including the admission bound.
+    // A region's sequence never goes back, across replays and resnapshots alike.
+    violations.addAll(run.sim.streamViolations());
+
+    // The controller's own bookkeeping.
     violations.addAll(run.controller.selfCheck());
 
     // The modeled network never creates a frame. A duplicate is sent once and
@@ -68,48 +71,63 @@ public final class Invariants {
       }
     }
 
-    // Every node that caught up with its stream holds the same state as a fresh
-    // snapshot, regardless of the resets, replays and resnapshots before it.
+    // Every node still alive has caught up with its stream: faults end before the
+    // quiet tail, which leaves time to reconnect and send a region again. Every node
+    // that caught up holds the same state as a fresh snapshot, regardless of the
+    // resets, replays and resnapshots before it.
     for (ModeledNode node : run.sim.nodes()) {
       if (caughtUp(run.controller, node)) {
         violations.addAll(checkAgainstFreshSnapshot(run, node));
+      } else if (run.sim.transport().alive(node.id())) {
+        violations.add(
+            node.id()
+                + " is alive but has not caught up: it holds sequence "
+                + node.lastSequence()
+                + " of "
+                + run.controller.heldSequence(node.id()));
       }
     }
 
     // Every request is answered or explicitly dropped, exactly once.
-    int accounted = run.out.answered() + run.out.dropped();
-    if (accounted != run.controller.requestsIssued()) {
-      violations.add(
-          "requests issued "
-              + run.controller.requestsIssued()
-              + " but accounted "
-              + accounted
-              + " (answered "
-              + run.out.answered()
-              + ", dropped "
-              + run.out.dropped()
-              + ")");
-    }
+    violations.addAll(run.out.ledgerViolations());
     if (run.controller.outstandingCount() != 0) {
       violations.add(
           run.controller.outstandingCount() + " requests still outstanding at end of run");
     }
 
-    // Latency SLO, measured only over requests that were answered.
-    double p99 = run.sim.metrics().percentile("path.latency.ticks", 0.99);
-    if (!Double.isNaN(p99) && p99 > tickBudget) {
-      violations.add("p99 latency " + p99 + " ticks exceeds budget " + tickBudget);
+    if (run.fitsCapacity()) {
+      violations.addAll(checkSlo(run.sim.metrics()));
     }
 
     return violations;
   }
 
   /**
-   * A node has caught up when it holds a region and its world stream reached the last sequence the
-   * controller produced for it. A node that is behind, partitioned or dead cannot be compared.
+   * The latency SLO: p99 below {@link SimRun#TICK_BUDGET}. A request that timed out was never
+   * answered, so it counts as a miss, later than any answer.
+   */
+  static List<String> checkSlo(SimMetrics metrics) {
+    double p99 =
+        metrics.percentileWithMisses("path.latency.ticks", 0.99, metrics.total("path.expired"));
+    if (!Double.isNaN(p99) && p99 >= SimRun.TICK_BUDGET) {
+      return List.of(
+          "p99 latency "
+              + p99
+              + " ticks is not below the SLO of "
+              + SimRun.TICK_BUDGET
+              + " ("
+              + metrics.total("path.expired")
+              + " timed out)");
+    }
+    return List.of();
+  }
+
+  /**
+   * A node has caught up when it holds its region and has applied everything the controller
+   * produced for it. A node that is behind, partitioned or dead cannot be compared.
    */
   public static boolean caughtUp(ProbeController controller, ModeledNode node) {
-    return node.hasState() && node.lastSequence() == controller.producedSequence(node.id());
+    return node.assigned() && node.lastSequence() == controller.heldSequence(node.id());
   }
 
   /**
@@ -153,8 +171,10 @@ public final class Invariants {
       }
     }
 
-    if (!node.hasState() || !fresh.hasState()) {
-      return List.of("cannot compare state: one node holds no region");
+    // A region whose chunks are all unloaded sends the fresh node nothing past its
+    // assignment, which leaves it all air, as the compared node should be.
+    if (!node.assigned()) {
+      return List.of("cannot compare state: " + node.id() + " holds no region");
     }
     if (node.stateDigest() != fresh.stateDigest()) {
       return List.of(

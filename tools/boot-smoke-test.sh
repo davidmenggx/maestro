@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Boots a dedicated 26.1 server through Loom's `runServer`, waits for it to come
-# up, stops it, and asserts that the Maestro mixins were applied.
+# Boots a dedicated 26.1 server with the released mod alone, through Loom's
+# `runReleaseServer`, waits for it to come up, stops it, and asserts that the
+# Maestro mixins were applied and the development mod was not loaded.
 
 set -euo pipefail
 
@@ -14,6 +15,7 @@ STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-300}"
 SHUTDOWN_TIMEOUT="${SHUTDOWN_TIMEOUT:-120}"
 
 PROOF_LINE='Maestro mixin applied'
+DEV_MOD='maestro-dev'
 READY_LINE='Done ('
 
 fail() {
@@ -35,7 +37,7 @@ exec 3<>"$FIFO"
 EXIT_FILE="$(mktemp)"
 # Own session, so a timed-out or failed run can be torn down as a process group
 # rather than orphaning the forked server JVM.
-setsid bash -c "cd '$SERVER_DIR' && ./gradlew runServer --console=plain; echo \$? >'$EXIT_FILE'" \
+setsid bash -c "cd '$SERVER_DIR' && ./gradlew runReleaseServer --console=plain; echo \$? >'$EXIT_FILE'" \
   <"$FIFO" >>"$LOG" 2>&1 &
 GRADLE_PID=$!
 
@@ -71,9 +73,14 @@ kill -0 "$GRADLE_PID" 2>/dev/null && fail "server did not stop within ${SHUTDOWN
 
 wait "$GRADLE_PID" 2>/dev/null || true
 EXIT_CODE="$(cat "$EXIT_FILE" 2>/dev/null || echo 1)"
-[[ "$EXIT_CODE" == "0" ]] || fail "runServer exited with status $EXIT_CODE"
+[[ "$EXIT_CODE" == "0" ]] || fail "runReleaseServer exited with status $EXIT_CODE"
 
 grep -qF "$PROOF_LINE" "$LOG" || fail "proof mixin did not fire (no '$PROOF_LINE' in the log)"
+
+# The released jar holds no development code, so neither may this boot.
+if grep -qF "$DEV_MOD" "$LOG"; then
+  fail "the development mod '$DEV_MOD' was loaded"
+fi
 
 # Mixin reports application problems without necessarily killing the server, so
 # an otherwise clean boot is not on its own proof that the hooks took.
