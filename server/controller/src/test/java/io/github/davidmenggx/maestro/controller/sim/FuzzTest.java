@@ -228,7 +228,6 @@ class FuzzTest {
     assertTrue(heldToTheSlo > 0, "no run that answered requests was held to the latency SLO");
     assertTrue(heldAtTheEdge > 0, "no run at the latency edge was held to the SLO");
     assertTrue(abandonedAnswers > 0, "no node ever answered a request after it was abandoned");
-    assertTrue(
-        answersBehindTheirChunk > 0, "no node ever searched before its start chunk arrived");
+    assertTrue(answersBehindTheirChunk > 0, "no node ever searched before its start chunk arrived");
   }
 }
