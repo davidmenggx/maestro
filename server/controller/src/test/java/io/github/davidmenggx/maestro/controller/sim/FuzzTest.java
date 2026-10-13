@@ -169,6 +169,9 @@ class FuzzTest {
     long slowFleets = 0;
     long emptyServers = 0;
     long heldToTheSlo = 0;
+    long heldAtTheEdge = 0;
+    long abandonedAnswers = 0;
+    long answersBehindTheirChunk = 0;
 
     // This checks what the sampler reaches, not any one run, so it uses its own size
     // regardless of `maestro.dst.runs`. A few seeds cannot reach every outcome, and a
@@ -179,7 +182,12 @@ class FuzzTest {
       assertEquals(List.of(), run.violations(), run.describe());
 
       drops.addAll(run.out.drops().keySet());
-      heldToTheSlo += run.fitsCapacity() && run.out.answered() > 0 ? 1 : 0;
+      boolean held = run.fitsCapacity() && run.out.answered() > 0;
+      heldToTheSlo += held ? 1 : 0;
+      heldAtTheEdge +=
+          held && run.faults.maxLatencySteps() == FaultPlan.MAX_ONE_WAY_LATENCY_STEPS ? 1 : 0;
+      abandonedAnswers += run.sim.metrics().total("path.response.abandoned");
+      answersBehindTheirChunk += run.sim.metrics().total("path.response.behind");
       regionSizes.add(run.topology.regionSize());
       gridWidths.add(run.topology.regionsPerSide());
       deepWorlds += run.topology.minY() < 0 ? 1 : 0;
@@ -187,7 +195,7 @@ class FuzzTest {
       emptyServers += run.scenario.counts().get(Count.PLAYERS) == 0 ? 1 : 0;
       resumes += run.sim.metrics().total("world.resume");
       resnapshots += run.sim.metrics().total("world.resnapshot");
-      duplicates += run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum();
+      duplicates += run.fleetCounter("transport.duplicated", Channel.REQUEST);
       linkResets += run.sim.metrics().total("transport.link.reset");
       overtakenProfiles += run.sim.metrics().total("path.profile.unknown");
       encodeRetries += run.sim.metrics().total("offload.retried");
@@ -210,7 +218,7 @@ class FuzzTest {
     assertTrue(emptyServers > 0, "no run ran without a player online");
     assertTrue(resumes > 0, "no node ever resumed its world stream");
     assertTrue(resnapshots > 0, "no node was ever resnapshotted");
-    assertTrue(duplicates > 0, "no request was ever delivered twice");
+    assertTrue(duplicates > 0, "the network never delivered a request frame twice");
     assertTrue(framesHeld > 0, "no world frame was ever held behind a partition");
     assertTrue(linkResets > 0, "no connection was ever reset with the process alive");
     assertTrue(overtakenProfiles > 0, "no request ever overtook the profile it names");
@@ -218,5 +226,9 @@ class FuzzTest {
     assertTrue(resends > 0, "no unanswered request was ever sent again");
     assertTrue(nodesCompared > 0, "no node ever caught up far enough to compare its state");
     assertTrue(heldToTheSlo > 0, "no run that answered requests was held to the latency SLO");
+    assertTrue(heldAtTheEdge > 0, "no run at the latency edge was held to the SLO");
+    assertTrue(abandonedAnswers > 0, "no node ever answered a request after it was abandoned");
+    assertTrue(
+        answersBehindTheirChunk > 0, "no node ever searched before its start chunk arrived");
   }
 }

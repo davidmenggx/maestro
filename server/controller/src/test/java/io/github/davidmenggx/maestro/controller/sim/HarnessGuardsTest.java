@@ -13,10 +13,13 @@ import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.wire.Frames;
+import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
+import io.github.davidmenggx.maestro.controller.world.WorldOutput;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
+import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -28,10 +31,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import maestro.fbs.CellDelta;
 import maestro.fbs.CellRun;
 import maestro.fbs.ChunkSnapshot;
 import maestro.fbs.PathType;
 import maestro.fbs.Vec2i;
+import maestro.fbs.WorldDelta;
 import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 import org.junit.jupiter.api.Test;
@@ -50,6 +55,9 @@ class HarnessGuardsTest {
 
   private static final RegionMap ONE_REGION =
       new RegionMap(Topology.DEFAULT.withRegionsPerSide(1), List.of(NodeId.of(0)));
+
+  private static final Pos ORIGIN = new Pos(1, 40, 1);
+  private static final Pos FAR = new Pos(9, 40, 9);
 
   @Test
   void sampledScenariosSpanTheirRangeAndStayValid() {
@@ -112,6 +120,7 @@ class HarnessGuardsTest {
     Span maxLatency = new Span();
     Span failureRate = new Span();
     boolean sawPermanentLoss = false;
+    boolean sawEdge = false;
 
     for (int seed = 0; seed < DRAWS; seed++) {
       FaultPlan plan = FaultPlan.sample(SeededRng.of(seed).derive("fuzz"), 4, active);
@@ -120,6 +129,11 @@ class HarnessGuardsTest {
       maxLatency.see(plan.maxLatencySteps());
       failureRate.see(plan.offloadFailureRate());
       assertTrue(plan.maxLatencySteps() >= plan.minLatencySteps(), plan.toString());
+      assertTrue(plan.maxLatencySteps() <= FaultPlan.MAX_ONE_WAY_LATENCY_STEPS, plan.toString());
+      sawEdge |=
+          plan.clean()
+              && plan.minLatencySteps()
+                  > FaultPlan.MAX_ONE_WAY_LATENCY_STEPS - FaultPlan.EDGE_SPAN_STEPS;
 
       int died = 0;
       int recovered = 0;
@@ -143,8 +157,10 @@ class HarnessGuardsTest {
     // count only needs to exceed the number of faults drawn.
     faultCount.assertCovers("fault count", 0, FaultPlan.MAX_FAULTS);
     minLatency.assertCovers("min latency", 1, FaultPlan.MAX_MIN_LATENCY_STEPS);
-    maxLatency.assertCovers(
-        "max latency", 1, FaultPlan.MAX_MIN_LATENCY_STEPS + FaultPlan.MAX_LATENCY_SPAN_STEPS - 1);
+    maxLatency.assertCovers("max latency", 1, FaultPlan.MAX_ONE_WAY_LATENCY_STEPS);
+    // Clean plans at the edge make a round trip take nearly a tick, but never more than the
+    // one-way limit a correct controller can absorb.
+    assertTrue(sawEdge, "no clean plan put its latency at the edge");
     failureRate.assertCovers("offload failure rate", 0, FaultPlan.MAX_SAMPLED_RATE);
     assertTrue(sawPermanentLoss, "no node was ever lost for the rest of the run");
     assertEquals(List.of(), FaultPlan.sample(SeededRng.of(1).derive("fuzz"), 0, active).faults());
@@ -222,7 +238,10 @@ class HarnessGuardsTest {
     refused.put(
         "resume of another shape",
         Frames.assignment(RUN, 0, grid.topology().regionSize(), true, taller));
-    refused.put("chunk a column short", chunkWithColumns(2, Chunks.SIZE * Chunks.SIZE - 1));
+    refused.put("chunk a column short", chunkWithColumns(2, Chunks.SIZE * Chunks.SIZE - 1, 0));
+    refused.put(
+        "chunk run too tall", chunkWithColumns(2, Chunks.SIZE * Chunks.SIZE, Cells.MAX_FLOOR + 1));
+    refused.put("delta cell too tall", deltaWithFloor(2, Cells.MAX_FLOOR + 1));
 
     for (Map.Entry<String, byte[]> entry : refused.entrySet()) {
       Simulation sim = new Simulation(5L, FaultPlan.reliable());
@@ -267,41 +286,77 @@ class HarnessGuardsTest {
   }
 
   @Test
-  void theSloIsStrictAndCountsATimeoutAsAMiss() {
-    SimMetrics fast = new SimMetrics();
+  void theSloIsStrictAndCountsAMissedRequestAsLate() {
+    List<Double> fast = new ArrayList<>();
     for (int i = 0; i < 200; i++) {
-      fast.record("path.latency.ticks", 2);
+      fast.add(2.0);
     }
-    assertEquals(List.of(), Invariants.checkSlo(fast));
+    assertEquals(List.of(), Invariants.checkSlo(fast, 0));
 
-    // Two timeouts in 202 requests leave the p99 on an answer, and a third puts it on a miss.
-    fast.count("path.expired", 2);
-    assertEquals(List.of(), Invariants.checkSlo(fast));
-    fast.count("path.expired", 1);
-    assertEquals(1, Invariants.checkSlo(fast).size());
+    // Two misses in 202 requests leave the p99 on an answer, and a third puts it on a miss.
+    assertEquals(List.of(), Invariants.checkSlo(fast, 2));
+    assertEquals(1, Invariants.checkSlo(fast, 3).size());
+    // A run that refuses everything has only misses.
+    assertEquals(1, Invariants.checkSlo(List.of(), 1).size());
 
     // The SLO is below 3 ticks, so a p99 of exactly 3 misses it.
-    SimMetrics late = new SimMetrics();
+    List<Double> late = new ArrayList<>();
     for (int i = 0; i < 200; i++) {
-      late.record("path.latency.ticks", 3);
+      late.add(3.0);
     }
-    assertEquals(1, Invariants.checkSlo(late).size());
+    assertEquals(1, Invariants.checkSlo(late, 0).size());
   }
 
   @Test
-  void theLedgerMatchesEachOutcomeToOneRequest() {
+  void onlyARejectionForQueueDepthOrATimeoutIsAMiss() {
     RecordingOutput out = new RecordingOutput(new Simulation(1L, FaultPlan.reliable()));
-    out.issued(1);
-    out.issued(1);
-    out.pathDropped(1, DropReason.SUPERSEDED);
-    assertEquals(1, out.ledgerViolations().size(), out.ledgerViolations().toString());
-    out.pathDropped(1, DropReason.CANCELED);
+    DropReason[] reasons = DropReason.values();
+    for (int mob = 0; mob < reasons.length; mob++) {
+      out.issued(request(mob, 0, ORIGIN));
+      if (reasons[mob] == DropReason.SUPERSEDED) {
+        out.issued(request(mob, 0, ORIGIN));
+        out.pathDropped(mob, DropReason.SUPERSEDED);
+        out.pathDropped(mob, DropReason.CANCELED);
+      } else {
+        out.pathDropped(mob, reasons[mob]);
+      }
+    }
     assertEquals(List.of(), out.ledgerViolations());
+    assertEquals(2, out.sloMisses());
+  }
 
-    // The totals match, but one mob has an outcome too many and another one too few.
-    out.issued(2);
-    out.pathDropped(3, DropReason.MOB_GONE);
-    assertEquals(2, out.ledgerViolations().size(), out.ledgerViolations().toString());
+  @Test
+  void theLedgerMatchesEachOutcomeToItsRequest() {
+    RecordingOutput out = new RecordingOutput(new Simulation(1L, FaultPlan.reliable()));
+    WorldEvent.PathRequested first = request(1, 0, ORIGIN);
+    WorldEvent.PathRequested repeat = request(1, 1, FAR);
+    out.issued(first);
+    out.issued(repeat);
+    out.pathDropped(1, DropReason.SUPERSEDED);
+    out.handled(repeat);
+    out.pathComputed(answer(repeat));
+    assertEquals(List.of(), out.ledgerViolations());
+    assertEquals(1, out.latencies().size());
+
+    // A repeat leaves the older request open, then the newer one is dropped as if it were alone.
+    out.issued(request(2, 0, ORIGIN));
+    WorldEvent.PathRequested kept = request(2, 1, FAR);
+    out.issued(kept);
+    out.handled(kept);
+    out.pathDropped(2, DropReason.QUEUE_DEPTH);
+    assertEquals(3, out.ledgerViolations().size(), out.ledgerViolations().toString());
+
+    // An answer for a request the mob no longer has open.
+    RecordingOutput wrong = new RecordingOutput(new Simulation(1L, FaultPlan.reliable()));
+    wrong.issued(request(3, 4, FAR));
+    wrong.pathComputed(answer(request(3, 2, ORIGIN)));
+    assertEquals(1, wrong.ledgerViolations().size(), wrong.ledgerViolations().toString());
+
+    // An outcome with nothing open, and a request with no outcome.
+    RecordingOutput unmatched = new RecordingOutput(new Simulation(1L, FaultPlan.reliable()));
+    unmatched.issued(request(4, 0, ORIGIN));
+    unmatched.pathDropped(5, DropReason.MOB_GONE);
+    assertEquals(2, unmatched.ledgerViolations().size(), unmatched.ledgerViolations().toString());
   }
 
   @Test
@@ -384,10 +439,14 @@ class HarnessGuardsTest {
     assertEquals(1.0, metrics.percentile("latency", 0.0));
     assertTrue(Double.isNaN(metrics.percentile("nothing", 0.99)));
     // Misses rank above every recorded value.
-    assertEquals(100.0, metrics.percentileWithMisses("latency", 0.99, 1));
-    assertEquals(Double.POSITIVE_INFINITY, metrics.percentileWithMisses("latency", 0.99, 2));
-    assertEquals(Double.POSITIVE_INFINITY, metrics.percentileWithMisses("nothing", 0.5, 1));
-    assertTrue(Double.isNaN(metrics.percentileWithMisses("nothing", 0.99, 0)));
+    List<Double> latencies = new ArrayList<>();
+    for (int i = 1; i <= 100; i++) {
+      latencies.add((double) i);
+    }
+    assertEquals(100.0, SimMetrics.percentileWithMisses(latencies, 0.99, 1));
+    assertEquals(Double.POSITIVE_INFINITY, SimMetrics.percentileWithMisses(latencies, 0.99, 2));
+    assertEquals(Double.POSITIVE_INFINITY, SimMetrics.percentileWithMisses(List.of(), 0.5, 1));
+    assertTrue(Double.isNaN(SimMetrics.percentileWithMisses(List.of(), 0.99, 0)));
 
     metrics.count("frames", 2, "node", "node-0");
     metrics.count("frames", 5, "node", "node-1");
@@ -504,6 +563,86 @@ class HarnessGuardsTest {
   }
 
   @Test
+  void aDatagramTooLargeToSendIsRefusedAndAFragmentedOneIsLostMoreOften() {
+    Simulation sim = new Simulation(1L, FaultPlan.reliable().withDropRate(0.2));
+    NodeId node = NodeId.of(0);
+    sim.addNode(node, 1);
+    SimTransport transport = sim.transport();
+    transport.listen(new NoopListener());
+    transport.connect(node, "sim://0");
+    sim.run(event -> {}, (tick, input) -> {}, 1);
+
+    transport.toController(
+        node, Channel.REQUEST, ByteBuffer.allocate(SimTransport.MAX_DATAGRAM_BYTES + 1));
+    assertEquals(1, sim.metrics().total("transport.oversize"));
+
+    int sends = 2000;
+    for (int i = 0; i < sends; i++) {
+      transport.toController(
+          node, Channel.REQUEST, ByteBuffer.allocate(SimTransport.FRAGMENT_BYTES));
+    }
+    long whole = sim.metrics().total("transport.dropped");
+    for (int i = 0; i < sends; i++) {
+      transport.toController(
+          node, Channel.REQUEST, ByteBuffer.allocate(8 * SimTransport.FRAGMENT_BYTES));
+    }
+    long fragmented = sim.metrics().total("transport.dropped") - whole;
+    // One fragment is lost at the plan's 20%, and eight lose 1 - 0.8^8, about 83%.
+    assertTrue(whole > sends / 10 && whole < sends * 3 / 10, "lost " + whole);
+    assertTrue(fragmented > sends * 7 / 10, "lost " + fragmented);
+  }
+
+  @Test
+  void aSectionTheWorldCallsUniformHoldsOneCell() {
+    int uniform = 0;
+    for (int seed = 0; seed < 20; seed++) {
+      Topology topology = Topology.sample(SeededRng.of(seed).derive("fuzz"));
+      SimWorld world = new SimWorld(topology, 1, SeededRng.of(seed).derive("terrain"));
+      SeededRng rng = SeededRng.of(seed);
+      for (int chunkX = 0; chunkX < world.chunksPerSide(); chunkX++) {
+        for (int chunkZ = 0; chunkZ < world.chunksPerSide(); chunkZ++) {
+          world.loadChunk(chunkX, chunkZ);
+        }
+      }
+      // Changed blocks differ from the terrain around them, so a section holding one must not be
+      // summarized.
+      for (int i = 0; i < 20; i++) {
+        world.set(
+            rng.nextInt(world.size()),
+            world.minY() + rng.nextInt(world.height()),
+            rng.nextInt(world.size()),
+            (byte) PathType.WATER,
+            0);
+      }
+
+      int sections = world.height() / WorldSource.SECTION_HEIGHT;
+      for (int chunkX = 0; chunkX < world.chunksPerSide(); chunkX++) {
+        for (int chunkZ = 0; chunkZ < world.chunksPerSide(); chunkZ++) {
+          for (int section = 0; section < sections; section++) {
+            int cell = world.uniformCell(chunkX, chunkZ, section);
+            if (cell == WorldSource.NOT_UNIFORM) {
+              continue;
+            }
+            uniform++;
+            int low = world.minY() + section * WorldSource.SECTION_HEIGHT;
+            for (int x = chunkX * Chunks.SIZE; x < (chunkX + 1) * Chunks.SIZE; x++) {
+              for (int z = chunkZ * Chunks.SIZE; z < (chunkZ + 1) * Chunks.SIZE; z++) {
+                for (int y = low; y < low + WorldSource.SECTION_HEIGHT; y++) {
+                  assertEquals(
+                      cell,
+                      (world.floorAt(x, y, z) << 8) | world.pathTypeAt(x, y, z),
+                      "seed " + seed + " at " + x + "," + y + "," + z);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    assertTrue(uniform > 0, "no section was ever summarized");
+  }
+
+  @Test
   void theTransportTakesOneListenerAndOnlyKnownNodes() {
     Simulation sim = new Simulation(1L, FaultPlan.reliable());
     sim.addNode(NodeId.of(0), 1);
@@ -515,15 +654,18 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> transport.connect(NodeId.of(7), "sim://7"));
   }
 
-  /** A chunk frame with {@code columns} one-run columns, which only a faulty encoder would send. */
-  private static byte[] chunkWithColumns(long sequence, int columns) {
+  /**
+   * A chunk frame with {@code columns} one-run columns of air with {@code floor}. Only a faulty
+   * encoder would send one with the wrong column count or a floor past the limit.
+   */
+  private static byte[] chunkWithColumns(long sequence, int columns, int floor) {
     FlatBufferBuilder builder = new FlatBufferBuilder(1024);
     int[] counts = new int[columns];
     Arrays.fill(counts, 1);
     int countsVector = ChunkSnapshot.createRunCountsVector(builder, counts);
     ChunkSnapshot.startRunsVector(builder, columns);
     for (int i = 0; i < columns; i++) {
-      CellRun.createCellRun(builder, Topology.DEFAULT.height(), PathType.OPEN, 0);
+      CellRun.createCellRun(builder, Topology.DEFAULT.height(), PathType.OPEN, floor);
     }
     int runs = builder.endVector();
     ChunkSnapshot.startChunkSnapshot(builder);
@@ -533,6 +675,27 @@ class HarnessGuardsTest {
     ChunkSnapshot.addRuns(builder, runs);
     int snapshot = ChunkSnapshot.endChunkSnapshot(builder);
     builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.ChunkSnapshot, snapshot));
+    return builder.sizedByteArray();
+  }
+
+  private static WorldEvent.PathRequested request(int mob, long tick, Pos target) {
+    return new WorldEvent.PathRequested(
+        tick, mob, (short) 1, ORIGIN, target, new WorldEvent.Search(0, 16f, 256, 3));
+  }
+
+  private static WorldOutput.PathResult answer(WorldEvent.PathRequested request) {
+    return new WorldOutput.PathResult(
+        request.mobId(), request.target(), true, List.of(), 1.0f, request.tick());
+  }
+
+  /** A delta with one cell of {@code floor}, which the encoder refuses to build past the limit. */
+  private static byte[] deltaWithFloor(long sequence, int floor) {
+    FlatBufferBuilder builder = new FlatBufferBuilder(64);
+    WorldDelta.startCellsVector(builder, 1);
+    CellDelta.createCellDelta(builder, (short) 1, (short) 40, (short) 1, PathType.BLOCKED, floor);
+    int cells = builder.endVector();
+    int delta = WorldDelta.createWorldDelta(builder, sequence, cells);
+    builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.WorldDelta, delta));
     return builder.sizedByteArray();
   }
 

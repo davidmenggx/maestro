@@ -125,13 +125,19 @@ public final class SimRun {
 
   /** A run driven by a fixed event list instead of a generator, for focused tests. */
   public static SimRun scripted(long seed, FaultPlan faults, long ticks, List<WorldEvent> events) {
+    return scripted(seed, faults, ticks, Scenario.DEFAULT, events);
+  }
+
+  /** As above, on a fleet sized by {@code scenario}. Its event rates are not used. */
+  public static SimRun scripted(
+      long seed, FaultPlan faults, long ticks, Scenario scenario, List<WorldEvent> events) {
     return new SimRun(
         seed,
         faults,
         ticks,
         ticks,
         Topology.DEFAULT,
-        Scenario.DEFAULT,
+        scenario,
         (world, rng) -> new ScriptedWorkload(world, events));
   }
 
@@ -141,9 +147,12 @@ public final class SimRun {
     sim.run(
         event -> {
           if (event instanceof WorldEvent.PathRequested requested) {
-            out.issued(requested.mobId());
+            out.issued(requested);
+            controller.accept(event);
+            out.handled(requested);
+          } else {
+            controller.accept(event);
           }
-          controller.accept(event);
         },
         workload,
         ticks);

@@ -37,9 +37,9 @@ import maestro.fbs.UnknownProfile;
 
 /**
  * Minimal controller used to check that the seams can carry a real workload. It assigns regions,
- * snapshots them, streams deltas in sequence, batches requests per tick, resends the ones left
- * unanswered and applies responses. Sharding, failover and the failure detector are absent, because
- * that is the logic this harness is meant to test.
+ * snapshots them, streams deltas in sequence, batches requests per tick into datagram-sized frames,
+ * resends the ones left unanswered and applies responses. Sharding, failover and the failure
+ * detector are absent, because that is the logic this harness is meant to test.
  *
  * <p>Encoding is offloaded and can finish out of order, but the world stream must leave in sequence
  * order, so finished frames wait in an outbox until the earlier gap is filled. A failed encode is
@@ -53,10 +53,17 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   public static final int MAX_TICKS_LATE = 10;
 
   /**
+   * Ticks from a request to the earliest tick its node usually serves it: the batch is encoded off
+   * the main thread and leaves at the end of the next tick, and the node serves it in the tick
+   * after that.
+   */
+  static final int SEND_TICKS = 2;
+
+  /**
    * A request is sent again under the same id once its answer is this many ticks late, at most
-   * {@link #MAX_RESENDS} times. An answer is due once the node has served the requests ahead of it,
-   * counted from when the request left. A node answers a request it has seen with the same bytes,
-   * so a resend that crosses a slow answer costs only bandwidth.
+   * {@link #MAX_RESENDS} times. An answer is due once the node has served the requests it held
+   * ahead of it when it left. A node answers a request it has seen with the same bytes, so a resend
+   * that crosses a slow answer costs only bandwidth.
    */
   static final int RESEND_TICKS = 1;
 
@@ -66,28 +73,64 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private static final int RECONNECT_TICKS = 20;
 
   /**
-   * World frames kept per node so a reconnecting node can be replayed forward instead of sent a new
-   * snapshot. A node that fell further behind than this gets a new snapshot.
+   * World frames kept per region so a reconnecting holder can be replayed forward instead of sent a
+   * new snapshot. A holder that fell further behind than this gets a new snapshot.
    */
   static final int RETENTION_FRAMES = 48;
 
   /**
    * {@code request} is kept so it can be resent, and so the result can be returned as a complete
-   * {@code Path}. {@code sentTick} is {@link #NOT_SENT} while its latest copy waits to be encoded.
+   * {@code Path}. {@code chunkSequence} is the world sequence from which the node holds the chunk
+   * the search starts in. {@code dueTick} is the tick by whose end the latest copy should be
+   * answered, or {@link #NOT_SENT} while that copy waits to be encoded. An {@code abandoned}
+   * request has already been reported dropped, but its node may still be working on it, so it still
+   * counts against the node.
    */
   private record Outstanding(
-      int mobId, NodeId node, long issuedTick, Frames.Request request, long sentTick, int resends) {
+      int mobId,
+      NodeId node,
+      long issuedTick,
+      Frames.Request request,
+      long chunkSequence,
+      long dueTick,
+      int resends,
+      boolean abandoned) {
 
-    Outstanding sent(long tick) {
-      return new Outstanding(mobId, node, issuedTick, request, tick, resends);
+    Outstanding sent(long due) {
+      return new Outstanding(
+          mobId, node, issuedTick, request, chunkSequence, due, resends, abandoned);
     }
 
     Outstanding resent() {
-      return new Outstanding(mobId, node, issuedTick, request, NOT_SENT, resends + 1);
+      return new Outstanding(
+          mobId, node, issuedTick, request, chunkSequence, NOT_SENT, resends + 1, abandoned);
+    }
+
+    Outstanding abandon() {
+      return new Outstanding(
+          mobId, node, issuedTick, request, chunkSequence, dueTick, resends, true);
     }
   }
 
   private static final long NOT_SENT = -1;
+
+  /** A frame from a node, read in full before any of it is used. */
+  private sealed interface Reply {}
+
+  /** A {@code PathResponse}. Positions are relative to the node's area. */
+  private record Answer(
+      long requestId, boolean reached, List<WorldOutput.Node> nodes, float cost, long worldSequence)
+      implements Reply {}
+
+  /** An {@code UnknownProfile}. */
+  private record Refusal(long requestId, int classId) implements Reply {}
+
+  /** A {@code Hello}. */
+  private record Greeting(long run, long regionId, long lastSequence, int pathfinder)
+      implements Reply {}
+
+  /** A {@code Heartbeat}. */
+  private record Depth(long queueDepth) implements Reply {}
 
   /** What the controller tracks about one node's connection. */
   private static final class NodeState {
@@ -102,9 +145,13 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     /** Past the {@code Hello} handshake, so world frames may flow. */
     private boolean greeted;
 
+    /** Requests that count against the node: outstanding ones, abandoned ones included. */
     private int inFlight;
 
-    /** Depth the node last reported. Heartbeats are infrequent, so this is a lower bound. */
+    /**
+     * Depth the node reported in its last heartbeat. It ages between heartbeats, and can be above
+     * or below the true depth, so admission takes the larger of it and {@link #inFlight}.
+     */
     private int reportedDepth;
 
     /** Search the node runs, reported on connect. */
@@ -143,10 +190,12 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     private long evicted;
 
     private final TreeMap<Long, byte[]> outbox = new TreeMap<>();
-    private List<WorldEvent.BlockChanged> cells = new ArrayList<>();
 
-    /** Chunks whose state the holder has been sent, resident or cleared. */
-    private final Set<Long> sentChunks = new LinkedHashSet<>();
+    /**
+     * Chunks the holder has been sent as resident, each with the sequence of the frame that made it
+     * resident. A chunk sent as cleared is absent, because the holder has it as air.
+     */
+    private final Map<Long, Long> resident = new LinkedHashMap<>();
 
     /** Chunks whose state changed and has not been sent. */
     private final Set<Long> dirtyChunks = new LinkedHashSet<>();
@@ -165,10 +214,15 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   /** Indexed by region. */
   private final List<RegionStream> streams = new ArrayList<>();
 
-  /** Insertion-ordered, and request ids only increase, so this is also in issue-tick order. */
+  /**
+   * Every request that counts against a node, abandoned ones included. Insertion-ordered, and
+   * request ids only increase, so this is also in issue-tick order.
+   */
   private final Map<Long, Outstanding> outstanding = new LinkedHashMap<>();
 
+  /** Each mob's live request. */
   private final Map<Integer, Long> requestByMob = new LinkedHashMap<>();
+
   private final List<WorldEvent.BlockChanged> pendingCells = new ArrayList<>();
   private final List<String> selfViolations = new ArrayList<>();
 
@@ -204,6 +258,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     return requestsIssued;
   }
 
+  /** Requests that still count against a node, abandoned ones included. */
   public int outstandingCount() {
     return outstanding.size();
   }
@@ -223,8 +278,8 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   }
 
   /**
-   * Internal bookkeeping that must be consistent: one mob mapping per outstanding request, and
-   * per-node in-flight counters that sum to the total.
+   * Internal bookkeeping that must be consistent: one mob mapping per live request, and per-node
+   * in-flight counters that sum to the requests that count against nodes.
    */
   public List<String> selfCheck() {
     List<String> violations = new ArrayList<>(selfViolations);
@@ -265,18 +320,18 @@ public final class ProbeController implements WorldInput, Transport.Listener {
                 + fleetPathfinder);
       }
     }
-    if (requestByMob.size() != outstanding.size()) {
+    int live = 0;
+    for (Outstanding request : outstanding.values()) {
+      live += request.abandoned() ? 0 : 1;
+    }
+    if (requestByMob.size() != live) {
       violations.add(
-          "mob index holds "
-              + requestByMob.size()
-              + " but "
-              + outstanding.size()
-              + " requests are outstanding");
+          "mob index holds " + requestByMob.size() + " but " + live + " requests are live");
     }
     for (Map.Entry<Integer, Long> entry : requestByMob.entrySet()) {
       Outstanding request = outstanding.get(entry.getValue());
-      if (request == null || request.mobId() != entry.getKey()) {
-        violations.add("mob " + entry.getKey() + " points at a request that is not outstanding");
+      if (request == null || request.abandoned() || request.mobId() != entry.getKey()) {
+        violations.add("mob " + entry.getKey() + " points at a request that is not live");
       }
     }
     if (counted != outstanding.size()) {
@@ -328,21 +383,74 @@ public final class ProbeController implements WorldInput, Transport.Listener {
 
   @Override
   public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
-    switch (channel) {
-      case REQUEST -> onResponse(node, frame);
-      case CONTROL -> onControlReply(node, frame);
-      case WORLD -> selfViolations.add(node + " sent a frame on the world channel");
+    if (channel == Channel.WORLD) {
+      selfViolations.add(node + " sent a frame on the world channel");
+      return;
+    }
+    Reply reply;
+    try {
+      reply = channel == Channel.REQUEST ? decodeResponse(frame) : decodeControlReply(frame);
+    } catch (RuntimeException e) {
+      // A datagram can arrive cut short, or from something that is not a node.
+      env.metrics().count("controller.malformed.frame", 1, "channel", channel.name());
+      return;
+    }
+    switch (reply) {
+      case Answer answer -> onPathResponse(node, answer);
+      case Refusal refusal -> onUnknownProfile(node, refusal);
+      case Greeting greeting -> onHello(node, greeting);
+      case Depth depth -> {
+        state(node).reportedDepth = (int) depth.queueDepth();
+        // The only view of a node's backlog in production, and the arrivals a
+        // failure detector reads.
+        env.metrics().record("node.queue.reported", depth.queueDepth(), "node", node.toString());
+      }
+      case null -> env.metrics().count("controller.unknown.frame", 1, "channel", channel.name());
     }
   }
 
-  private void onResponse(NodeId node, ByteBuffer frame) {
+  /** The reply in a response frame, or null for a body this controller does not know. */
+  private static Reply decodeResponse(ByteBuffer frame) {
     ResponseFrame response = ResponseFrame.getRootAsResponseFrame(frame);
     switch (response.bodyType()) {
-      case ResponseMsg.PathResponse ->
-          onPathResponse((PathResponse) response.body(new PathResponse()));
-      case ResponseMsg.UnknownProfile ->
-          onUnknownProfile(node, (UnknownProfile) response.body(new UnknownProfile()));
-      default -> env.metrics().count("controller.unknown.response", 1);
+      case ResponseMsg.PathResponse -> {
+        PathResponse body = (PathResponse) response.body(new PathResponse());
+        List<WorldOutput.Node> nodes = new ArrayList<>(body.nodesLength());
+        PathNode scratch = new PathNode();
+        for (int i = 0; i < body.nodesLength(); i++) {
+          body.nodes(scratch, i);
+          Pos pos = new Pos(scratch.pos().x(), scratch.pos().y(), scratch.pos().z());
+          nodes.add(new WorldOutput.Node(pos, (byte) scratch.type()));
+        }
+        return new Answer(
+            body.requestId(), body.reached(), nodes, body.cost(), body.worldSequence());
+      }
+      case ResponseMsg.UnknownProfile -> {
+        UnknownProfile body = (UnknownProfile) response.body(new UnknownProfile());
+        return new Refusal(body.requestId(), body.classId());
+      }
+      default -> {
+        return null;
+      }
+    }
+  }
+
+  /** The reply in a control frame, or null for a body this controller does not know. */
+  private static Reply decodeControlReply(ByteBuffer frame) {
+    ControlReplyFrame reply = ControlReplyFrame.getRootAsControlReplyFrame(frame);
+    switch (reply.bodyType()) {
+      case ControlReplyMsg.Hello -> {
+        Hello hello = (Hello) reply.body(new Hello());
+        return new Greeting(
+            hello.run(), hello.regionId(), hello.lastSequence(), hello.pathfinder());
+      }
+      case ControlReplyMsg.Heartbeat -> {
+        Heartbeat heartbeat = (Heartbeat) reply.body(new Heartbeat());
+        return new Depth(heartbeat.queueDepth());
+      }
+      default -> {
+        return null;
+      }
     }
   }
 
@@ -351,42 +459,33 @@ public final class ProbeController implements WorldInput, Transport.Listener {
    * channel either delivers the profile or breaks the connection, so nothing is resent. The request
    * is dropped sooner than its timeout would drop it.
    */
-  private void onUnknownProfile(NodeId node, UnknownProfile reply) {
+  private void onUnknownProfile(NodeId node, Refusal refusal) {
     env.metrics().count("path.profile.unknown", 1, "node", node.toString());
-    // Only a profile already sent on this connection can be overtaken. A profile that was
-    // never sent is a controller bug, which the node cannot distinguish from a delay.
-    if (!state(node).registeredClasses.contains((short) reply.classId())) {
-      selfViolations.add(node + " was asked to use profile " + reply.classId() + " never sent");
-    }
-    if (outstanding.containsKey(reply.requestId())) {
-      drop(reply.requestId(), DropReason.CLASS_UNREGISTERED);
-    } else {
+    Outstanding request = outstanding.get(refusal.requestId());
+    if (request == null || !request.node().equals(node)) {
       env.metrics().count("path.response.stale", 1);
+      return;
     }
-  }
-
-  private void onControlReply(NodeId node, ByteBuffer frame) {
-    ControlReplyFrame reply = ControlReplyFrame.getRootAsControlReplyFrame(frame);
-    switch (reply.bodyType()) {
-      case ControlReplyMsg.Hello -> onHello(node, (Hello) reply.body(new Hello()));
-      case ControlReplyMsg.Heartbeat -> {
-        Heartbeat heartbeat = (Heartbeat) reply.body(new Heartbeat());
-        state(node).reportedDepth = (int) heartbeat.queueDepth();
-        // The only view of a node's backlog in production, and the arrivals a
-        // failure detector reads.
-        env.metrics()
-            .record("node.queue.reported", heartbeat.queueDepth(), "node", node.toString());
-      }
-      default -> env.metrics().count("controller.unknown.control.reply", 1);
+    // A request outstanding on a node was admitted on its current connection, so its profile
+    // was sent on that connection too. One that was not is a controller bug, which the node
+    // cannot tell from a delay.
+    if (!state(node).registeredClasses.contains((short) refusal.classId())) {
+      selfViolations.add(node + " was asked to use profile " + refusal.classId() + " never sent");
+    }
+    // The node refused every copy, so it holds nothing of the request.
+    if (request.abandoned()) {
+      release(refusal.requestId(), request);
+    } else {
+      finish(refusal.requestId(), request, DropReason.CLASS_UNREGISTERED);
     }
   }
 
   /**
    * Decides whether to replay the world stream or start it over. Replay needs the node to still
-   * hold its assigned region, at a sequence that the controller has not dropped from the node's
+   * hold its assigned region, at a sequence that the controller has not dropped from the region's
    * outbox and that is at or after the point the retained frames continue from.
    */
-  private void onHello(NodeId node, Hello hello) {
+  private void onHello(NodeId node, Greeting hello) {
     NodeState state = state(node);
     state.greeted = true;
     state.pathfinder = hello.pathfinder();
@@ -415,7 +514,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       // queued below.
       stream.logBase = stream.lastSequence + 1;
       stream.nextToSend = stream.lastSequence + 1;
-      stream.sentChunks.clear();
+      stream.resident.clear();
       stream.dirtyChunks.clear();
       markRegionDirty(region, stream);
     }
@@ -445,7 +544,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     // Block changes first, while the chunks about to be sent are still marked.
     flushCells();
     flushChunks();
-    resendUnanswered(tick);
+    settleDueAnswers(tick);
     flushRequests();
     env.metrics().gauge("controller.outstanding", outstanding.size());
   }
@@ -453,7 +552,9 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   /**
    * A request not answered within the budget, resends included, is abandoned. This handles repeated
    * loss on the request stream, and a request to a node that went silent without resetting its
-   * connection. {@code outstanding} is in issue order, so the scan stops at the first live entry.
+   * connection. Admission keeps a node's work within the budget, so an abandoned request older than
+   * it stops counting against the node too. {@code outstanding} is in issue order, so the scan
+   * stops at the first younger entry.
    */
   private void expireOutstanding(long tick) {
     Iterator<Map.Entry<Long, Outstanding>> entries = outstanding.entrySet().iterator();
@@ -463,7 +564,11 @@ public final class ProbeController implements WorldInput, Transport.Listener {
         return;
       }
       entries.remove();
-      forget(request);
+      state(request.node()).inFlight--;
+      if (request.abandoned()) {
+        continue;
+      }
+      requestByMob.remove(request.mobId());
       env.metrics().count("path.expired", 1);
       out.pathDropped(request.mobId(), DropReason.TIMEOUT);
     }
@@ -488,7 +593,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   private void onPathCanceled(int mobId) {
     Long requestId = requestByMob.get(mobId);
     if (requestId != null) {
-      drop(requestId, DropReason.CANCELED);
+      abandon(requestId, DropReason.CANCELED);
     }
   }
 
@@ -496,7 +601,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     mobs.remove(mobId);
     Long requestId = requestByMob.get(mobId);
     if (requestId != null) {
-      drop(requestId, DropReason.MOB_GONE);
+      abandon(requestId, DropReason.MOB_GONE);
     }
   }
 
@@ -506,6 +611,13 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     if (!mobs.contains(mobId)) {
       out.pathDropped(mobId, DropReason.MOB_GONE);
       return;
+    }
+    // One live request per mob. A repeat replaces the older one even if it is not admitted
+    // itself, since the mob no longer wants the older answer. The older one is reported as
+    // dropped, so every request still ends in exactly one callback.
+    Long previousRequest = requestByMob.get(mobId);
+    if (previousRequest != null) {
+      abandon(previousRequest, DropReason.SUPERSEDED);
     }
     short classId = event.classId();
 
@@ -523,11 +635,13 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     }
     NodeId node = regions.owner(region);
     NodeState state = state(node);
-    // The chunk the search starts in must have reached the node. Chunk state is
-    // produced at the tick boundary and a request is admitted within the tick, so
-    // the world frame is always a tick ahead of the first request that needs it.
+    // The chunk the search starts in must be resident on the node. Its frame is produced
+    // at a tick boundary, before the request, so it usually reaches the node a tick
+    // ahead of it. If it does not, as when its encode is retried, the answer's world
+    // sequence shows it.
     long startChunk = Chunks.key(Chunks.of(event.start().x()), Chunks.of(event.start().z()));
-    if (!state.greeted || !streams.get(region).sentChunks.contains(startChunk)) {
+    Long chunkSequence = streams.get(region).resident.get(startChunk);
+    if (!state.greeted || chunkSequence == null) {
       out.pathDropped(mobId, DropReason.NO_NODE);
       return;
     }
@@ -551,86 +665,115 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       return;
     }
 
-    // Heartbeats are infrequent, so a reported depth is only a lower bound. The
-    // number of requests already in flight to that node is a better estimate.
-    long admitted = (long) MAX_TICKS_LATE * nodeCapacity;
-    if (Math.max(state.reportedDepth, state.inFlight) + 1 > admitted) {
+    // The node serves this request once it has served the ones ahead of it, at the
+    // capacity admission assumes, and no sooner than `SEND_TICKS` from now. The larger
+    // of the reported depth and the requests counted against the node estimates how
+    // many are ahead.
+    long ahead = Math.max(state.reportedDepth, state.inFlight);
+    if (ahead / nodeCapacity + SEND_TICKS > MAX_TICKS_LATE) {
       env.metrics().count("path.rejected", 1, "reason", "queue_depth");
       out.pathDropped(mobId, DropReason.QUEUE_DEPTH);
       return;
-    }
-
-    // One outstanding request per mob. The older one is reported as dropped, so
-    // every request still ends in exactly one callback.
-    Long previousRequest = requestByMob.get(mobId);
-    if (previousRequest != null) {
-      drop(previousRequest, DropReason.SUPERSEDED);
     }
 
     long requestId = nextRequestId++;
     Frames.Request request =
         new Frames.Request(requestId, classId, event.start(), event.target(), event.search());
     requestByMob.put(mobId, requestId);
-    outstanding.put(requestId, new Outstanding(mobId, node, event.tick(), request, NOT_SENT, 0));
+    outstanding.put(
+        requestId,
+        new Outstanding(mobId, node, event.tick(), request, chunkSequence, NOT_SENT, 0, false));
     state.inFlight++;
     state.requests.add(request);
   }
 
-  private void onPathResponse(PathResponse response) {
-    Outstanding request = outstanding.get(response.requestId());
+  private void onPathResponse(NodeId node, Answer answer) {
+    Outstanding request = outstanding.get(answer.requestId());
     if (request == null) {
-      // A retry, or the answer to a request that was already replaced or abandoned.
+      // A retry, or the answer to a request that was already settled.
       env.metrics().count("path.response.stale", 1);
       return;
     }
-    List<WorldOutput.Node> nodes;
-    try {
-      nodes = path(response, request.node());
-    } catch (IllegalArgumentException e) {
-      // The request stays outstanding, like one whose answer was lost.
-      env.metrics().count("path.response.malformed", 1, "node", request.node().toString());
+    if (!request.node().equals(node)) {
+      env.metrics().count("path.response.misrouted", 1, "node", node.toString());
       return;
     }
-    outstanding.remove(response.requestId());
-    forget(request);
+    if (request.abandoned()) {
+      // The node is done with it, and the mob no longer wants it.
+      release(answer.requestId(), request);
+      env.metrics().count("path.response.abandoned", 1);
+      return;
+    }
+    if (answer.worldSequence() < request.chunkSequence()) {
+      // The node searched before the chunk the search starts in reached it, so it searched
+      // air there. A resend would get the same answer back.
+      env.metrics().count("path.response.behind", 1, "node", node.toString());
+      finish(answer.requestId(), request, DropReason.NO_NODE);
+      return;
+    }
+    release(answer.requestId(), request);
+    requestByMob.remove(request.mobId());
     env.metrics().record("path.latency.ticks", env.clock().tick() - request.issuedTick());
     out.pathComputed(
         new WorldOutput.PathResult(
             request.mobId(),
             request.request().target(),
-            response.reached(),
-            nodes,
-            response.cost(),
+            answer.reached(),
+            inWorld(answer.nodes(), node),
+            answer.cost(),
             request.issuedTick()));
   }
 
-  /** The answer's path in world positions. Throws if a node in it is not a valid one. */
-  private List<WorldOutput.Node> path(PathResponse response, NodeId node) {
-    // Positions come back relative to the region the request went to.
+  /** The answer's path in world positions. Positions come back relative to the node's area. */
+  private List<WorldOutput.Node> inWorld(List<WorldOutput.Node> path, NodeId node) {
     int region = regions.indexOf(node);
     int originX = regions.minX(region);
     int originZ = regions.minZ(region);
-    List<WorldOutput.Node> nodes = new ArrayList<>(response.nodesLength());
-    PathNode scratch = new PathNode();
-    for (int i = 0; i < response.nodesLength(); i++) {
-      response.nodes(scratch, i);
-      Pos pos =
-          new Pos(scratch.pos().x() + originX, scratch.pos().y(), scratch.pos().z() + originZ);
-      nodes.add(new WorldOutput.Node(pos, (byte) scratch.type()));
+    List<WorldOutput.Node> nodes = new ArrayList<>(path.size());
+    for (WorldOutput.Node relative : path) {
+      Pos pos = relative.pos();
+      nodes.add(
+          new WorldOutput.Node(
+              new Pos(pos.x() + originX, pos.y(), pos.z() + originZ), relative.pathType()));
     }
     return nodes;
   }
 
-  /** Drops one known request id. */
-  private void drop(long requestId, DropReason reason) {
-    Outstanding request = outstanding.remove(requestId);
-    if (request == null) {
+  /**
+   * Reports a live request dropped because its mob no longer wants it. A copy may already be on its
+   * way to the node or in the node's queue, so the request keeps counting against the node until
+   * its answer is due or arrives. One that never left the controller is simply removed.
+   */
+  private void abandon(long requestId, DropReason reason) {
+    Outstanding request = outstanding.get(requestId);
+    if (request == null || request.abandoned()) {
       return;
     }
-    forget(request);
+    requestByMob.remove(request.mobId());
+    // A copy waiting for the next batch never leaves. Any earlier copy was overdue, or there
+    // would be no resend, so the node is taken to be done with it.
+    if (state(request.node()).requests.remove(request.request())) {
+      release(requestId, request);
+    } else {
+      outstanding.put(requestId, request.abandon());
+    }
     out.pathDropped(request.mobId(), reason);
   }
 
+  /** Reports a live request dropped once its node is done with it or never had it. */
+  private void finish(long requestId, Outstanding request, DropReason reason) {
+    release(requestId, request);
+    requestByMob.remove(request.mobId());
+    out.pathDropped(request.mobId(), reason);
+  }
+
+  /** The request stops counting against its node. */
+  private void release(long requestId, Outstanding request) {
+    outstanding.remove(requestId);
+    state(request.node()).inFlight--;
+  }
+
+  /** Every request on a lost connection. The live ones are reported dropped. */
   private void dropWhere(NodeId node, DropReason reason) {
     Iterator<Map.Entry<Long, Outstanding>> entries = outstanding.entrySet().iterator();
     while (entries.hasNext()) {
@@ -639,18 +782,12 @@ public final class ProbeController implements WorldInput, Transport.Listener {
         continue;
       }
       entries.remove();
-      forget(request);
-      out.pathDropped(request.mobId(), reason);
+      state(node).inFlight--;
+      if (!request.abandoned()) {
+        requestByMob.remove(request.mobId());
+        out.pathDropped(request.mobId(), reason);
+      }
     }
-  }
-
-  /**
-   * Releases the per-mob and per-node bookkeeping for a request already removed from {@code
-   * outstanding}.
-   */
-  private void forget(Outstanding request) {
-    requestByMob.remove(request.mobId());
-    state(request.node()).inFlight--;
   }
 
   /** One frame per chunk whose residency or content changed, to the node that owns it. */
@@ -669,8 +806,10 @@ public final class ProbeController implements WorldInput, Transport.Listener {
         int localX = chunkX - originChunkX;
         int localZ = chunkZ - originChunkZ;
         long sequence = ++stream.lastSequence;
-        stream.sentChunks.add(key);
         if (loadedChunks.contains(key)) {
+          // A chunk sent again while resident never was air on the node, so it keeps
+          // the sequence it first became resident at.
+          stream.resident.putIfAbsent(key, sequence);
           // Read on the main thread and encode on another: `WorldSource` is only safe here.
           Frames.ChunkRuns runs = Frames.readChunk(world, chunkX, chunkZ);
           offload(
@@ -679,6 +818,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
               "chunk",
               () -> Frames.chunkSnapshot(sequence, localX, localZ, runs));
         } else {
+          stream.resident.remove(key);
           offload(region, sequence, "chunk", () -> Frames.chunkCleared(sequence, localX, localZ));
         }
       }
@@ -687,11 +827,12 @@ public final class ProbeController implements WorldInput, Transport.Listener {
   }
 
   /**
-   * One delta per region, holding the changes to chunks its holder has. A chunk about to be sent is
-   * read after every change in it, so its changes are left out. Sending them after it would also
-   * put a block back into a chunk that left.
+   * Deltas per region, holding the changes to chunks its holder has resident. A chunk about to be
+   * sent is read after every change in it, so its changes are left out. Sending them after it would
+   * also put a block back into a chunk that left.
    */
   private void flushCells() {
+    Map<Integer, List<WorldEvent.BlockChanged>> byRegion = new TreeMap<>();
     for (WorldEvent.BlockChanged change : pendingCells) {
       int region = regions.regionAt(change.pos().x(), change.pos().z());
       if (region < 0) {
@@ -699,41 +840,48 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       }
       RegionStream stream = streams.get(region);
       long key = Chunks.key(Chunks.of(change.pos().x()), Chunks.of(change.pos().z()));
-      if (stream.sentChunks.contains(key) && !stream.dirtyChunks.contains(key)) {
-        stream.cells.add(change);
+      if (stream.resident.containsKey(key) && !stream.dirtyChunks.contains(key)) {
+        byRegion.computeIfAbsent(region, unseen -> new ArrayList<>()).add(change);
       }
     }
     pendingCells.clear();
 
-    for (int region = 0; region < streams.size(); region++) {
-      RegionStream stream = streams.get(region);
-      if (stream.cells.isEmpty()) {
-        continue;
-      }
+    for (Map.Entry<Integer, List<WorldEvent.BlockChanged>> entry : byRegion.entrySet()) {
       // Produced even while the node is away. The stream belongs to the region, and
       // a node that reconnects within the retention window is replayed from here.
-      List<WorldEvent.BlockChanged> cells = stream.cells;
-      stream.cells = new ArrayList<>();
-      long sequence = ++stream.lastSequence;
+      int region = entry.getKey();
+      List<WorldEvent.BlockChanged> cells = entry.getValue();
+      RegionStream stream = streams.get(region);
       int minX = regions.minX(region);
       int minZ = regions.minZ(region);
-      offload(region, sequence, "delta", () -> Frames.delta(sequence, cells, minX, minZ));
+      for (int from = 0; from < cells.size(); from += Frames.MAX_CELLS_PER_DELTA) {
+        List<WorldEvent.BlockChanged> part =
+            cells.subList(from, Math.min(cells.size(), from + Frames.MAX_CELLS_PER_DELTA));
+        long sequence = ++stream.lastSequence;
+        offload(region, sequence, "delta", () -> Frames.delta(sequence, part, minX, minZ));
+      }
     }
   }
 
   /**
-   * Adds every request whose answer is {@link #RESEND_TICKS} late to its node's batch again, so a
-   * lost request or answer costs a few ticks rather than a timeout. The node serves requests in the
-   * order they were issued, which is the order of {@code outstanding}.
+   * Acts on every request whose answer is due by now. A live one is added to its node's batch
+   * again, so a lost request or answer costs a few ticks rather than a timeout. An abandoned one
+   * stops counting against its node, which has served it by now.
    */
-  private void resendUnanswered(long tick) {
-    Map<NodeId, Integer> ahead = new LinkedHashMap<>();
-    for (Map.Entry<Long, Outstanding> entry : outstanding.entrySet()) {
+  private void settleDueAnswers(long tick) {
+    Iterator<Map.Entry<Long, Outstanding>> entries = outstanding.entrySet().iterator();
+    while (entries.hasNext()) {
+      Map.Entry<Long, Outstanding> entry = entries.next();
       Outstanding request = entry.getValue();
-      int queued = ahead.merge(request.node(), 1, Integer::sum) - 1;
-      if (request.resends() >= MAX_RESENDS
-          || request.sentTick() == NOT_SENT
-          || tick - request.sentTick() < RESEND_TICKS + queued / nodeCapacity) {
+      if (request.dueTick() == NOT_SENT || tick < request.dueTick()) {
+        continue;
+      }
+      if (request.abandoned()) {
+        entries.remove();
+        state(request.node()).inFlight--;
+        continue;
+      }
+      if (request.resends() >= MAX_RESENDS) {
         continue;
       }
       entry.setValue(request.resent());
@@ -742,6 +890,10 @@ public final class ProbeController implements WorldInput, Transport.Listener {
     }
   }
 
+  /**
+   * Each node's requests for the tick, in frames that each fit one datagram. They leave together,
+   * so they may arrive in any order, and each request may wait behind the whole batch.
+   */
   private void flushRequests() {
     for (Map.Entry<NodeId, NodeState> entry : nodes.entrySet()) {
       NodeState state = entry.getValue();
@@ -752,11 +904,13 @@ public final class ProbeController implements WorldInput, Transport.Listener {
       state.requests = new ArrayList<>();
       NodeId node = entry.getKey();
       int region = regions.indexOf(node);
+      int originX = regions.minX(region);
+      int originZ = regions.minZ(region);
       long connection = state.connection;
       encode(
           "requests",
-          () -> Frames.requests(batch, regions.minX(region), regions.minZ(region)),
-          frame -> {
+          () -> requestFrames(batch, originX, originZ),
+          frames -> {
             // A retried encode can finish after the connection it was built for ended. Its
             // requests were dropped with that connection, and the profiles they name may not
             // be registered on this one.
@@ -764,15 +918,46 @@ public final class ProbeController implements WorldInput, Transport.Listener {
               env.metrics().count("requests.discarded", 1, "node", node.toString());
               return;
             }
-            send(node, Channel.REQUEST, frame);
-            // A resend waits for the frame to leave, not for the batch to be built.
+            for (byte[] frame : frames) {
+              send(node, Channel.REQUEST, frame);
+            }
+            env.metrics().count("requests.frames", frames.size(), "node", node.toString());
+            // The node serves requests in the order they arrive, after the ones it is still
+            // expected to hold. Timing starts when the batch leaves, not when it is built.
             long tick = env.clock().tick();
+            long due =
+                tick + RESEND_TICKS + (expectedQueue(node, tick) + batch.size() - 1) / nodeCapacity;
             for (Frames.Request request : batch) {
-              outstanding.computeIfPresent(
-                  request.requestId(), (id, waiting) -> waiting.sent(tick));
+              outstanding.computeIfPresent(request.requestId(), (id, waiting) -> waiting.sent(due));
             }
           });
     }
+  }
+
+  /** {@code batch} in frames of at most {@link Frames#MAX_REQUESTS_PER_FRAME}. */
+  private static List<byte[]> requestFrames(List<Frames.Request> batch, int originX, int originZ) {
+    List<byte[]> frames = new ArrayList<>();
+    for (int from = 0; from < batch.size(); from += Frames.MAX_REQUESTS_PER_FRAME) {
+      int to = Math.min(batch.size(), from + Frames.MAX_REQUESTS_PER_FRAME);
+      frames.add(Frames.requests(batch.subList(from, to), originX, originZ));
+    }
+    return frames;
+  }
+
+  /**
+   * Requests the node is expected to still hold: sent to it, and not yet due. The controller
+   * assumes every node serves {@code nodeCapacity} a tick.
+   */
+  private int expectedQueue(NodeId node, long tick) {
+    int queued = 0;
+    for (Outstanding request : outstanding.values()) {
+      if (request.node().equals(node)
+          && request.dueTick() != NOT_SENT
+          && request.dueTick() > tick) {
+        queued++;
+      }
+    }
+    return queued;
   }
 
   /**
@@ -795,7 +980,7 @@ public final class ProbeController implements WorldInput, Transport.Listener {
    * fails. The work captured everything it reads, so a retry builds the same bytes. A world frame
    * keeps its sequence number, because skipping a number would leave a gap for the node.
    */
-  private void encode(String job, Supplier<byte[]> work, Consumer<byte[]> completion) {
+  private <T> void encode(String job, Supplier<T> work, Consumer<T> completion) {
     env.offload()
         .submit(
             job,

@@ -1,8 +1,10 @@
 package io.github.davidmenggx.maestro.controller.wire;
 
 import com.google.flatbuffers.FlatBufferBuilder;
+import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
+import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput;
@@ -47,6 +49,29 @@ public final class Frames {
   private static final ThreadLocal<FlatBufferBuilder> BUILDER =
       ThreadLocal.withInitial(() -> new FlatBufferBuilder(4096));
 
+  /**
+   * Largest payload the node reads from its world and control streams. Must match the node's {@code
+   * net::MaxPayloadSize}. A chunk at the tallest world Minecraft allows, with every block in a run
+   * of its own, is about 4 MiB.
+   */
+  public static final int MAX_FRAME_BYTES = 8 << 20;
+
+  /**
+   * Largest request frame. A request frame is one UDP datagram, and this fits the 1232 bytes of
+   * payload that IPv6's minimum MTU guarantees, so a frame is never fragmented and one lost
+   * fragment never loses a whole batch.
+   */
+  public static final int MAX_REQUEST_FRAME_BYTES = 1200;
+
+  /**
+   * Requests in one frame. A full frame of the largest requests fits {@link
+   * #MAX_REQUEST_FRAME_BYTES}.
+   */
+  public static final int MAX_REQUESTS_PER_FRAME = 24;
+
+  /** Block changes in one delta. A delta of this many is 512 KiB, well below the frame limit. */
+  public static final int MAX_CELLS_PER_DELTA = 1 << 16;
+
   private Frames() {}
 
   /** One path request, held by the controller until the tick is flushed. */
@@ -88,7 +113,8 @@ public final class Frames {
     int sections = height / WorldSource.SECTION_HEIGHT;
     int[] uniform = new int[sections];
     for (int section = 0; section < sections; section++) {
-      uniform[section] = world.uniformCell(chunkX, chunkZ, section);
+      int cell = world.uniformCell(chunkX, chunkZ, section);
+      uniform[section] = cell == WorldSource.NOT_UNIFORM ? cell : cell(cell >> 8, (byte) cell);
     }
     ChunkRuns runs = new ChunkRuns();
     for (int dx = 0; dx < Chunks.SIZE; dx++) {
@@ -107,7 +133,7 @@ public final class Frames {
             length = WorldSource.SECTION_HEIGHT;
           } else {
             int y = minY + dy;
-            cell = (world.floorAt(x, y, z) << 8) | (world.pathTypeAt(x, y, z) & 0xFF);
+            cell = cell(world.floorAt(x, y, z), world.pathTypeAt(x, y, z));
             length = 1;
           }
           dy += length;
@@ -162,8 +188,12 @@ public final class Frames {
     return builder.sizedByteArray();
   }
 
+  /** At most {@link #MAX_CELLS_PER_DELTA} changes, so the frame stays under the node's limit. */
   public static byte[] delta(
       long sequence, List<WorldEvent.BlockChanged> cells, int originX, int originZ) {
+    if (cells.size() > MAX_CELLS_PER_DELTA) {
+      throw new IllegalArgumentException("a delta carries at most " + MAX_CELLS_PER_DELTA);
+    }
     FlatBufferBuilder builder = builder();
     WorldDelta.startCellsVector(builder, cells.size());
     for (int i = cells.size() - 1; i >= 0; i--) {
@@ -183,7 +213,12 @@ public final class Frames {
     return builder.sizedByteArray();
   }
 
+  /** At most {@link #MAX_REQUESTS_PER_FRAME} requests, so the frame fits one datagram. */
   public static byte[] requests(List<Request> batch, int originX, int originZ) {
+    if (batch.size() > MAX_REQUESTS_PER_FRAME) {
+      throw new IllegalArgumentException(
+          "a request frame carries at most " + MAX_REQUESTS_PER_FRAME);
+    }
     FlatBufferBuilder builder = builder();
     int[] offsets = new int[batch.size()];
     for (int i = 0; i < batch.size(); i++) {
@@ -209,19 +244,27 @@ public final class Frames {
     return builder.sizedByteArray();
   }
 
-  /** {@code size} is the side of the square area, a multiple of {@link Chunks#SIZE}. */
+  /**
+   * {@code size} is the side of the square area, a multiple of {@link Chunks#SIZE}. Every position
+   * in the area must fit the wire's 16 bits, as the node requires.
+   */
   public static byte[] assignment(
       long run, int regionId, int size, boolean resume, WorldSource world) {
-    if (size <= 0 || size % Chunks.SIZE != 0) {
-      throw new IllegalArgumentException("an area is whole chunks: " + size);
+    if (size <= 0 || size % Chunks.SIZE != 0 || size > Short.MAX_VALUE) {
+      throw new IllegalArgumentException("an area is whole chunks a short can index: " + size);
+    }
+    int minY = world.minY();
+    int height = world.height();
+    if (height <= 0 || !fitsInt16(minY) || !fitsInt16((long) minY + height - 1)) {
+      throw new IllegalArgumentException("a column a short cannot index: " + minY + " + " + height);
     }
     FlatBufferBuilder builder = builder();
     RegionAssignment.startRegionAssignment(builder);
     RegionAssignment.addRun(builder, run);
     RegionAssignment.addRegionId(builder, regionId);
-    RegionAssignment.addSize(builder, uint16(size));
-    RegionAssignment.addMinY(builder, world.minY());
-    RegionAssignment.addHeight(builder, uint16(world.height()));
+    RegionAssignment.addSize(builder, size);
+    RegionAssignment.addMinY(builder, minY);
+    RegionAssignment.addHeight(builder, uint16(height));
     RegionAssignment.addResume(builder, resume);
     int assignment = RegionAssignment.endRegionAssignment(builder);
     builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.RegionAssignment, assignment));
@@ -311,6 +354,18 @@ public final class Frames {
   private static int vec3(FlatBufferBuilder builder, Pos pos, int originX, int originZ) {
     return Vec3s.createVec3s(
         builder, int16(pos.x() - originX), int16(pos.y()), int16(pos.z() - originZ));
+  }
+
+  /**
+   * A cell as {@code (floor << 8) | pathType}. Throws if the cell is not one the wire carries,
+   * which a packed run could not show: a wide floor would spill into the run length.
+   */
+  private static int cell(int floor, byte pathType) {
+    if (floor < 0 || floor > Cells.MAX_FLOOR || !PathTypes.isPerBlock(pathType)) {
+      throw new IllegalArgumentException(
+          "not a wire cell: " + PathTypes.name(pathType) + " with floor " + floor);
+    }
+    return (floor << 8) | pathType;
   }
 
   /** {@code value} as a wire {@code short}. Throws if it does not fit instead of wrapping. */

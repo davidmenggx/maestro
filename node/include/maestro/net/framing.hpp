@@ -11,9 +11,11 @@ namespace maestro::net {
 /// where the payload is a FlatBuffers buffer.
 inline constexpr std::size_t HeaderSize = 4;
 
-/// Largest allowed payload. The biggest frame is one chunk's state. With every
-/// block in its own run, that is about 400 KiB at the overworld's 384 blocks
-/// and about 4 MiB at the tallest world Minecraft allows.
+/// Largest allowed payload. Must match the controller's
+/// `Frames.MAX_FRAME_BYTES`. A chunk's state with every block in its own run is
+/// about 400 KiB at the overworld's 384 blocks and about 4 MiB at the tallest
+/// world Minecraft allows. The controller splits a tick's block changes into
+/// deltas that stay far below it.
 inline constexpr std::uint32_t MaxPayloadSize = 8u << 20;
 
 /// What is at the front of a receive buffer.

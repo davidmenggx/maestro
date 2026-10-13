@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,8 +31,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Reads the compiled controller, and the simulated controller that will become it, and fails if
- * either directly references a clock, a random source, a thread pool or a socket. These must come
- * through {@code ControllerEnv}, or replay breaks.
+ * either directly references a clock, a random source, a thread pool, a socket or the host it runs
+ * on. These must come through {@code ControllerEnv}, or replay breaks.
  *
  * <p>It also refuses collections whose iteration order is neither insertion nor key order: hashed
  * ones, whose order follows identity hash codes for most keys, and the immutable {@code Set.of} and
@@ -40,7 +41,10 @@ import org.junit.jupiter.api.Test;
  */
 class NondeterminismGuardTest {
 
-  /** {@code member} is a method or field name, or {@code *} for the whole type. */
+  /**
+   * {@code owner} is an internal class name, or {@code *} for any class. {@code member} is a method
+   * or field name, or {@code *} for the whole type.
+   */
   private record Rule(String owner, String member) {}
 
   private static final List<Rule> RULES =
@@ -48,6 +52,8 @@ class NondeterminismGuardTest {
           new Rule("java/lang/System", "currentTimeMillis"),
           new Rule("java/lang/System", "nanoTime"),
           new Rule("java/lang/System", "identityHashCode"),
+          new Rule("java/lang/System", "getenv"),
+          new Rule("java/lang/Runtime", "availableProcessors"),
           new Rule("java/lang/Math", "random"),
           new Rule("java/time/Instant", "now"),
           new Rule("java/time/Clock", "*"),
@@ -58,6 +64,12 @@ class NondeterminismGuardTest {
           new Rule("java/util/concurrent/ThreadLocalRandom", "*"),
           new Rule("java/security/SecureRandom", "*"),
           new Rule("java/util/UUID", "randomUUID"),
+          // Shuffles with a hidden random source unless given one, which the seam provides.
+          new Rule("java/util/Collections", "shuffle"),
+          // A parallel stream's order of side effects depends on thread scheduling. The owner is
+          // whatever collection or stream type the call was made on.
+          new Rule("*", "parallelStream"),
+          new Rule("*", "parallel"),
           new Rule("java/util/concurrent/Executors", "*"),
           new Rule("java/util/concurrent/CompletableFuture", "*"),
           new Rule("java/util/concurrent/ForkJoinPool", "*"),
@@ -108,7 +120,10 @@ class NondeterminismGuardTest {
           AsyncFuture.class,
           RawSocket.class,
           HashOrdered.class,
-          SaltedOrder.class);
+          SaltedOrder.class,
+          Shuffled.class,
+          ParallelSideEffects.class,
+          HostDependent.class);
 
   @Test
   void controllerCodeTakesItsNondeterminismFromTheSeams() throws IOException, URISyntaxException {
@@ -143,6 +158,8 @@ class NondeterminismGuardTest {
     for (Rule rule : RULES) {
       assertFalse(rule.owner().contains("."), "owners are internal names: " + rule.owner());
       assertFalse(rule.member().isBlank(), "empty member in " + rule.owner());
+      // Any member of any class would match everything.
+      assertFalse(rule.owner().equals("*") && rule.member().equals("*"), "a rule matches all");
     }
   }
 
@@ -232,6 +249,27 @@ class NondeterminismGuardTest {
     }
   }
 
+  @SuppressWarnings("unused")
+  static final class Shuffled {
+    void mix(List<Integer> values) {
+      Collections.shuffle(values);
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class ParallelSideEffects {
+    void visit(List<Integer> values, List<Integer> seen) {
+      values.parallelStream().forEach(seen::add);
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class HostDependent {
+    int workers() {
+      return Runtime.getRuntime().availableProcessors();
+    }
+  }
+
   /** The negative control: takes time from the seam and uses nothing forbidden. */
   @SuppressWarnings("unused")
   static final class Wellbehaved {
@@ -302,7 +340,7 @@ class NondeterminismGuardTest {
       String owner = ref.owner().asInternalName();
       String member = ref.name().stringValue();
       for (Rule rule : RULES) {
-        if (rule.owner().equals(owner)
+        if ((rule.owner().equals("*") || rule.owner().equals(owner))
             && (rule.member().equals("*") || rule.member().equals(member))) {
           findings.add(label + " references " + owner + "." + member);
         }

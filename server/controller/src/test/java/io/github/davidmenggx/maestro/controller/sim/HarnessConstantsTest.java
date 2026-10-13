@@ -14,13 +14,20 @@ import org.junit.jupiter.api.Test;
 class HarnessConstantsTest {
 
   @Test
-  void aSampledLatencyStaysWellInsideATick() {
+  void aSampledLatencyNeverMakesACorrectControllerLate() {
     // Any wider and a response is late regardless of the controller, so the latency
     // invariant would measure the sampler instead of the code under test.
     assertTrue(
         FaultPlan.MAX_MIN_LATENCY_STEPS + FaultPlan.MAX_LATENCY_SPAN_STEPS
-            <= Simulation.STEPS_PER_TICK / 2,
-        "sampled latency can reach half a tick");
+            <= FaultPlan.MAX_ONE_WAY_LATENCY_STEPS,
+        "sampled latency can pass the one-way limit");
+    // A batch that leaves at a tick boundary arrives before the fleet serves that tick.
+    assertTrue(
+        FaultPlan.MAX_ONE_WAY_LATENCY_STEPS <= Simulation.SERVICE_STEP,
+        "a batch at the latency limit misses the service it was meant for");
+    assertTrue(
+        FaultPlan.EDGE_SPAN_STEPS < FaultPlan.MAX_ONE_WAY_LATENCY_STEPS,
+        "an edge plan can draw a latency below one step");
   }
 
   @Test
@@ -67,14 +74,5 @@ class HarnessConstantsTest {
           setting.ceiling() > 0 && setting.ceiling() <= 1,
           setting + " has a ceiling outside (0, 1]");
     }
-  }
-
-  @Test
-  void aComparisonNodeCannotCollideWithARealOne() {
-    // Fresh nodes are built outside the fleet at `FRESH_NODE + region`, so their
-    // id range must start above every id a sampled grid assigns.
-    assertTrue(
-        Invariants.FRESH_NODE >= Topology.maxNodeCount(),
-        "a comparison node can collide with a real one");
   }
 }

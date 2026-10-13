@@ -15,7 +15,8 @@ public interface WorldOutput {
     QUEUE_DEPTH,
     /**
      * No node can take the request now: none owns the region, the owner has not been sent the chunk
-     * the search starts in, or a position does not fit the wire.
+     * the search starts in, or a position does not fit the wire. Also an answer the node searched
+     * before that chunk reached it.
      */
     NO_NODE,
     /**

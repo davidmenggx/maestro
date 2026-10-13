@@ -58,12 +58,12 @@ public final class SimMetrics implements Metrics {
   }
 
   /**
-   * Nearest-rank percentile of the recorded values plus {@code misses} samples larger than any of
-   * them, which rank as {@code +Infinity}. A miss is a sample that never got a value, such as a
-   * request that was never answered. Returns {@code NaN} when there are no samples at all.
+   * Nearest-rank percentile of {@code values} plus {@code misses} samples larger than any of them,
+   * which rank as {@code +Infinity}. A miss is a sample that never got a value, such as a request
+   * that was never answered. Returns {@code NaN} when there are no samples at all.
    */
-  public double percentileWithMisses(String name, double quantile, long misses) {
-    return rank(distributions.getOrDefault(key(name), List.of()), quantile, misses);
+  public static double percentileWithMisses(List<Double> values, double quantile, long misses) {
+    return rank(values, quantile, misses);
   }
 
   private static double rank(List<Double> values, double quantile, long misses) {

@@ -13,16 +13,33 @@ import java.util.Objects;
  */
 public record MobClass(short classId, Shape shape, Abilities abilities, float[] malus) {
 
-  /** Collision box, and the height the mob can step up without jumping. */
+  /**
+   * Collision box, and the height the mob can step up without jumping. The bounds hold every land
+   * mob vanilla can make: the giant is 3.6 by 12 at scale 1, the scale attribute reaches 16, and
+   * the step height attribute reaches 10. The node refuses a profile outside them, since its search
+   * cost grows with the footprint.
+   */
   public record Shape(float width, float height, float maxUpStep) {
 
+    public static final float MAX_WIDTH = 64.0f;
+    public static final float MAX_HEIGHT = 256.0f;
+    public static final float MAX_UP_STEP = 16.0f;
+
     public Shape {
-      if (width <= 0 || height <= 0) {
-        throw new IllegalArgumentException("footprint must be positive: " + width + "x" + height);
+      if (!fits(width, height, maxUpStep)) {
+        throw new IllegalArgumentException(
+            "not a mob shape: " + width + "x" + height + ", step " + maxUpStep);
       }
-      if (maxUpStep < 0) {
-        throw new IllegalArgumentException("step height must not be negative: " + maxUpStep);
-      }
+    }
+
+    /** Whether a shape with these values may be made. False for NaN. */
+    public static boolean fits(float width, float height, float maxUpStep) {
+      return width > 0
+          && width <= MAX_WIDTH
+          && height > 0
+          && height <= MAX_HEIGHT
+          && maxUpStep >= 0
+          && maxUpStep <= MAX_UP_STEP;
     }
   }
 

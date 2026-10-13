@@ -34,7 +34,7 @@ public final class Simulation {
   static final long NANOS_PER_STEP = NANOS_PER_TICK / STEPS_PER_TICK;
 
   /** When in the tick the fleet works. Mid-tick, so serving does not run into the next tick. */
-  private static final int SERVICE_STEP = STEPS_PER_TICK / 2;
+  static final int SERVICE_STEP = STEPS_PER_TICK / 2;
 
   private record Scheduled(long time, long order, String name, Runnable action)
       implements Comparable<Scheduled> {

@@ -11,6 +11,7 @@
 #include "opentelemetry/sdk/trace/batch_span_processor_factory.h"
 #include "opentelemetry/sdk/trace/batch_span_processor_options.h"
 #include "opentelemetry/sdk/trace/tracer_provider_factory.h"
+#include "opentelemetry/trace/noop.h"
 #include "opentelemetry/trace/provider.h"
 
 namespace {
@@ -41,8 +42,11 @@ void init(std::string_view ServiceName, std::string_view OtlpEndpoint) {
 }
 
 void shutdown() {
+  // A span started afterwards goes nowhere, as before `init`, rather than
+  // through a null provider. Releasing the last reference flushes the old one.
   trace_api::Provider::SetTracerProvider(
-      std::shared_ptr<trace_api::TracerProvider>{});
+      std::shared_ptr<trace_api::TracerProvider>(
+          std::make_shared<trace_api::NoopTracerProvider>()));
   GlobalProvider.reset();
 }
 

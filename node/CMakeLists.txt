@@ -82,6 +82,7 @@ if(MAESTRO_BUILD_TESTS)
     tests/test_binary_heap.cpp
     tests/test_coord_map.cpp
     tests/test_framing.cpp
+    tests/test_obs.cpp
     tests/test_parity.cpp
     tests/test_path_types.cpp
     tests/test_schema.cpp

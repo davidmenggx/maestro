@@ -68,25 +68,65 @@ class NodeHashesTest {
     return NodeHashes.mayCollide(start, target, maxPathLength, FALL, STEP, canFloat, MIN_Y);
   }
 
-  /** Hashes every position in the bounds the check documents, plus the target. */
+  /**
+   * Hashes every position vanilla's rules let a search create, plus the target. A node is expanded
+   * while its float distance from the start is below the bound, and creates nodes one block around
+   * it, from its fall below to its jump above. The positions come from those rules rather than from
+   * the bounds under test, so a wrong bound fails here.
+   */
   private static void assertNoSharedHash(Pos start, Pos target, float maxPathLength) {
     assertFalse(mayCollide(start, target, maxPathLength, true));
-    int reach = (int) Math.ceil(maxPathLength);
-    int top = start.y() + reach - 1 + 1;
-    int bottom = start.y() - reach - FALL;
-    int side = 2 * reach + 1;
-    int[] hashes = new int[side * side * (top - bottom + 1) + 1];
-    int count = 0;
-    boolean targetInside = false;
-    for (int x = start.x() - reach; x <= start.x() + reach; x++) {
-      for (int z = start.z() - reach; z <= start.z() + reach; z++) {
-        for (int y = bottom; y <= top; y++) {
-          hashes[count++] = NodeHashes.hash(x, y, z);
-          targetInside |= x == target.x() && y == target.y() && z == target.z();
+    int jump = (int) Math.floor(Math.max(1.0f, STEP));
+    int scan = (int) Math.ceil(maxPathLength) + 1;
+    int side = 2 * scan + 1;
+    // Lowest and highest expanded y offset per column.
+    int[] low = new int[side * side];
+    int[] high = new int[side * side];
+    Arrays.fill(low, Integer.MAX_VALUE);
+    Arrays.fill(high, Integer.MIN_VALUE);
+    for (int dx = -scan; dx <= scan; dx++) {
+      for (int dz = -scan; dz <= scan; dz++) {
+        for (int dy = -scan; dy <= scan; dy++) {
+          // `Node.distanceTo`: float differences, a float sum and a float root.
+          float xd = dx;
+          float yd = dy;
+          float zd = dz;
+          float distance = (float) Math.sqrt(xd * xd + yd * yd + zd * zd);
+          if (!(distance >= maxPathLength)) {
+            int column = (dx + scan) * side + dz + scan;
+            low[column] = Math.min(low[column], dy);
+            high[column] = Math.max(high[column], dy);
+          }
         }
       }
     }
-    if (!targetInside) {
+
+    int[] hashes = new int[side * side * (2 * scan + FALL + jump + 3) + 1];
+    int count = 0;
+    boolean targetCreated = false;
+    for (int cx = -scan; cx <= scan; cx++) {
+      for (int cz = -scan; cz <= scan; cz++) {
+        int bottom = Integer.MAX_VALUE;
+        int top = Integer.MIN_VALUE;
+        for (int nx = Math.max(-scan, cx - 1); nx <= Math.min(scan, cx + 1); nx++) {
+          for (int nz = Math.max(-scan, cz - 1); nz <= Math.min(scan, cz + 1); nz++) {
+            int column = (nx + scan) * side + nz + scan;
+            if (low[column] <= high[column]) {
+              bottom = Math.min(bottom, low[column] - FALL - 1);
+              top = Math.max(top, high[column] + jump);
+            }
+          }
+        }
+        for (int dy = bottom; dy <= top; dy++) {
+          int x = start.x() + cx;
+          int y = start.y() + dy;
+          int z = start.z() + cz;
+          hashes[count++] = NodeHashes.hash(x, y, z);
+          targetCreated |= x == target.x() && y == target.y() && z == target.z();
+        }
+      }
+    }
+    if (!targetCreated) {
       hashes[count++] = NodeHashes.hash(target.x(), target.y(), target.z());
     }
     int[] sorted = Arrays.copyOf(hashes, count);

@@ -1,7 +1,5 @@
 #include "maestro/search/profile.hpp"
 
-#include <cmath>
-
 #include "mob_generated.h"
 
 namespace maestro::search {
@@ -10,9 +8,10 @@ std::optional<Profile> Profile::decode(const fbs::MobClass &Wire) {
   const auto *Malus = Wire.malus();
   if (!Malus || Malus->size() != world::PathTypeCount)
     return std::nullopt;
-  if (!std::isfinite(Wire.width()) || Wire.width() <= 0.0F ||
-      !std::isfinite(Wire.height()) || Wire.height() <= 0.0F ||
-      !std::isfinite(Wire.max_up_step()) || Wire.max_up_step() < 0.0F)
+  // Written so that NaN fails every comparison.
+  if (!(Wire.width() > 0.0F && Wire.width() <= WidthLimit) ||
+      !(Wire.height() > 0.0F && Wire.height() <= HeightLimit) ||
+      !(Wire.max_up_step() >= 0.0F && Wire.max_up_step() <= UpStepLimit))
     return std::nullopt;
 
   Profile Out;

@@ -3,13 +3,16 @@ package io.github.davidmenggx.maestro.controller.wire;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput;
 import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
@@ -36,6 +39,57 @@ class FramesTest {
     Frames.Request farAway =
         new Frames.Request(1, (short) 1, new Pos(40_000, 40, 0), new Pos(0, 40, 0), SEARCH);
     assertThrows(IllegalArgumentException.class, () -> Frames.requests(List.of(farAway), 0, 0));
+  }
+
+  @Test
+  void aFullFrameOfTheLargestRequestsFitsOneDatagram() {
+    // Every field at its widest, so none is left out as a default.
+    WorldEvent.Search widest =
+        new WorldEvent.Search(
+            WorldEvent.Search.MAX_REACH_RANGE,
+            Float.MAX_VALUE,
+            WorldEvent.Search.MAX_VISITED_NODES,
+            WorldEvent.Search.MAX_FALL_DISTANCE);
+    List<Frames.Request> batch = new ArrayList<>();
+    for (int i = 0; i < Frames.MAX_REQUESTS_PER_FRAME; i++) {
+      batch.add(
+          new Frames.Request(
+              Long.MAX_VALUE - i,
+              Short.MAX_VALUE,
+              new Pos(Short.MIN_VALUE, Short.MIN_VALUE, Short.MIN_VALUE),
+              new Pos(Short.MAX_VALUE, Short.MAX_VALUE, Short.MAX_VALUE),
+              widest));
+    }
+    assertTrue(Frames.requests(batch, 0, 0).length <= Frames.MAX_REQUEST_FRAME_BYTES);
+
+    batch.add(batch.get(0));
+    assertThrows(IllegalArgumentException.class, () -> Frames.requests(batch, 0, 0));
+  }
+
+  @Test
+  void aFullDeltaAndTheLargestChunkFitWhatTheNodeReads() {
+    List<WorldEvent.BlockChanged> cells = new ArrayList<>();
+    for (int i = 0; i < Frames.MAX_CELLS_PER_DELTA; i++) {
+      cells.add(
+          new WorldEvent.BlockChanged(
+              0, new Pos(i % 512, -1000, i / 512), (byte) PathType.FENCE, Cells.MAX_FLOOR));
+    }
+    assertTrue(Frames.delta(1, cells, 0, 0).length <= Frames.MAX_FRAME_BYTES);
+    cells.add(cells.get(0));
+    assertThrows(IllegalArgumentException.class, () -> Frames.delta(1, cells, 0, 0));
+
+    // The tallest world Minecraft allows, with every block in a run of its own.
+    WorldSource striped = source(-2032, 4064, (x, y, z) -> y % 2 == 0 ? 16 : 0);
+    byte[] chunk = Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(striped, 0, 0));
+    assertTrue(chunk.length <= Frames.MAX_FRAME_BYTES, chunk.length + " bytes");
+  }
+
+  @Test
+  void aCellTheWireCannotCarryIsRefusedWhenTheChunkIsRead() {
+    WorldSource tooTall = source(0, 32, (x, y, z) -> Cells.MAX_FLOOR + 1);
+    assertThrows(IllegalArgumentException.class, () -> Frames.readChunk(tooTall, 0, 0));
+    WorldSource negative = source(0, 32, (x, y, z) -> -1);
+    assertThrows(IllegalArgumentException.class, () -> Frames.readChunk(negative, 0, 0));
   }
 
   @Test
@@ -109,6 +163,11 @@ class FramesTest {
 
     assertThrows(IllegalArgumentException.class, () -> Frames.assignment(3, 4, 40, false, world));
     assertThrows(IllegalArgumentException.class, () -> Frames.assignment(3, 4, 0, false, world));
+    // The node indexes the area with shorts.
+    assertThrows(
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 32768, false, world));
+    WorldSource tooHigh = source(32000, 1024, (x, y, z) -> 0);
+    assertThrows(IllegalArgumentException.class, () -> Frames.assignment(3, 4, 96, false, tooHigh));
   }
 
   @Test
@@ -220,6 +279,42 @@ class FramesTest {
           return NOT_UNIFORM;
         }
         return (floor(0, low, 0) << 8) | type(0, low, 0);
+      }
+    };
+  }
+
+  /** The floor of a block, from its position. */
+  @FunctionalInterface
+  private interface Floors {
+    int at(int x, int y, int z);
+  }
+
+  /** A column from {@code minY} of {@code height} blocks, solid where {@code floors} is not 0. */
+  private static WorldSource source(int minY, int height, Floors floors) {
+    return new WorldSource() {
+      @Override
+      public MobClass mobClass(short classId) {
+        return null;
+      }
+
+      @Override
+      public int minY() {
+        return minY;
+      }
+
+      @Override
+      public int height() {
+        return height;
+      }
+
+      @Override
+      public byte pathTypeAt(int x, int y, int z) {
+        return (byte) (floors.at(x, y, z) == 0 ? PathType.OPEN : PathType.BLOCKED);
+      }
+
+      @Override
+      public int floorAt(int x, int y, int z) {
+        return floors.at(x, y, z);
       }
     };
   }

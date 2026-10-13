@@ -26,12 +26,19 @@ struct Profile {
   bool CanFloat = false;
   bool CanWalkOverFences = false;
 
+  /// Bounds on the shape, which hold every land mob vanilla can make. The
+  /// search's cost grows with the footprint, so a larger one is refused.
+  static constexpr float WidthLimit = 64.0F;
+  static constexpr float HeightLimit = 256.0F;
+  static constexpr float UpStepLimit = 16.0F;
+
   float malus(world::PathType Type) const {
     return Malus[static_cast<std::size_t>(Type)];
   }
 
   /// The profile `Wire` describes, or nothing if it breaks the contract: it
-  /// needs a malus for every type and a positive, finite footprint.
+  /// needs a malus for every type, and a footprint and step height within the
+  /// bounds above.
   static std::optional<Profile> decode(const fbs::MobClass &Wire);
 };
 

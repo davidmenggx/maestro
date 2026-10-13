@@ -3,6 +3,7 @@ package io.github.davidmenggx.maestro.controller.sim;
 import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.Pos;
@@ -145,6 +146,14 @@ public final class ModeledNode {
 
   /** Region state only. Two nodes with the same world have equal state, however they got there. */
   public long stateDigest() {
+    return digest(regionId, size, baseY, height, cells, floors);
+  }
+
+  /**
+   * The digest of a region's state, with cells and floors indexed {@code (x * size + z) * height +
+   * (y - baseY)}, as a node holds them.
+   */
+  static long digest(long regionId, int size, int baseY, int height, byte[] cells, byte[] floors) {
     return new Digest()
         .mix(regionId)
         .mix(size)
@@ -328,10 +337,7 @@ public final class ModeledNode {
   private void advance(long sequence) {
     awaitingBaseline = false;
     lastSequence = sequence;
-    // A node built outside the fleet, such as a fresh one to compare against, starts its own count.
-    if (sim.node(id) == this) {
-      sim.applied(id, regionId, sequence);
-    }
+    sim.applied(id, regionId, sequence);
   }
 
   private String applyChunkSnapshot(ChunkSnapshot snapshot) {
@@ -414,6 +420,9 @@ public final class ModeledNode {
         if (!PathTypes.isPerBlock((byte) cellRun.nodeType())) {
           return "chunk run carries derived type " + PathTypes.name((byte) cellRun.nodeType());
         }
+        if (cellRun.floor() > Cells.MAX_FLOOR) {
+          return "chunk run has floor " + cellRun.floor() + ", past " + Cells.MAX_FLOOR;
+        }
       }
       if (y != height) {
         return "column " + column + " tiles " + y + " of " + height + " blocks";
@@ -444,6 +453,9 @@ public final class ModeledNode {
       byte type = (byte) cell.nodeType();
       if (!PathTypes.isPerBlock(type)) {
         return "delta cell carries derived type " + PathTypes.name(type);
+      }
+      if (cell.floor() > Cells.MAX_FLOOR) {
+        return "delta cell has floor " + cell.floor() + ", past " + Cells.MAX_FLOOR;
       }
       Vec3s pos = cell.pos();
       if (index(pos.x(), pos.y(), pos.z()) < 0) {

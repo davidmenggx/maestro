@@ -34,7 +34,7 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
 
   /**
    * Number of nodes in the widest grid {@link #sample} can draw, which is one more than the highest
-   * node id any run can assign. Ids at or above it are free for fixtures outside a fleet.
+   * node id any run can assign.
    */
   static int maxNodeCount() {
     return MAX_REGIONS_PER_SIDE * MAX_REGIONS_PER_SIDE;

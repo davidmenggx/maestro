@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.wire.Frames;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
@@ -137,10 +138,10 @@ class WorldBoundaryTest {
 
   /**
    * A chunk that leaves is treated as air on the node, as vanilla treats a chunk the server does
-   * not hold, so only that chunk is resent and the rest of the region keeps serving.
+   * not hold, so only that chunk is resent. A search cannot start in it until it returns.
    */
   @Test
-  void anUnloadedChunkIsClearedOnTheNodeAndTheRegionKeepsServing() {
+  void anUnloadedChunkIsClearedOnTheNodeAndSentAgainWhenItReturns() {
     List<WorldEvent> script = prelude();
     script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
     script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH));
@@ -153,8 +154,8 @@ class WorldBoundaryTest {
 
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(4, run.controller.requestsIssued(), run.describe());
-    assertEquals(0, run.out.dropped(DropReason.NO_NODE), run.describe());
-    assertEquals(3, run.out.answered(), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.NO_NODE), run.describe());
+    assertEquals(2, run.out.answered(), run.describe());
     // One frame to clear the chunk and one to fill it again, with no new snapshot.
     assertEquals(
         run.chunkCount() + 2,
@@ -222,12 +223,143 @@ class WorldBoundaryTest {
     NodeId owner = run.regions.owner(run.regions.regionAt(HERE.x(), HERE.z()));
 
     run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST, 200));
+    // A datagram that is not a frame at all, as from a sender that is not a node.
+    run.controller.onFrame(owner, Channel.REQUEST, ByteBuffer.wrap(new byte[] {9, 0, 0, 0, 1}));
     assertEquals(1, run.controller.outstandingCount(), run.describe());
-    assertEquals(1, run.sim.metrics().total("path.response.malformed"), run.describe());
+    assertEquals(2, run.sim.metrics().total("controller.malformed.frame"), run.describe());
+
+    // A well-formed answer from a node the request did not go to.
+    NodeId other = run.regions.owner(run.regions.regionAt(THERE.x(), THERE.z()));
+    run.controller.onFrame(other, Channel.REQUEST, answer(FIRST_REQUEST, PathType.WALKABLE));
+    assertEquals(1, run.controller.outstandingCount(), run.describe());
+    assertEquals(1, run.sim.metrics().total("path.response.misrouted"), run.describe());
 
     run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST, PathType.WALKABLE));
     assertEquals(0, run.controller.outstandingCount(), run.describe());
     assertEquals(1, run.out.answered(), run.describe());
+  }
+
+  /** The node answered before the chunk the search starts in reached it, so it searched air. */
+  @Test
+  void anAnswerSearchedBeforeItsStartChunkArrivedIsDropped() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 3, script).go();
+    NodeId owner = run.regions.owner(run.regions.regionAt(HERE.x(), HERE.z()));
+
+    run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST, PathType.WALKABLE, 0));
+
+    assertEquals(0, run.controller.outstandingCount(), run.describe());
+    assertEquals(0, run.out.answered(), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.NO_NODE), run.describe());
+  }
+
+  /**
+   * The first request's batch is on its way when the mob asks again, so the node will still serve
+   * it. It counts against the node until then, though the mob no longer hears about it.
+   */
+  @Test
+  void aSupersededRequestCountsAgainstItsNodeUntilItIsAnswered() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    script.add(new WorldEvent.PathRequested(3, MOB, MOB_CLASS, HERE, HERE, SEARCH));
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 4, script).go();
+    NodeId owner = run.regions.owner(run.regions.regionAt(HERE.x(), HERE.z()));
+    assertEquals(1, run.out.dropped(DropReason.SUPERSEDED), run.describe());
+    assertEquals(2, run.controller.outstandingCount(), run.describe());
+
+    run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST, PathType.WALKABLE));
+    assertEquals(1, run.controller.outstandingCount(), run.describe());
+    assertEquals(0, run.out.answered(), run.describe());
+
+    run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST + 1, PathType.WALKABLE));
+    assertEquals(0, run.controller.outstandingCount(), run.describe());
+    assertEquals(1, run.out.answered(), run.describe());
+    assertEquals(List.of(), run.controller.selfCheck(), run.describe());
+  }
+
+  /** A request canceled in the tick it was made never leaves, so it costs the node nothing. */
+  @Test
+  void aRequestCanceledBeforeItsBatchIsBuiltIsNeverSent() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    script.add(new WorldEvent.PathCanceled(2, MOB));
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.CANCELED), run.describe());
+    assertEquals(
+        0, run.sim.metrics().counter("offload.submitted", "job", "requests"), run.describe());
+  }
+
+  /** The mob no longer wants the older answer, whether or not its new request is admitted. */
+  @Test
+  void aRepeatRequestReplacesTheOutstandingOneEvenWhenItIsRefused() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    script.add(
+        new WorldEvent.PathRequested(3, MOB, MOB_CLASS, HERE, new Pos(40_000, 40, 4), SEARCH));
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.SUPERSEDED), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.NO_NODE), run.describe());
+    assertEquals(0, run.out.answered(), run.describe());
+  }
+
+  /**
+   * Admission keeps the node's answers within the budget: with one request served a tick, and the
+   * first served two ticks after it is made, nine fit in ten ticks.
+   */
+  @Test
+  void admissionLeavesRoomForTheTicksABatchTakesToLeave() {
+    List<WorldEvent> script = prelude();
+    int mobs = 20;
+    for (int mob = 10; mob < 10 + mobs; mob++) {
+      script.add(new WorldEvent.MobSpawned(0, mob, HERE));
+      script.add(new WorldEvent.PathRequested(5, mob, MOB_CLASS, HERE, THERE, SEARCH));
+    }
+    Scenario oneAtATime = Scenario.DEFAULT.with(Scenario.Count.NODE_CAPACITY, 1);
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, oneAtATime, script).go();
+
+    int admitted = ProbeController.MAX_TICKS_LATE - ProbeController.SEND_TICKS + 1;
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(admitted, run.out.answered(), run.describe());
+    assertEquals(mobs - admitted, run.out.dropped(DropReason.QUEUE_DEPTH), run.describe());
+    assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
+  }
+
+  /**
+   * A tick of requests to one node leaves in several frames, each small enough for a datagram,
+   * which the network may deliver in any order.
+   */
+  @Test
+  void aTickOfRequestsLeavesInDatagramSizedFrames() {
+    List<WorldEvent> script = prelude();
+    int mobs = 2 * Frames.MAX_REQUESTS_PER_FRAME + 1;
+    for (int mob = 10; mob < 10 + mobs; mob++) {
+      script.add(new WorldEvent.MobSpawned(0, mob, HERE));
+      script.add(new WorldEvent.PathRequested(3, mob, MOB_CLASS, HERE, THERE, SEARCH));
+    }
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(mobs, run.out.answered(), run.describe());
+    assertEquals(3, run.sim.metrics().total("requests.frames"), run.describe());
+    // The frames may arrive in any order, so no request is sent again for waiting behind them.
+    assertEquals(0, run.sim.metrics().total("path.resent"), run.describe());
+    assertTrue(
+        run.sim.metrics().percentile("frame.bytes", 1.0, "channel", Channel.REQUEST.name())
+            <= Frames.MAX_REQUEST_FRAME_BYTES,
+        run.describe());
   }
 
   /** A region with every chunk unloaded is all air on its node and on a fresh one alike. */
@@ -253,6 +385,24 @@ class WorldBoundaryTest {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
     script.add(new WorldEvent.BlockChanged(3, HERE, (byte) PathType.WATER, 0));
     script.add(new WorldEvent.ChunkUnloaded(3, Chunks.of(HERE.x()), Chunks.of(HERE.z())));
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(0, run.sim.metrics().counter("offload.submitted", "job", "delta"), run.describe());
+    assertEquals(
+        List.of(), Invariants.checkAgainstFreshSnapshot(run, run.sim.node(OWNER)), run.describe());
+  }
+
+  /**
+   * The chunk was sent as cleared, so the node holds it as air. A change reported in it must not be
+   * sent, which would put a block into a chunk the node holds as air.
+   */
+  @Test
+  void aBlockChangedInAChunkSentAsClearedIsNotSent() {
+    List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
+    script.add(new WorldEvent.ChunkUnloaded(2, Chunks.of(HERE.x()), Chunks.of(HERE.z())));
+    script.add(new WorldEvent.BlockChanged(5, HERE, (byte) PathType.WATER, 0));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
 
@@ -318,11 +468,20 @@ class WorldBoundaryTest {
 
   /** An answer to {@code requestId} whose one node has the type {@code type}. */
   private static ByteBuffer answer(long requestId, int type) {
+    return answer(requestId, type, 1);
+  }
+
+  /**
+   * As above, searched at {@code worldSequence}. Each region of the default grid is one chunk,
+   * which its first frame, sequence 1, carries.
+   */
+  private static ByteBuffer answer(long requestId, int type, long worldSequence) {
     FlatBufferBuilder builder = new FlatBufferBuilder(128);
     PathResponse.startNodesVector(builder, 1);
     PathNode.createPathNode(builder, (short) HERE.x(), (short) HERE.y(), (short) HERE.z(), type);
     int nodes = builder.endVector();
-    int body = PathResponse.createPathResponse(builder, requestId, true, nodes, 1.0f, 1);
+    int body =
+        PathResponse.createPathResponse(builder, requestId, true, nodes, 1.0f, worldSequence);
     builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, body));
     return ByteBuffer.wrap(builder.sizedByteArray());
   }

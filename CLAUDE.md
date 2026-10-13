@@ -19,7 +19,7 @@ Stateless: nodes receive a full snapshot per request, trimmed to pathfinding-rel
 DATA STREAMS
 Two separate streams: world changes and mob pathfinding requests. World and control streams are TCP; the request stream is UDP, one frame per datagram.
 World-delta stream: strictly ordered, sequence-numbered, carrying chunk state and per-block deltas. Supports Kafka-style "resume from last N" on reconnect. Every resident chunk is sent again only if a node has fallen far behind. A node that cannot apply a world frame drops all world state and reconnects reporting nothing held, so its area is sent again; there is no NACK. A world frame whose encode fails is encoded again under the same sequence.
-Pathfinding-request stream: at-least-once, idempotent. A request still unanswered a tick after it leaves is resent under the same id, at most twice. Last-write-wins if two responses land in the same tick, otherwise first response wins. A node never waits for world state: it answers against what it holds and reports the sequence it used.
+Pathfinding-request stream: at-least-once, idempotent. A request still unanswered a tick after its node should have served it (counting the requests the node holds ahead of it when it leaves) is resent under the same id, at most twice. Last-write-wins if two responses land in the same tick, otherwise first response wins. A node never waits for world state: it answers against what it holds and reports the sequence it used.
 Requests are rejected pre-send (not on response) if a node's queue depth implies completion more than 10 ticks after the current world state.
 
 SCALING AND FAILOVER

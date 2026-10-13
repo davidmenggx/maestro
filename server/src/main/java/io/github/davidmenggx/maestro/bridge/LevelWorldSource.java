@@ -51,10 +51,11 @@ public final class LevelWorldSource implements WorldSource {
   }
 
   /**
-   * Reads the section's palette instead of its blocks. A section of air, or one holding a single
-   * block state, has one cell. The cell of a single state is read at one block, which is the same
-   * for every block since both values come from the state alone. A chunk that is not loaded is left
-   * to the block reads, which only ever happen in a loaded chunk.
+   * Reads the section's palette instead of its blocks. A section of air, or one whose palette holds
+   * a single block state, has one cell. A palette can still list a state no block has any more, so
+   * such a section is read block by block. The cell of a single state is read at one block, which
+   * is the same for every block since both values come from the state alone. A chunk that is not
+   * loaded is left to the block reads, which only ever happen in a loaded chunk.
    */
   @Override
   public int uniformCell(int chunkX, int chunkZ, int section) {
@@ -66,19 +67,8 @@ public final class LevelWorldSource implements WorldSource {
     if (blocks.hasOnlyAir()) {
       return AIR;
     }
-    BlockState[] first = new BlockState[1];
-    boolean[] single = {true};
-    blocks
-        .getStates()
-        .getAll(
-            state -> {
-              if (first[0] == null) {
-                first[0] = state;
-              } else if (first[0] != state) {
-                single[0] = false;
-              }
-            });
-    if (!single[0]) {
+    BlockState first = blocks.getBlockState(0, 0, 0);
+    if (blocks.maybeHas(state -> state != first)) {
       return NOT_UNIFORM;
     }
     int x = chunkX * 16;

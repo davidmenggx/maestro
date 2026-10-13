@@ -604,4 +604,13 @@ TEST(Profile, RefusesAMobClassThatBreaksTheContract) {
   EXPECT_FALSE(Decode(world::PathTypeCount, 0.0F, 1.8F, 0.6F).has_value());
   EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, NAN, 0.6F).has_value());
   EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 1.8F, -1.0F).has_value());
+  // A footprint past vanilla's largest would make every search crawl.
+  EXPECT_TRUE(Decode(world::PathTypeCount, Profile::WidthLimit,
+                     Profile::HeightLimit, Profile::UpStepLimit)
+                  .has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, 2000.0F, 1.8F, 0.6F).has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 300.0F, 0.6F).has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 1.8F, 20.0F).has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, INFINITY, 1.8F, 0.6F).has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 1.8F, NAN).has_value());
 }

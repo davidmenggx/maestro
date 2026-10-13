@@ -81,7 +81,43 @@ class SimulationTest {
 
     assertTrue(run.fitsCapacity(), run.describe());
     assertTrue(run.out.answered() > 0, run.describe());
-    assertEquals(List.of(), Invariants.checkSlo(run.sim.metrics()), run.describe());
+    assertEquals(
+        List.of(), Invariants.checkSlo(run.out.latencies(), run.out.sloMisses()), run.describe());
+  }
+
+  /**
+   * Each way takes just under the most a correct controller can absorb, so a round trip takes
+   * nearly a tick and the SLO leaves the controller no slack.
+   */
+  @Test
+  void aCleanRunAtTheLatencyEdgeStillMeetsTheSlo() {
+    FaultPlan edge =
+        new FaultPlan(
+            FaultPlan.MAX_ONE_WAY_LATENCY_STEPS - 10,
+            FaultPlan.MAX_ONE_WAY_LATENCY_STEPS,
+            0.0,
+            0.0,
+            0.0,
+            List.of());
+    SimRun run = SimRun.of(3L, edge, TICKS).go();
+
+    assertTrue(run.fitsCapacity(), run.describe());
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(run.out.answered() > 0, run.describe());
+    assertEquals(
+        2.0, run.out.latencies().stream().mapToDouble(Double::doubleValue).max().orElse(0));
+    // Every answer lands before the tick that checks for resends ends.
+    assertEquals(0, run.sim.metrics().total("path.resent"), run.describe());
+  }
+
+  /** The negative control: a little past the edge, even this controller misses the SLO. */
+  @Test
+  void aLatencyPastTheEdgeMakesEvenACorrectControllerLate() {
+    int late = Simulation.SERVICE_STEP + 10;
+    SimRun run = SimRun.of(3L, new FaultPlan(late, late, 0.0, 0.0, 0.0, List.of()), TICKS).go();
+
+    assertTrue(run.fitsCapacity(), run.describe());
+    assertEquals(1, Invariants.checkSlo(run.out.latencies(), run.out.sloMisses()).size());
   }
 
   @Test
@@ -196,6 +232,9 @@ class SimulationTest {
 
     assertTrue(run.out.dropped(DropReason.QUEUE_DEPTH) > 0, run.describe());
     assertTrue(run.out.answered() > 0, run.describe());
+    // Everything admitted is answered in time: requests the controller gave up on still
+    // counted against their node until it was done with them.
+    assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
     // A saturated fleet is not held to the 3-tick SLO. Shedding exists for that case.
     assertFalse(run.fitsCapacity(), run.describe());
     assertEquals(List.of(), run.violations(), run.describe());

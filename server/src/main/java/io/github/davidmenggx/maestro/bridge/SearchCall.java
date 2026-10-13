@@ -27,8 +27,9 @@ public record SearchCall(
    * Reads the call and interns the mob's profile in {@code profiles}. {@code maxVisitedNodes} is
    * the budget the search runs with, already scaled by its multiplier. {@code scratch} is a buffer
    * of {@link PathTypes#count()} floats that the malus is read into; nothing keeps it. Returns null
-   * if an input does not fit the wire, if two of the search's nodes could share vanilla's node hash
-   * ({@link NodeHashes}), or if the profile ids are exhausted, so the search stays vanilla.
+   * if an input does not fit the wire or a {@link MobClass.Shape}, if two of the search's nodes
+   * could share vanilla's node hash ({@link NodeHashes}), or if the profile ids are exhausted, so
+   * the search stays vanilla.
    */
   public static SearchCall read(
       Mob mob,
@@ -41,7 +42,8 @@ public record SearchCall(
       ProfileTable profiles,
       float[] scratch) {
     int maxFallDistance = mob.getMaxFallDistance();
-    if (reachRange < 0
+    if (!MobClass.Shape.fits(mob.getBbWidth(), mob.getBbHeight(), mob.maxUpStep())
+        || reachRange < 0
         || reachRange > WorldEvent.Search.MAX_REACH_RANGE
         || !(maxPathLength > 0)
         || maxVisitedNodes < 1

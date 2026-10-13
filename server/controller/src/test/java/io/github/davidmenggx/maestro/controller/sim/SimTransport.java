@@ -3,6 +3,7 @@ package io.github.davidmenggx.maestro.controller.sim;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.env.Transport;
+import io.github.davidmenggx.maestro.controller.wire.Frames;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -15,7 +16,8 @@ import java.util.Set;
 /**
  * Modeled network. An ordered channel keeps frame order and cannot lose a frame without breaking
  * the connection. An unordered channel may drop, duplicate and reorder frames, which the
- * at-least-once request path must tolerate.
+ * at-least-once request path must tolerate. Its frames are UDP datagrams, so one too large to send
+ * is refused, and one split into IP fragments is lost if any fragment is.
  *
  * <p>Process death resets the connection, so the controller sees it. A partition does not, so only
  * a failure detector can find it. A stall holds only the ordered channels, like TCP holding a
@@ -30,6 +32,12 @@ public final class SimTransport implements Transport {
   }
 
   private record Link(NodeId node, Channel channel, Direction direction) {}
+
+  /** Largest UDP payload over IPv4. */
+  static final int MAX_DATAGRAM_BYTES = 65_507;
+
+  /** UDP payload that fits one Ethernet frame. A larger datagram travels as several fragments. */
+  static final int FRAGMENT_BYTES = 1_472;
 
   private final Simulation sim;
   private final FaultPlan faults;
@@ -177,6 +185,13 @@ public final class SimTransport implements Transport {
     String nodeLabel = node.toString();
     sim.metrics().count("transport.sent", 1, "node", nodeLabel, "channel", channel.name());
 
+    // The receiving side would refuse it: a node drops a stream frame past its limit, and a
+    // socket will not send a datagram past the protocol's.
+    if (bytes.length > (channel.ordered() ? Frames.MAX_FRAME_BYTES : MAX_DATAGRAM_BYTES)) {
+      sim.metrics().count("transport.oversize", 1, "node", nodeLabel, "channel", channel.name());
+      return;
+    }
+
     if (!linkUp(node)) {
       sim.metrics().count("transport.lost", 1, "node", nodeLabel, "channel", channel.name());
       return;
@@ -206,7 +221,7 @@ public final class SimTransport implements Transport {
       return;
     }
 
-    if (rng.nextDouble() < faults.dropRate()) {
+    if (rng.nextDouble() < lossChance(bytes.length)) {
       sim.metrics().count("transport.dropped", 1, "node", nodeLabel, "channel", channel.name());
       return;
     }
@@ -252,6 +267,12 @@ public final class SimTransport implements Transport {
 
   private int bumpEpoch(NodeId node) {
     return epoch.merge(node, 1, Integer::sum);
+  }
+
+  /** Each fragment is lost at the plan's rate, and a datagram is lost with any of its fragments. */
+  private double lossChance(int bytes) {
+    int fragments = (bytes + FRAGMENT_BYTES - 1) / FRAGMENT_BYTES;
+    return fragments <= 1 ? faults.dropRate() : 1 - Math.pow(1 - faults.dropRate(), fragments);
   }
 
   private int latency() {
