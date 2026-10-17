@@ -17,13 +17,21 @@ import java.util.Set;
  * Modeled network. An ordered channel keeps frame order and cannot lose a frame without breaking
  * the connection. An unordered channel may drop, duplicate and reorder frames, which the
  * at-least-once request path must tolerate. Its frames are UDP datagrams, so one too large to send
- * is refused, and one split into IP fragments is lost if any fragment is.
+ * is refused, one split into IP fragments is lost if any fragment is, and one in flight when the
+ * link changes still arrives.
  *
  * <p>Process death resets the connection, so the controller sees it. A partition does not, so only
  * a failure detector can find it. A stall holds only the ordered channels, like TCP holding a
- * stream during a retransmit, so unordered frames can overtake the held ones.
+ * stream during a retransmit, so unordered frames can overtake the held ones. A paused process
+ * keeps its connections but handles nothing, so what reaches it waits until it resumes.
+ *
+ * <p>Overlapping faults of one kind on one node are counted, so a fault ends only when every
+ * interval of it has.
+ *
+ * <p>Each controller process gets its own {@link Session}. A restarted controller's links are gone
+ * and its old session sends nothing, but datagrams still in flight reach the new process.
  */
-public final class SimTransport implements Transport {
+public final class SimTransport {
 
   /** Which way a frame is travelling. Each direction of a channel is ordered separately. */
   private enum Direction {
@@ -31,7 +39,10 @@ public final class SimTransport implements Transport {
     TO_CONTROLLER
   }
 
-  private record Link(NodeId node, Channel channel, Direction direction) {}
+  private record Link(NodeId node, Transport.Channel channel, Direction direction) {}
+
+  /** A frame that reached a paused node, kept until it resumes. */
+  private record Arrived(Transport.Channel channel, byte[] bytes, int sentEpoch) {}
 
   /** Largest UDP payload over IPv4. */
   static final int MAX_DATAGRAM_BYTES = 65_507;
@@ -44,14 +55,22 @@ public final class SimTransport implements Transport {
   private final Rng rng;
   private final Map<NodeId, ModeledNode> nodes;
   private final Set<NodeId> connected = new LinkedHashSet<>();
-  private final Set<NodeId> dead = new LinkedHashSet<>();
-  private final Set<NodeId> partitioned = new LinkedHashSet<>();
-  private final Set<NodeId> stalled = new LinkedHashSet<>();
+  private final Map<NodeId, Integer> dead = new LinkedHashMap<>();
+  private final Map<NodeId, Integer> partitioned = new LinkedHashMap<>();
+  private final Map<NodeId, Integer> stalled = new LinkedHashMap<>();
+  private final Map<NodeId, Integer> paused = new LinkedHashMap<>();
+
+  /** Counts each node's connect attempts and link changes. A frame is valid only in its own. */
   private final Map<NodeId, Integer> epoch = new LinkedHashMap<>();
+
+  /** Ordered links whose first frame, the `Join`, the node has handled in this epoch. */
+  private final Set<Link> opened = new LinkedHashSet<>();
+
   private final Map<Link, Long> lastDelivery = new LinkedHashMap<>();
   private final Map<Link, List<byte[]>> backlog = new LinkedHashMap<>();
+  private final Map<NodeId, List<Arrived>> heldAtNode = new LinkedHashMap<>();
 
-  private Listener listener;
+  private Session session;
 
   SimTransport(Simulation sim, FaultPlan faults, Rng rng, Map<NodeId, ModeledNode> nodes) {
     this.sim = sim;
@@ -60,69 +79,181 @@ public final class SimTransport implements Transport {
     this.nodes = nodes;
   }
 
-  @Override
-  public void listen(Listener listener) {
-    if (this.listener != null) {
-      throw new IllegalStateException("the transport already has a listener");
+  /**
+   * The transport of one controller process, which names its run in every link it opens. Once a
+   * newer session starts, this one sends nothing and hears nothing.
+   */
+  public final class Session implements Transport {
+
+    private final long run;
+    private Listener listener;
+
+    private Session(long run) {
+      this.run = run;
     }
-    this.listener = Objects.requireNonNull(listener, "listener");
+
+    @Override
+    public void listen(Listener listener) {
+      if (this.listener != null) {
+        throw new IllegalStateException("the transport already has a listener");
+      }
+      this.listener = Objects.requireNonNull(listener, "listener");
+    }
+
+    @Override
+    public void send(NodeId node, Channel channel, ByteBuffer frame) {
+      if (session == this) {
+        transmit(node, channel, frame, Direction.TO_NODE);
+      }
+    }
+
+    @Override
+    public void connect(NodeId node) {
+      if (listener == null) {
+        throw new IllegalStateException("connect before listen");
+      }
+      if (!nodes.containsKey(node)) {
+        throw new IllegalArgumentException(node + " is not in the fleet");
+      }
+      if (session != this) {
+        return;
+      }
+      sim.metrics().count("transport.connect", 1, "node", node.toString());
+      closeLink(node);
+      int attempt = bumpEpoch(node);
+      sim.schedule(
+          latency(),
+          "connect:" + node,
+          () -> {
+            if (session != this) {
+              return;
+            }
+            if (epoch.get(node) != attempt || isDead(node) || count(partitioned, node) > 0) {
+              listener.onDisconnected(node);
+              return;
+            }
+            connected.add(node);
+            // Each connection opens with a `Join`, which the node reads before anything else.
+            transmit(
+                node,
+                Channel.WORLD,
+                ByteBuffer.wrap(Frames.joinWorld(run, attempt)),
+                Direction.TO_NODE);
+            transmit(
+                node,
+                Channel.CONTROL,
+                ByteBuffer.wrap(Frames.joinControl(run, attempt)),
+                Direction.TO_NODE);
+            listener.onConnected(node);
+          });
+    }
+
+    @Override
+    public void disconnect(NodeId node) {
+      if (session != this) {
+        return;
+      }
+      sim.metrics().count("transport.disconnect", 1, "node", node.toString());
+      bumpEpoch(node);
+      closeLink(node);
+    }
+
+    /** Runs {@code callback} on the listener later, if this session is still the live one. */
+    private void notify(String name, Callback callback) {
+      sim.schedule(
+          latency(),
+          name,
+          () -> {
+            if (session == this && listener != null) {
+              callback.accept(listener);
+            }
+          });
+    }
   }
 
-  @Override
-  public void connect(NodeId node, String endpoint) {
-    if (listener == null) {
-      throw new IllegalStateException("connect before listen");
-    }
-    if (!nodes.containsKey(node)) {
-      throw new IllegalArgumentException(node + " is not in the fleet");
-    }
-    sim.metrics().count("transport.connect", 1, "node", node.toString());
-    int attempt = bumpEpoch(node);
-    sim.schedule(
-        latency(),
-        "connect:" + node,
-        () -> {
-          if (epoch.get(node) != attempt) {
-            return;
-          }
-          if (dead.contains(node) || partitioned.contains(node)) {
-            listener.onDisconnected(node);
-            return;
-          }
-          connected.add(node);
-          listener.onConnected(node);
-          nodes.get(node).linkUp();
-        });
+  private interface Callback {
+    void accept(Transport.Listener listener);
   }
 
-  @Override
-  public void send(NodeId node, Channel channel, ByteBuffer frame) {
-    transmit(node, channel, frame, Direction.TO_NODE);
+  /** Starts the transport of a new controller process. The old one's links are gone. */
+  Session restart(long run) {
+    for (NodeId node : List.copyOf(connected)) {
+      bumpEpoch(node);
+      closeLink(node);
+    }
+    session = new Session(run);
+    return session;
   }
 
-  /** The node side of the same wire. */
-  void toController(NodeId node, Channel channel, ByteBuffer frame) {
-    transmit(node, channel, frame, Direction.TO_CONTROLLER);
+  /** The host each modeled node acts through. */
+  ModeledNode.Host hostFor(NodeId node) {
+    return new ModeledNode.Host() {
+      @Override
+      public long now() {
+        return sim.now();
+      }
+
+      @Override
+      public void send(Transport.Channel channel, byte[] frame) {
+        transmit(node, channel, ByteBuffer.wrap(frame), Direction.TO_CONTROLLER);
+      }
+
+      @Override
+      public void linkDropped() {
+        if (!connected.contains(node)) {
+          return;
+        }
+        sim.metrics().count("transport.link.dropped", 1, "node", node.toString());
+        bumpEpoch(node);
+        dropLink(node);
+        session.notify("link-dropped:" + node, listener -> listener.onDisconnected(node));
+      }
+
+      @Override
+      public void refused(Transport.Channel port) {
+        sim.metrics().count("transport.refused", 1, "node", node.toString());
+      }
+
+      @Override
+      public void schedule(long delaySteps, String name, Runnable action) {
+        sim.schedule(delaySteps, name, action);
+      }
+
+      @Override
+      public void applied(ModeledNode modeled, long run, long region, long sequence) {
+        sim.applied(modeled, run, region, sequence);
+      }
+
+      @Override
+      public void assigned(ModeledNode modeled, long run, long region, long sequence) {
+        sim.assigned(modeled, run, region, sequence);
+      }
+    };
   }
 
   /** Whether the node's process is running, whatever the state of its link. */
   public boolean alive(NodeId node) {
-    return !dead.contains(node);
+    return !isDead(node);
   }
 
   /** Process death: node state is lost and the controller sees a reset. */
   public void kill(NodeId node) {
-    if (!dead.add(node)) {
+    if (increment(dead, node) > 1) {
       return;
     }
     bumpEpoch(node);
-    backlog.keySet().removeIf(link -> link.node().equals(node));
-    ModeledNode modeled = nodes.get(node);
-    if (modeled != null) {
-      modeled.kill();
+    heldAtNode.remove(node);
+    nodes.get(node).kill();
+    if (dropLink(node)) {
+      session.notify("reset:" + node, listener -> listener.onDisconnected(node));
     }
-    if (connected.remove(node)) {
-      sim.schedule(latency(), "reset:" + node, () -> listener.onDisconnected(node));
+  }
+
+  /** The node recovers once every death that overlapped has ended, as a new process. */
+  public void revive(NodeId node) {
+    if (release(dead, node)) {
+      bumpEpoch(node);
+      nodes.get(node).revive();
     }
   }
 
@@ -132,24 +263,10 @@ public final class SimTransport implements Transport {
    */
   public void resetLink(NodeId node) {
     bumpEpoch(node);
-    backlog.keySet().removeIf(link -> link.node().equals(node));
-    ModeledNode modeled = nodes.get(node);
-    if (modeled != null) {
-      modeled.linkDown();
-    }
-    if (connected.remove(node)) {
+    if (connected.contains(node)) {
       sim.metrics().count("transport.link.reset", 1, "node", node.toString());
-      sim.schedule(latency(), "link-reset:" + node, () -> listener.onDisconnected(node));
-    }
-  }
-
-  /**
-   * Only a node that died recovers. Bumping the epoch of a live connection would discard the frames
-   * in flight on it, and an ordered channel cannot lose frames.
-   */
-  public void revive(NodeId node) {
-    if (dead.remove(node)) {
-      bumpEpoch(node);
+      closeLink(node);
+      session.notify("link-reset:" + node, listener -> listener.onDisconnected(node));
     }
   }
 
@@ -163,13 +280,34 @@ public final class SimTransport implements Transport {
     hold(stalled, node, active);
   }
 
-  /** Held frames are released once the node has no partition or stall. */
-  private void hold(Set<NodeId> holding, NodeId node, boolean active) {
+  /** The node's process freezes: its links stay up, and frames that reach it wait. */
+  public void pause(NodeId node, boolean active) {
     if (active) {
-      holding.add(node);
+      if (increment(paused, node) == 1) {
+        nodes.get(node).pause(true);
+      }
       return;
     }
-    if (!holding.remove(node) || partitioned.contains(node) || stalled.contains(node)) {
+    if (release(paused, node)) {
+      ModeledNode modeled = nodes.get(node);
+      List<Arrived> arrived = heldAtNode.remove(node);
+      if (arrived != null) {
+        for (Arrived frame : arrived) {
+          handle(node, frame.channel(), frame.bytes(), frame.sentEpoch());
+        }
+      }
+      if (!isDead(node)) {
+        modeled.pause(false);
+      }
+    }
+  }
+
+  private void hold(Map<NodeId, Integer> holding, NodeId node, boolean active) {
+    if (active) {
+      increment(holding, node);
+      return;
+    }
+    if (!release(holding, node) || count(partitioned, node) > 0 || count(stalled, node) > 0) {
       return;
     }
     int sentEpoch = epoch.getOrDefault(node, 0);
@@ -185,7 +323,22 @@ public final class SimTransport implements Transport {
     }
   }
 
-  private void transmit(NodeId node, Channel channel, ByteBuffer frame, Direction direction) {
+  /** Ends the controller's view of the link, and the node's, without telling the controller. */
+  private void closeLink(NodeId node) {
+    if (dropLink(node)) {
+      nodes.get(node).connectionLost();
+    }
+  }
+
+  /** Forgets the link's held frames. Returns whether there was a link. */
+  private boolean dropLink(NodeId node) {
+    backlog.keySet().removeIf(link -> link.node().equals(node));
+    opened.removeIf(link -> link.node().equals(node));
+    return connected.remove(node);
+  }
+
+  private void transmit(
+      NodeId node, Transport.Channel channel, ByteBuffer frame, Direction direction) {
     byte[] bytes = new byte[frame.remaining()];
     frame.duplicate().get(bytes);
     sim.digest().mix(bytes);
@@ -199,35 +352,31 @@ public final class SimTransport implements Transport {
       return;
     }
 
-    if (!linkUp(node)) {
-      sim.metrics().count("transport.lost", 1, "node", nodeLabel, "channel", channel.name());
-      return;
-    }
-
     int sentEpoch = epoch.getOrDefault(node, 0);
-    if (partitioned.contains(node)) {
-      if (channel.ordered()) {
-        backlog
-            .computeIfAbsent(new Link(node, channel, direction), link -> new ArrayList<>())
-            .add(bytes);
-        sim.metrics().count("transport.held", 1, "node", nodeLabel, "channel", channel.name());
-      } else {
-        sim.metrics().count("transport.lost", 1, "node", nodeLabel, "channel", channel.name());
-      }
-      return;
-    }
-
     if (channel.ordered()) {
+      if (!connected.contains(node) || isDead(node)) {
+        sim.metrics().count("transport.lost", 1, "node", nodeLabel, "channel", channel.name());
+        return;
+      }
       Link link = new Link(node, channel, direction);
-      if (stalled.contains(node)) {
+      boolean cut = count(partitioned, node) > 0;
+      if (cut || count(stalled, node) > 0) {
         backlog.computeIfAbsent(link, held -> new ArrayList<>()).add(bytes);
         sim.metrics().count("transport.held", 1, "node", nodeLabel, "channel", channel.name());
+        if (cut) {
+          sim.metrics()
+              .count("transport.held.partition", 1, "node", nodeLabel, "channel", channel.name());
+        }
         return;
       }
       deliverInOrder(link, bytes, sentEpoch, "frame:" + channel);
       return;
     }
 
+    if (isDead(node) || count(partitioned, node) > 0) {
+      sim.metrics().count("transport.lost", 1, "node", nodeLabel, "channel", channel.name());
+      return;
+    }
     if (rng.nextDouble() < lossChance(bytes.length)) {
       sim.metrics().count("transport.dropped", 1, "node", nodeLabel, "channel", channel.name());
       return;
@@ -253,26 +402,74 @@ public final class SimTransport implements Transport {
   }
 
   private void arrive(
-      NodeId node, Channel channel, byte[] bytes, Direction direction, int sentEpoch) {
-    if (epoch.getOrDefault(node, 0) != sentEpoch || !linkUp(node)) {
-      sim.metrics().count("transport.lost", 1, "node", node.toString(), "channel", channel.name());
+      NodeId node, Transport.Channel channel, byte[] bytes, Direction direction, int sentEpoch) {
+    String label = node.toString();
+    if (channel.ordered()
+        && (epoch.getOrDefault(node, 0) != sentEpoch || !connected.contains(node))) {
+      sim.metrics().count("transport.lost", 1, "node", label, "channel", channel.name());
       return;
     }
-    sim.metrics()
-        .count("transport.received", 1, "node", node.toString(), "channel", channel.name());
-    if (direction == Direction.TO_NODE) {
-      nodes.get(node).receive(channel, ByteBuffer.wrap(bytes));
+    if (direction == Direction.TO_CONTROLLER) {
+      sim.metrics().count("transport.received", 1, "node", label, "channel", channel.name());
+      if (session.listener != null) {
+        session.listener.onFrame(node, channel, ByteBuffer.wrap(bytes));
+      }
+      return;
+    }
+    if (isDead(node)) {
+      sim.metrics().count("transport.lost", 1, "node", label, "channel", channel.name());
+      return;
+    }
+    if (count(paused, node) > 0) {
+      heldAtNode
+          .computeIfAbsent(node, held -> new ArrayList<>())
+          .add(new Arrived(channel, bytes, sentEpoch));
+      return;
+    }
+    handle(node, channel, bytes, sentEpoch);
+  }
+
+  /** The node reads a frame that reached it. The first on each connection is its `Join`. */
+  private void handle(NodeId node, Transport.Channel channel, byte[] bytes, int sentEpoch) {
+    String label = node.toString();
+    if (channel.ordered()
+        && (epoch.getOrDefault(node, 0) != sentEpoch || !connected.contains(node))) {
+      sim.metrics().count("transport.lost", 1, "node", label, "channel", channel.name());
+      return;
+    }
+    sim.metrics().count("transport.received", 1, "node", label, "channel", channel.name());
+    ModeledNode modeled = nodes.get(node);
+    if (channel.ordered() && opened.add(new Link(node, channel, Direction.TO_NODE))) {
+      modeled.connect(channel, ByteBuffer.wrap(bytes));
     } else {
-      listener.onFrame(node, channel, ByteBuffer.wrap(bytes));
+      modeled.receive(channel, ByteBuffer.wrap(bytes));
     }
   }
 
-  /** A partition is not a link failure. It holds or discards frames while the link stays up. */
-  private boolean linkUp(NodeId node) {
-    return connected.contains(node) && !dead.contains(node);
+  private boolean isDead(NodeId node) {
+    return count(dead, node) > 0;
+  }
+
+  private static int count(Map<NodeId, Integer> faults, NodeId node) {
+    return faults.getOrDefault(node, 0);
+  }
+
+  private static int increment(Map<NodeId, Integer> faults, NodeId node) {
+    return faults.merge(node, 1, Integer::sum);
+  }
+
+  /** Ends one interval of a fault, and returns whether that ended the fault. */
+  private static boolean release(Map<NodeId, Integer> faults, NodeId node) {
+    int before = count(faults, node);
+    if (before == 0) {
+      return false;
+    }
+    faults.put(node, before - 1);
+    return before == 1;
   }
 
   private int bumpEpoch(NodeId node) {
+    opened.removeIf(link -> link.node().equals(node));
     return epoch.merge(node, 1, Integer::sum);
   }
 

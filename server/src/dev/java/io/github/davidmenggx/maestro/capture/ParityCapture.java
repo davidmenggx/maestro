@@ -55,7 +55,7 @@ final class ParityCapture implements Searches.Observer {
   static final int ORIGIN = 4096;
 
   private static final long RUN = 1;
-  private static final int REGION = 0;
+  private static final int REGION = 3;
   private static final int ATTEMPTS_PER_CASE = 50;
 
   /** Block change frames in a capture, each between two batches of searches. */
@@ -162,9 +162,10 @@ final class ParityCapture implements Searches.Observer {
     int firstChunk = Chunks.of(ORIGIN);
     for (int dx = 0; dx < AREA_CHUNKS; dx++) {
       for (int dz = 0; dz < AREA_CHUNKS; dz++) {
+        checkSections(firstChunk + dx, firstChunk + dz);
         Frames.ChunkRuns runs = Frames.readChunk(world, firstChunk + dx, firstChunk + dz);
         byte[] frame = Frames.chunkSnapshot(++sequence, dx, dz, runs);
-        // The section shortcut must give what reading every block gives.
+        // The section shortcuts must give what reading every block gives.
         byte[] reference =
             Frames.chunkSnapshot(
                 sequence,
@@ -218,6 +219,37 @@ final class ParityCapture implements Searches.Observer {
     }
     FixtureFile.write(file, seed, FixtureFile.frame(worldFrames), cases);
     return new Summary(cases.size(), exact, reached, offStart, modelDiffered, deltas);
+  }
+
+  /**
+   * Fails the capture unless every section of the chunk, read whole, gives the cells its blocks
+   * give when read one at a time.
+   */
+  private void checkSections(int chunkX, int chunkZ) {
+    int[] cells = new int[Chunks.SIZE * Chunks.SIZE * WorldSource.SECTION_HEIGHT];
+    for (int section = 0; section < world.height() / WorldSource.SECTION_HEIGHT; section++) {
+      if (!world.readSection(chunkX, chunkZ, section, cells)) {
+        throw new IllegalStateException("chunk " + chunkX + ", " + chunkZ + " is not loaded");
+      }
+      int minY = world.minY() + section * WorldSource.SECTION_HEIGHT;
+      for (int dx = 0; dx < Chunks.SIZE; dx++) {
+        for (int dz = 0; dz < Chunks.SIZE; dz++) {
+          for (int dy = 0; dy < WorldSource.SECTION_HEIGHT; dy++) {
+            int x = chunkX * Chunks.SIZE + dx;
+            int y = minY + dy;
+            int z = chunkZ * Chunks.SIZE + dz;
+            int block = (world.floorAt(x, y, z) << 8) | (world.pathTypeAt(x, y, z) & 0xFF);
+            int read = cells[(dx * Chunks.SIZE + dz) * WorldSource.SECTION_HEIGHT + dy];
+            if (read != block) {
+              throw new IllegalStateException(
+                  String.format(
+                      "the section read gives cell %x and the block read %x at %d, %d, %d",
+                      read, block, x, y, z));
+            }
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -304,7 +336,7 @@ final class ParityCapture implements Searches.Observer {
     PathNavigation navigation = mob.getNavigation();
     recorded.clear();
     probe.reset();
-    Searches.observe(this);
+    Searches.Observer previous = Searches.observe(this);
     try {
       if (rng.nextInt(4) == 0) {
         int maxPathLength = 8 + rng.nextInt((int) defaultLength - 7);
@@ -313,7 +345,7 @@ final class ParityCapture implements Searches.Observer {
         navigation.createPath(target, reachRange);
       }
     } finally {
-      Searches.observe(null);
+      Searches.observe(previous);
     }
     if (recorded.size() != 1) {
       return null;
@@ -329,6 +361,8 @@ final class ParityCapture implements Searches.Observer {
     }
     byte[] request =
         Frames.requests(
+            RUN,
+            REGION,
             List.of(
                 new Frames.Request(
                     requestId, profile.classId(), start, pos(call.target()), call.search())),
@@ -336,6 +370,7 @@ final class ParityCapture implements Searches.Observer {
             ORIGIN);
     byte[] response =
         Frames.response(
+            RUN,
             requestId,
             search.reached(),
             search.nodes(),

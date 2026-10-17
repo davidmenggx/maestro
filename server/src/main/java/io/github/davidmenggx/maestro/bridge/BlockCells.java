@@ -4,6 +4,7 @@ import io.github.davidmenggx.maestro.controller.world.Cells;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.PathType;
 import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
 import net.minecraft.world.phys.shapes.VoxelShape;
@@ -23,7 +24,12 @@ public final class BlockCells {
    * Cells#MAX_FLOOR}, or 0 if it has none. This is the shape {@code getFloorLevel} reads.
    */
   public static int floor(BlockGetter level, BlockPos pos) {
-    VoxelShape shape = level.getBlockState(pos).getCollisionShape(level, pos);
+    return floor(level.getBlockState(pos), level, pos);
+  }
+
+  /** {@link #floor(BlockGetter, BlockPos)} where {@code state} is the block at the position. */
+  static int floor(BlockState state, BlockGetter level, BlockPos pos) {
+    VoxelShape shape = state.getCollisionShape(level, pos);
     if (shape.isEmpty()) {
       return 0;
     }

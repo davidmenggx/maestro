@@ -3,22 +3,19 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/ip/udp.hpp>
 #include <asio/steady_timer.hpp>
-#include <flatbuffers/flatbuffers.h>
 
-#include "maestro/search/profile.hpp"
-#include "maestro/serve/request_queue.hpp"
+#include "maestro/serve/node_core.hpp"
 #include "maestro/serve/workers.hpp"
-#include "maestro/world/world_store.hpp"
 #include "pathfinding_generated.h"
 
 namespace maestro::net {
@@ -37,26 +34,20 @@ struct ServerOptions {
   /// How long an answer or a cancel is kept for later copies of its request:
   /// the 10 ticks after which the controller gives up on a request.
   std::chrono::milliseconds Retention{500};
+  /// How long a new connection may wait before its first frame.
+  std::chrono::milliseconds JoinTimeout{5000};
   fbs::Pathfinder Search = fbs::Pathfinder::VANILLA;
 };
 
-/// The network side of a compute node. The controller connects to two TCP
-/// ports, one for the world stream and one for control, and the two
-/// connections form one link. The node serves one link at a time: a new
-/// connection on either port replaces the whole link, and losing either
-/// connection loses it. Requests arrive over UDP, and each answer goes to the
-/// address its request came from.
-///
-/// A link starts with a `Hello` on the control connection. Losing it forgets
-/// every profile and request, since the next link may come from another
-/// controller run, whose ids mean other things. The world state stays, so the
-/// next link can resume it. A world frame the store refuses drops the world
-/// state too, and the link with it, so the controller reconnects and sends
-/// the area again.
+/// The network side of a compute node: two TCP acceptors, one for the world
+/// stream and one for control, a UDP socket for requests, the heartbeat
+/// timer, and the search threads, all reporting to a `serve::NodeCore`, which
+/// makes every decision. Each answer goes to the address its request came
+/// from.
 ///
 /// Everything but the searches runs on the thread running the `io_context`,
 /// including applying world frames.
-class Server {
+class Server : private serve::NodeCore::Output {
 public:
   /// Binds every socket and starts the workers. Throws `std::system_error` if
   /// a socket cannot be bound, and `std::invalid_argument` if this build
@@ -66,7 +57,7 @@ public:
   Server(const Server &) = delete;
   Server &operator=(const Server &) = delete;
 
-  ~Server();
+  ~Server() override;
 
   std::uint16_t worldPort() const { return WorldPort; }
   std::uint16_t controlPort() const { return ControlPort; }
@@ -79,26 +70,18 @@ public:
 private:
   class Stream;
 
-  void acceptWorld();
-  void acceptControl();
+  void accept(asio::ip::tcp::acceptor &Acceptor, serve::Port On);
+  void open(asio::ip::tcp::socket Socket, serve::Port On);
   void receiveRequests();
   void scheduleHeartbeat();
-
-  void onWorldFrame(std::span<const std::uint8_t> Frame);
-  void onControlFrame(std::span<const std::uint8_t> Frame);
-  void onDatagram(std::span<const std::uint8_t> Datagram,
-                  const asio::ip::udp::endpoint &From);
-  void admit(const fbs::PathRequest &Wire, const asio::ip::udp::endpoint &From,
-             serve::Clock::time_point Now);
-
-  void sendHello();
-  void sendHeartbeat();
-  void sendTo(const asio::ip::udp::endpoint &To,
-              std::span<const std::uint8_t> Datagram);
-
-  /// Closes both connections and forgets what belongs to the link.
-  void dropLink(std::string_view Reason);
   void shutdown();
+
+  void send(serve::ConnectionId To,
+            std::span<const std::uint8_t> Frame) override;
+  void close(serve::ConnectionId Which) override;
+  void sendTo(const asio::ip::udp::endpoint &To,
+              std::span<const std::uint8_t> Datagram) override;
+  void linkDropped(std::string_view Reason) override;
 
   asio::io_context &Io;
   const ServerOptions Opts;
@@ -111,22 +94,15 @@ private:
   std::uint16_t RequestPort = 0;
   bool Stopped = false;
 
-  std::shared_ptr<Stream> WorldLink;
-  std::shared_ptr<Stream> ControlLink;
+  /// Every open connection, joined or not.
+  std::map<serve::ConnectionId, std::shared_ptr<Stream>> Connections;
+  serve::ConnectionId LastConnection = 0;
 
   /// The datagram being received and its sender.
   std::array<std::uint8_t, 65536> Received{};
   asio::ip::udp::endpoint Sender;
 
-  /// Scratch for frames built on the I/O thread.
-  flatbuffers::FlatBufferBuilder Builder;
-
-  world::WorldStore Store;
-  serve::RequestQueue Queue;
-  /// Profiles received on the current link. Only the I/O thread uses this:
-  /// a job carries its own profile to the worker.
-  std::unordered_map<std::uint16_t, std::shared_ptr<const search::Profile>>
-      Profiles;
+  serve::NodeCore Core;
   /// Last, so it stops before anything its threads use is destroyed.
   serve::Workers Pool;
 };

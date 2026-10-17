@@ -18,8 +18,18 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
 
   /** A whole-number setting. */
   public enum Count {
-    NODE_CAPACITY(1, 12),
+    /**
+     * Requests one worker serves per tick on average, so a request costs at most a tick and a half
+     * and a node serves {@link #WORKERS} times this.
+     */
+    WORKER_CAPACITY(1, 12),
+    /** Searches a node runs at once. */
+    WORKERS(1, 4),
+    /** How far one request's cost may stray from the mean, as a percentage of it. */
+    COST_SPREAD_PERCENT(0, 50),
     SLOW_NODES(0, 2),
+    /** The capacity the controller assumes, as a percentage of a normal node's. */
+    CAPACITY_ESTIMATE_PERCENT(75, 200),
     MOBS(0, 48),
     MOB_CLASSES(1, 4),
     BLOCK_CHANGES_PER_TICK(0, 6),
@@ -51,7 +61,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     MOB_CHURN(0.15),
     CHUNK_CHURN(0.12),
     PLAYER_CHURN(0.1),
-    STRAY_REQUEST(0.1);
+    STRAY_REQUEST(0.1),
+    /** A mob that asks again in the same tick, as when a goal changes mid-tick. */
+    REPEAT_REQUEST(0.1);
 
     private final double ceiling;
 
@@ -86,8 +98,11 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
   public static final Scenario DEFAULT =
       new Scenario(
           Map.of(
-              Count.NODE_CAPACITY, 8,
+              Count.WORKER_CAPACITY, 4,
+              Count.WORKERS, 2,
+              Count.COST_SPREAD_PERCENT, 50,
               Count.SLOW_NODES, 0,
+              Count.CAPACITY_ESTIMATE_PERCENT, 100,
               Count.MOBS, 12,
               Count.MOB_CLASSES, 2,
               Count.BLOCK_CHANGES_PER_TICK, 3,
@@ -99,11 +114,16 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
               Chance.MOB_CHURN, 0.05,
               Chance.CHUNK_CHURN, 0.0,
               Chance.PLAYER_CHURN, 0.01,
-              Chance.STRAY_REQUEST, 0.0));
+              Chance.STRAY_REQUEST, 0.0,
+              Chance.REPEAT_REQUEST, 0.0));
 
   /** Far more demand than the fleet can serve, so pre-send rejection must limit the load. */
   public static final Scenario SATURATED =
-      DEFAULT.with(Count.NODE_CAPACITY, 1).with(Count.MOBS, 40).with(Chance.REQUEST, 0.25);
+      DEFAULT
+          .with(Count.WORKER_CAPACITY, 1)
+          .with(Count.WORKERS, 1)
+          .with(Count.MOBS, 40)
+          .with(Chance.REQUEST, 0.25);
 
   /**
    * Chunks are repeatedly unloaded and loaded, so regions keep becoming unreadable and readable.
@@ -136,12 +156,37 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
   }
 
   /**
-   * Capacity of the {@code n}th node. A few nodes are slower than the rest, so admission control,
-   * which assumes uniform capacity, is tested against a fleet that does not have it.
+   * How the {@code n}th node serves. Its workers each take a cost drawn evenly within {@link
+   * Count#COST_SPREAD_PERCENT} of the mean either side of it, and the mean gives a worker {@link
+   * Count#WORKER_CAPACITY} a tick. A few nodes are four times slower than the rest, so admission
+   * control, which assumes uniform capacity, is tested against a fleet that does not have it.
    */
-  public int capacityOf(int nodeIndex) {
-    int capacity = counts.get(Count.NODE_CAPACITY);
-    return nodeIndex < counts.get(Count.SLOW_NODES) ? Math.max(1, capacity / 4) : capacity;
+  public ModeledNode.Service serviceOf(int nodeIndex) {
+    int slowdown = nodeIndex < counts.get(Count.SLOW_NODES) ? 4 : 1;
+    int mean =
+        Math.max(2, Simulation.STEPS_PER_TICK * slowdown / counts.get(Count.WORKER_CAPACITY));
+    int spread = mean * counts.get(Count.COST_SPREAD_PERCENT) / 100;
+    return new ModeledNode.Service(counts.get(Count.WORKERS), mean - spread, mean + spread);
+  }
+
+  /** Requests a normal node serves per tick on average. */
+  public int nodeCapacity() {
+    return counts.get(Count.WORKERS) * counts.get(Count.WORKER_CAPACITY);
+  }
+
+  /** Highest cost of one request on any of {@code nodeCount} nodes. */
+  public int maxCostSteps(int nodeCount) {
+    int highest = 0;
+    for (int i = 0; i < nodeCount; i++) {
+      highest = Math.max(highest, serviceOf(i).maxCostSteps());
+    }
+    return highest;
+  }
+
+  /** The capacity the controller assumes every node has, which differs from the truth. */
+  public int assumedCapacity() {
+    return Math.max(
+        1, Math.round(nodeCapacity() * counts.get(Count.CAPACITY_ESTIMATE_PERCENT) / 100f));
   }
 
   /** Uses the enum's iteration order, and rejects a table that is missing a setting. */

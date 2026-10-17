@@ -41,6 +41,12 @@ struct Run {
   friend bool operator==(Run, Run) = default;
 };
 
+/// One cell to set in a column, `Offset` counting up from the area's `MinY`.
+struct ColumnEdit {
+  int Offset = 0;
+  Cell Value;
+};
+
 /// One full-height column, run-length encoded. Immutable, so versions of an
 /// area can share it.
 class Column {
@@ -53,6 +59,10 @@ public:
 
   /// A copy with the cell at `Offset` replaced and equal neighbours merged.
   std::shared_ptr<const Column> with(int Offset, Cell Value) const;
+
+  /// A copy with every cell in `Edits` replaced and equal neighbours merged.
+  /// `Edits` must be in strictly increasing `Offset` order.
+  std::shared_ptr<const Column> with(std::span<const ColumnEdit> Edits) const;
 
   std::span<const Run> runs() const { return Runs; }
 
@@ -111,8 +121,9 @@ public:
                                         ChunkPtr Content,
                                         std::uint64_t Sequence) const;
 
-  /// A version with `Edits` applied in order. Every edit must be inside the
-  /// area. An edit in a chunk with no state starts that chunk from air.
+  /// A version with `Edits` applied, a later edit to a cell winning over an
+  /// earlier one. Every edit must be inside the area. An edit in a chunk with
+  /// no state starts that chunk from air.
   std::shared_ptr<const Area> withCells(std::span<const CellEdit> Edits,
                                         std::uint64_t Sequence) const;
 

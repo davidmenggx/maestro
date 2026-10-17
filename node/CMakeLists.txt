@@ -34,6 +34,7 @@ add_library(maestro_core
   src/search/search.cpp
   src/search/vanilla_search.cpp
   src/search/walk_node_evaluator.cpp
+  src/serve/node_core.cpp
   src/serve/request_queue.cpp
   src/serve/workers.cpp
   src/world/area.cpp
@@ -83,8 +84,11 @@ if(MAESTRO_BUILD_TESTS)
   add_executable(maestro_tests
     tests/test_area.cpp
     tests/test_binary_heap.cpp
+    tests/test_conformance.cpp
     tests/test_coord_map.cpp
+    tests/test_frames.cpp
     tests/test_framing.cpp
+    tests/test_node_core.cpp
     tests/test_obs.cpp
     tests/test_parity.cpp
     tests/test_path_types.cpp
@@ -97,9 +101,11 @@ if(MAESTRO_BUILD_TESTS)
   )
   target_link_libraries(maestro_tests PRIVATE maestro_core GTest::gtest_main)
   # Parity fixtures recorded from vanilla by `make capture`, committed with the
-  # repository and shared with the Java tests.
+  # repository and shared with the Java tests, and the conformance scripts the
+  # controller's modeled node also replays.
   target_compile_definitions(maestro_tests PRIVATE
-    MAESTRO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/parity")
+    MAESTRO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/parity"
+    MAESTRO_CONFORMANCE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/conformance/node.bin")
   include(GoogleTest)
   gtest_discover_tests(maestro_tests)
 endif()

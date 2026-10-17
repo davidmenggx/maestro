@@ -21,13 +21,14 @@
 #include "control_generated.h"
 #include "fixture_generated.h"
 #include "maestro/net/framing.hpp"
-#include "maestro/search/path_types.hpp"
+#include "test_frames.hpp"
 #include "test_world.hpp"
 
 using namespace maestro;
+using namespace maestro::test;
 using asio::ip::tcp;
 using asio::ip::udp;
-using Bytes = std::vector<std::uint8_t>;
+using serve::Port;
 using std::chrono::milliseconds;
 
 namespace {
@@ -36,73 +37,6 @@ namespace {
 constexpr milliseconds Patience{5000};
 /// How long to watch for something that must not happen.
 constexpr milliseconds Quiet{200};
-
-constexpr std::uint16_t ClassId = 3;
-
-Bytes finish(flatbuffers::FlatBufferBuilder &Builder) {
-  return {Builder.GetBufferPointer(),
-          Builder.GetBufferPointer() + Builder.GetSize()};
-}
-
-Bytes mobClassFrame(std::uint16_t Id) {
-  const search::Profile Defaults;
-  flatbuffers::FlatBufferBuilder Builder;
-  const auto Malus =
-      Builder.CreateVector(Defaults.Malus.data(), Defaults.Malus.size());
-  const auto Body = fbs::CreateMobClass(
-      Builder, Id, Defaults.Width, Defaults.Height, Malus, Defaults.MaxUpStep,
-      Defaults.CanPassDoors, Defaults.CanOpenDoors, Defaults.CanFloat,
-      Defaults.CanWalkOverFences);
-  Builder.Finish(fbs::CreateControlFrame(Builder, fbs::ControlMsg::MobClass,
-                                         Body.Union()));
-  return finish(Builder);
-}
-
-/// A request across the flat test world's floor.
-Bytes requestFrame(std::vector<std::uint64_t> Ids,
-                   std::uint16_t Class = ClassId) {
-  flatbuffers::FlatBufferBuilder Builder;
-  std::vector<flatbuffers::Offset<fbs::PathRequest>> Requests;
-  for (const std::uint64_t Id : Ids) {
-    const fbs::Vec3s Start(2, 4, 2);
-    const fbs::Vec3s Target(20, 4, 20);
-    Requests.push_back(fbs::CreatePathRequest(Builder, Id, Class, &Start,
-                                              &Target, 0, 40.0F, 400, 3));
-  }
-  const auto Body =
-      fbs::CreatePathRequestBatch(Builder, Builder.CreateVector(Requests));
-  Builder.Finish(fbs::CreateRequestFrame(
-      Builder, fbs::RequestMsg::PathRequestBatch, Body.Union()));
-  return finish(Builder);
-}
-
-Bytes requestFrame(const fbs::PathRequest &Wire, std::uint64_t Id) {
-  flatbuffers::FlatBufferBuilder Builder;
-  const auto Request = fbs::CreatePathRequest(
-      Builder, Id, Wire.class_id(), Wire.start(), Wire.target(),
-      Wire.reach_range(), Wire.max_path_length(), Wire.max_visited_nodes(),
-      Wire.max_fall_distance());
-  const auto Body =
-      fbs::CreatePathRequestBatch(Builder, Builder.CreateVector(&Request, 1));
-  Builder.Finish(fbs::CreateRequestFrame(
-      Builder, fbs::RequestMsg::PathRequestBatch, Body.Union()));
-  return finish(Builder);
-}
-
-Bytes cancelFrame(std::vector<std::uint64_t> Ids) {
-  flatbuffers::FlatBufferBuilder Builder;
-  const auto Body = fbs::CreatePathCancel(Builder, Builder.CreateVector(Ids));
-  Builder.Finish(fbs::CreateRequestFrame(Builder, fbs::RequestMsg::PathCancel,
-                                         Body.Union()));
-  return finish(Builder);
-}
-
-template <typename T> const T *root(const Bytes &Frame) {
-  flatbuffers::Verifier Verifier(Frame.data(), Frame.size());
-  if (!Verifier.VerifyBuffer<T>(nullptr))
-    return nullptr;
-  return flatbuffers::GetRoot<T>(Frame.data());
-}
 
 /// Runs the operations started on `Io` for at most `Timeout`, then cancels
 /// whatever is left through `Cancel` and lets it finish.
@@ -120,8 +54,8 @@ void runFor(asio::io_context &Io, milliseconds Timeout, CancelFn Cancel) {
 /// A controller-side TCP connection to one of the node's ports.
 class Connection {
 public:
-  Connection(asio::io_context &Io, std::uint16_t Port) : Io(Io), Socket(Io) {
-    Socket.connect({asio::ip::make_address("127.0.0.1"), Port});
+  Connection(asio::io_context &Io, std::uint16_t Number) : Io(Io), Socket(Io) {
+    Socket.connect({asio::ip::make_address("127.0.0.1"), Number});
     Socket.set_option(tcp::no_delay(true));
   }
 
@@ -218,9 +152,9 @@ private:
 /// The controller's side of the request stream.
 class Datagrams {
 public:
-  Datagrams(asio::io_context &Io, std::uint16_t Port)
+  Datagrams(asio::io_context &Io, std::uint16_t Number)
       : Io(Io), Socket(Io, udp::endpoint(udp::v4(), 0)),
-        Node(asio::ip::make_address("127.0.0.1"), Port) {}
+        Node(asio::ip::make_address("127.0.0.1"), Number) {}
 
   void send(const Bytes &Frame) { Socket.send_to(asio::buffer(Frame), Node); }
 
@@ -287,15 +221,34 @@ protected:
     Running.join();
   }
 
-  Connection control() { return Connection(Io, Node->controlPort()); }
-  Connection world() { return Connection(Io, Node->worldPort()); }
+  /// A connection to `On` that has sent nothing yet.
+  Connection connect(Port On) {
+    return Connection(Io, On == Port::World ? Node->worldPort()
+                                            : Node->controlPort());
+  }
+
+  /// A connection to `On` that has sent the `Join` of link `Link` of `Run`.
+  Connection join(Port On, std::uint64_t Link, std::uint64_t Run) {
+    Connection Joining = connect(On);
+    Joining.send(joinFrame(On, Run, Link));
+    return Joining;
+  }
+
+  Connection control(std::uint64_t Link = 1, std::uint64_t Run = TestRun) {
+    return join(Port::Control, Link, Run);
+  }
+
+  Connection world(std::uint64_t Link = 1, std::uint64_t Run = TestRun) {
+    return join(Port::World, Link, Run);
+  }
+
   Datagrams requests() { return Datagrams(Io, Node->requestPort()); }
 
   /// Assigns the flat test world and sends its four chunks, sequences 1 to 4.
   static void loadFlat(Connection &World) {
     test::DenseWorld Flat(32, 0, 24);
     Flat.fill(0, 0, 0, 31, 3, 31, test::Stone);
-    World.send(Flat.assignment(false, 9, 2));
+    World.send(Flat.assignment(false, TestRun, TestRegion));
     std::uint64_t Sequence = 1;
     for (int X = 0; X < 2; ++X)
       for (int Z = 0; Z < 2; ++Z)
@@ -359,6 +312,14 @@ TEST_F(ServerTest, AFreshNodeSaysItHoldsNothing) {
   EXPECT_EQ(Greeting->pathfinder(), fbs::Pathfinder::VANILLA);
 }
 
+TEST_F(ServerTest, HelloArrivesOnlyAfterTheControlJoin) {
+  start();
+  Connection Control = connect(Port::Control);
+  EXPECT_FALSE(Control.read(Quiet));
+  Control.send(joinFrame(Port::Control, TestRun, 1));
+  EXPECT_TRUE(Control.readHello());
+}
+
 TEST_F(ServerTest, AnswersAVanillaSearchAsVanillaDid) {
   // The first exact case of a recorded fixture, over the real sockets.
   const std::filesystem::path Path =
@@ -375,14 +336,26 @@ TEST_F(ServerTest, AnswersAVanillaSearchAsVanillaDid) {
     }
   ASSERT_NE(Case, nullptr);
 
+  // The fixture's world stream holds framed frames, as the wire carries them.
+  // Its first is the assignment, whose run the link and requests must name.
+  const auto *Stream = Fixture->world();
+  const auto First = net::peekHeader(std::span(Stream->data(), Stream->size()));
+  ASSERT_EQ(First.Status, net::HeaderStatus::Ready);
+  const Bytes AssignmentFrame(Stream->data() + net::HeaderSize,
+                              Stream->data() + net::HeaderSize + First.Length);
+  const auto *Assignment =
+      root<fbs::WorldFrame>(AssignmentFrame)->body_as_RegionAssignment();
+  ASSERT_NE(Assignment, nullptr);
+  const std::uint64_t Run = Assignment->run();
+  const std::uint32_t Region = Assignment->region_id();
+  ASSERT_NE(Run, 0u);
+
   start();
-  Connection Control = control();
-  Connection World = world();
+  Connection Control = control(1, Run);
+  Connection World = world(1, Run);
   ASSERT_TRUE(Control.readHello());
   Control.send(Bytes(Case->mob_class()->begin(), Case->mob_class()->end()));
 
-  // The fixture's world stream holds framed frames, as the wire carries them.
-  const auto *Stream = Fixture->world();
   std::size_t Offset = 0;
   for (std::uint32_t Sent = 0; Sent < Case->world_frames(); ++Sent) {
     const auto Header = net::peekHeader(
@@ -407,12 +380,13 @@ TEST_F(ServerTest, AnswersAVanillaSearchAsVanillaDid) {
   // Asked again under a new id until the node has applied every frame.
   std::optional<Bytes> Reply;
   for (std::uint64_t Id = 1; Id < 100 && !Reply; ++Id) {
-    Reply = ask(Requests, requestFrame(*Wire, Id), Id);
+    Reply = ask(Requests, requestFrame(*Wire, Id, Run, Region), Id);
     ASSERT_TRUE(Reply);
     if (Requests.answer(*Reply)->world_sequence() != Vanilla->world_sequence())
       Reply.reset();
   }
   ASSERT_TRUE(Reply);
+  EXPECT_EQ(root<fbs::ResponseFrame>(*Reply)->run(), Run);
   const fbs::PathResponse *Answer = Requests.answer(*Reply);
   ASSERT_NE(Answer, nullptr);
   EXPECT_EQ(Answer->reached(), Vanilla->reached());
@@ -433,13 +407,14 @@ TEST_F(ServerTest, ACopyOfARequestGetsTheSameBytes) {
   Connection Control = control();
   Connection World = world();
   ASSERT_TRUE(Control.readHello());
-  Control.send(mobClassFrame(ClassId));
+  Control.send(mobClassFrame());
   loadFlat(World);
   Datagrams Requests = requests();
   std::uint64_t Id = 0;
   const std::optional<Bytes> First = askAt(Requests, 4, Id);
   ASSERT_TRUE(First);
   ASSERT_TRUE(Requests.answer(*First)->reached());
+  EXPECT_EQ(root<fbs::ResponseFrame>(*First)->run(), TestRun);
 
   Requests.send(requestFrame({Id}));
   EXPECT_EQ(Requests.answerTo(Id), First);
@@ -450,9 +425,10 @@ TEST_F(ServerTest, ARequestNamingAnUnknownProfileIsAnsweredAtOnce) {
   Connection Control = control();
   ASSERT_TRUE(Control.readHello());
   Datagrams Requests = requests();
-  Requests.send(requestFrame({11}, /*Class=*/40));
+  Requests.send(requestFrame({11}, /*ClassId=*/40));
   const std::optional<Bytes> Reply = Requests.receive();
   ASSERT_TRUE(Reply);
+  EXPECT_EQ(root<fbs::ResponseFrame>(*Reply)->run(), TestRun);
   const auto *Refusal =
       root<fbs::ResponseFrame>(*Reply)->body_as_UnknownProfile();
   ASSERT_NE(Refusal, nullptr);
@@ -473,7 +449,7 @@ TEST_F(ServerTest, ARefusedWorldFrameDropsTheWorldAndTheLink) {
     EXPECT_TRUE(Control.closedByNode());
   }
 
-  Connection Control = control();
+  Connection Control = control(2);
   const std::optional<Bytes> Frame = Control.readHello();
   ASSERT_TRUE(Frame);
   EXPECT_EQ(hello(*Frame)->last_sequence(), 0u);
@@ -485,7 +461,7 @@ TEST_F(ServerTest, AReconnectingControllerIsToldWhatIsStillHeld) {
     Connection Control = control();
     Connection World = world();
     ASSERT_TRUE(Control.readHello());
-    Control.send(mobClassFrame(ClassId));
+    Control.send(mobClassFrame());
     loadFlat(World);
     Datagrams Requests = requests();
     std::uint64_t Id = 0;
@@ -493,19 +469,19 @@ TEST_F(ServerTest, AReconnectingControllerIsToldWhatIsStillHeld) {
   }
 
   // The world state outlives the link.
-  Connection Control = control();
+  Connection Control = control(2);
   const std::optional<Bytes> Frame = Control.readHello();
   ASSERT_TRUE(Frame);
-  EXPECT_EQ(hello(*Frame)->run(), 9u);
-  EXPECT_EQ(hello(*Frame)->region_id(), 2u);
+  EXPECT_EQ(hello(*Frame)->run(), TestRun);
+  EXPECT_EQ(hello(*Frame)->region_id(), TestRegion);
   EXPECT_EQ(hello(*Frame)->last_sequence(), 4u);
 
   // The controller resumes, and the stream continues where it stopped.
-  Connection World = world();
+  Connection World = world(2);
   test::DenseWorld Flat(32, 0, 24);
-  World.send(Flat.assignment(true, 9, 2, 4));
+  World.send(Flat.assignment(true, TestRun, TestRegion, 4));
   World.send(test::clearedChunk(5, 0, 0));
-  Control.send(mobClassFrame(ClassId));
+  Control.send(mobClassFrame());
   Datagrams Requests = requests();
   std::uint64_t Id = 100;
   EXPECT_TRUE(askAt(Requests, 5, Id));
@@ -516,13 +492,13 @@ TEST_F(ServerTest, ProfilesAreForgottenWithTheLink) {
   {
     Connection Control = control();
     ASSERT_TRUE(Control.readHello());
-    Control.send(mobClassFrame(ClassId));
+    Control.send(mobClassFrame());
     Datagrams Requests = requests();
     // Answered once the profile is in, with no world held.
     ASSERT_TRUE(ask(Requests, requestFrame({1}), 1));
   }
 
-  Connection Control = control();
+  Connection Control = control(2);
   ASSERT_TRUE(Control.readHello());
   Datagrams Requests = requests();
   Requests.send(requestFrame({2}));
@@ -537,7 +513,7 @@ TEST_F(ServerTest, TheHeartbeatCountsWaitingRequestsAndACancelDropsOne) {
   start(testOptions(/*Workers=*/0));
   Connection Control = control();
   ASSERT_TRUE(Control.readHello());
-  Control.send(mobClassFrame(ClassId));
+  Control.send(mobClassFrame());
   Datagrams Requests = requests();
 
   // Profiles travel on TCP and requests on UDP, so ask until the node stops
@@ -560,30 +536,184 @@ TEST_F(ServerTest, TheHeartbeatCountsWaitingRequestsAndACancelDropsOne) {
   EXPECT_FALSE(Requests.receive(Quiet));
 }
 
-TEST_F(ServerTest, ANewControlConnectionReplacesTheLink) {
+TEST_F(ServerTest, ALaterLinkReplacesTheLink) {
   start();
-  Connection First = control();
-  ASSERT_TRUE(First.readHello());
+  Connection Control = control(1);
+  Connection World = world(1);
+  ASSERT_TRUE(Control.readHello());
 
-  Connection Second = control();
-  ASSERT_TRUE(Second.readHello());
-  EXPECT_TRUE(First.closedByNode());
+  Connection Next = control(2);
+  ASSERT_TRUE(Next.readHello());
+  EXPECT_TRUE(Control.closedByNode());
+  EXPECT_TRUE(World.closedByNode());
   // The new link works.
-  Second.send(mobClassFrame(ClassId));
+  Next.send(mobClassFrame());
   Datagrams Requests = requests();
   EXPECT_TRUE(ask(Requests, requestFrame({1}), 1));
 }
 
-TEST_F(ServerTest, ANewWorldConnectionReplacesTheLink) {
+TEST_F(ServerTest, ANewRunReplacesTheLink) {
+  start();
+  Connection Control = control(5);
+  ASSERT_TRUE(Control.readHello());
+
+  // A new run starts counting its links again.
+  Connection Next = control(1, TestRun + 1);
+  ASSERT_TRUE(Next.readHello());
+  EXPECT_TRUE(Control.closedByNode());
+  Next.send(mobClassFrame());
+  Datagrams Requests = requests();
+  EXPECT_TRUE(
+      ask(Requests, requestFrame({1}, TestClass, TestRun + 1), 1).has_value());
+  // The old run's requests are dropped.
+  Requests.send(requestFrame({2}));
+  EXPECT_FALSE(Requests.receive(Quiet));
+}
+
+TEST_F(ServerTest, AStaleLinkIsRefusedAndTheLiveLinkUntouched) {
+  start();
+  Connection Control = control(2);
+  ASSERT_TRUE(Control.readHello());
+
+  Connection Stale = control(1);
+  EXPECT_TRUE(Stale.closedByNode());
+  Connection StaleWorld = world(1);
+  EXPECT_TRUE(StaleWorld.closedByNode());
+
+  EXPECT_FALSE(Control.closedByNode(Quiet));
+  Control.send(mobClassFrame());
+  Datagrams Requests = requests();
+  EXPECT_TRUE(ask(Requests, requestFrame({1}), 1));
+}
+
+TEST_F(ServerTest, TheLinksOtherConnectionJoinsIt) {
+  start();
+  // The world connection joins first, so the link is live before `Hello`.
+  Connection World = world(3);
+  loadFlat(World);
+  Connection Control = control(3);
+  const std::optional<Bytes> Frame = Control.readHello();
+  ASSERT_TRUE(Frame);
+  Control.send(mobClassFrame());
+  Datagrams Requests = requests();
+  std::uint64_t Id = 0;
+  EXPECT_TRUE(askAt(Requests, 4, Id));
+  EXPECT_FALSE(World.closedByNode(Quiet));
+}
+
+TEST_F(ServerTest, ASecondConnectionForAJoinedPortIsRefused) {
   start();
   Connection Control = control();
   ASSERT_TRUE(Control.readHello());
-  // One port accepts in order, so the second replaces the first.
-  Connection First = world();
-  Connection Second = world();
-  EXPECT_TRUE(First.closedByNode());
-  EXPECT_TRUE(Control.closedByNode());
-  EXPECT_FALSE(Second.closedByNode(Quiet));
+  Connection World = world();
+  Control.send(mobClassFrame());
+  loadFlat(World);
+  Datagrams Requests = requests();
+  std::uint64_t Id = 0;
+  ASSERT_TRUE(askAt(Requests, 4, Id));
+
+  Connection ControlTwin = control();
+  EXPECT_TRUE(ControlTwin.closedByNode());
+  Connection WorldTwin = world();
+  EXPECT_TRUE(WorldTwin.closedByNode());
+
+  // Both joined connections still carry the link.
+  World.send(test::clearedChunk(5, 0, 0));
+  EXPECT_TRUE(askAt(Requests, 5, Id));
+  EXPECT_FALSE(Control.closedByNode(Quiet));
+}
+
+TEST_F(ServerTest, AFirstFrameThatIsNotAJoinIsRefused) {
+  start();
+  Connection Control = control();
+  ASSERT_TRUE(Control.readHello());
+
+  Connection World = connect(Port::World);
+  test::DenseWorld Flat(32, 0, 24);
+  World.send(Flat.assignment(false, TestRun, TestRegion));
+  EXPECT_TRUE(World.closedByNode());
+  Connection Rogue = connect(Port::Control);
+  Rogue.send(mobClassFrame());
+  EXPECT_TRUE(Rogue.closedByNode());
+  // A `Join` on the wrong port is not a frame of that port.
+  Connection Crossed = connect(Port::World);
+  Crossed.send(joinFrame(Port::Control, TestRun, 1));
+  EXPECT_TRUE(Crossed.closedByNode());
+
+  EXPECT_FALSE(Control.closedByNode(Quiet));
+  EXPECT_TRUE(Control.awaitDepth(0));
+}
+
+TEST_F(ServerTest, ASilentConnectionIsClosedAfterTheJoinTimeout) {
+  net::ServerOptions Opts = testOptions();
+  Opts.JoinTimeout = milliseconds(250);
+  start(Opts);
+  Connection Control = control();
+  ASSERT_TRUE(Control.readHello());
+
+  Connection Silent = connect(Port::World);
+  EXPECT_TRUE(Silent.closedByNode());
+  EXPECT_FALSE(Control.closedByNode(Quiet));
+  EXPECT_TRUE(Control.awaitDepth(0));
+}
+
+TEST_F(ServerTest, ADatagramOfAnotherRunIsDropped) {
+  start();
+  Connection Control = control();
+  ASSERT_TRUE(Control.readHello());
+  Datagrams Requests = requests();
+  // No profile is held, so a request the node took would be refused at once.
+  Requests.send(requestFrame({1}, TestClass, TestRun + 1));
+  EXPECT_FALSE(Requests.receive(Quiet));
+
+  Requests.send(requestFrame({2}));
+  const std::optional<Bytes> Reply = Requests.receive();
+  ASSERT_TRUE(Reply);
+  const auto *Refusal =
+      root<fbs::ResponseFrame>(*Reply)->body_as_UnknownProfile();
+  ASSERT_NE(Refusal, nullptr);
+  EXPECT_EQ(Refusal->request_id(), 2u);
+}
+
+TEST_F(ServerTest, ARequestForAnotherRegionIsAnsweredAtSequenceZero) {
+  start();
+  Connection Control = control();
+  Connection World = world();
+  ASSERT_TRUE(Control.readHello());
+  Control.send(mobClassFrame());
+  loadFlat(World);
+  Datagrams Requests = requests();
+  std::uint64_t Id = 0;
+  ASSERT_TRUE(askAt(Requests, 4, Id));
+
+  const std::optional<Bytes> Reply = ask(
+      Requests, requestFrame({500}, TestClass, TestRun, TestRegion + 1), 500);
+  ASSERT_TRUE(Reply);
+  const fbs::PathResponse *Answer = Requests.answer(*Reply);
+  EXPECT_EQ(Answer->world_sequence(), 0u);
+  EXPECT_FALSE(Answer->reached());
+  EXPECT_EQ(Answer->nodes()->size(), 0u);
+}
+
+TEST_F(ServerTest, AJoinAfterTheFirstFrameIsIgnored) {
+  start();
+  Connection Control = control();
+  Connection World = world();
+  ASSERT_TRUE(Control.readHello());
+  Control.send(mobClassFrame());
+  loadFlat(World);
+  Datagrams Requests = requests();
+  std::uint64_t Id = 0;
+  ASSERT_TRUE(askAt(Requests, 4, Id));
+
+  World.send(joinFrame(Port::World, TestRun, 1));
+  Control.send(joinFrame(Port::Control, TestRun, 1));
+  // The world stream goes on from where it was, on the same link.
+  World.send(test::clearedChunk(5, 0, 0));
+  EXPECT_TRUE(askAt(Requests, 5, Id));
+  EXPECT_FALSE(
+      Control.readReply<fbs::Hello>(fbs::ControlReplyMsg::Hello, Quiet));
+  EXPECT_FALSE(World.closedByNode(Quiet));
 }
 
 TEST_F(ServerTest, AFrameDeclaredPastTheLimitDropsTheLink) {
@@ -613,7 +743,7 @@ TEST_F(ServerTest, AMalformedDatagramIsIgnored) {
   start();
   Connection Control = control();
   ASSERT_TRUE(Control.readHello());
-  Control.send(mobClassFrame(ClassId));
+  Control.send(mobClassFrame());
   Datagrams Requests = requests();
   Requests.send(Bytes{9, 0, 0, 0, 1});
   Requests.send(Bytes{});
@@ -626,7 +756,7 @@ TEST_F(ServerTest, StopsWithRequestsStillWaiting) {
   Connection Control = control();
   Connection World = world();
   ASSERT_TRUE(Control.readHello());
-  Control.send(mobClassFrame(ClassId));
+  Control.send(mobClassFrame());
   loadFlat(World);
   Datagrams Requests = requests();
   std::vector<std::uint64_t> Ids;
@@ -634,4 +764,10 @@ TEST_F(ServerTest, StopsWithRequestsStillWaiting) {
     Ids.push_back(Id);
   Requests.send(requestFrame(Ids));
   // `TearDown` stops the node, which must not wait for the queue to drain.
+}
+
+TEST_F(ServerTest, StopsWithAConnectionStillSilent) {
+  start();
+  Connection Silent = connect(Port::World);
+  // `TearDown` stops the node, which must not wait for the join timeout.
 }

@@ -1,0 +1,84 @@
+namespace maestro.fbs;
+
+// Test data, never sent: scripts that drive one node through the life of its
+// links, with what the node must do at each step. The C++ node and the
+// controller's modeled node both replay every case, so the model cannot drift
+// from the node unnoticed. Frames are the controller's encoding, as the wire
+// carries them. Answers are compared by request id, run and world sequence
+// only, since the model does not run A*.
+//
+// A replay starts with a node that holds nothing, has no workers, keeps
+// answers and cancels for 500 ms, and runs the vanilla search. Time starts at
+// 0 and moves only with `Advance`.
+
+enum LinkPort : ubyte { World, Control }
+
+enum StepKind : ubyte {
+  // A new connection on `port`, whose first frame is `frame`. It becomes the
+  // port's current connection.
+  Connect,
+  // `frame` on the current connection of `port`.
+  Stream,
+  // The controller closes the current connection of `port`.
+  Disconnect,
+  // `frame` as one datagram, from one fixed address.
+  Datagram,
+  // `millis` pass.
+  Advance,
+  // The node runs `count` waiting requests to completion, oldest first, or
+  // every waiting request if `count` is 0. A canceled request is skipped and
+  // not counted.
+  Serve,
+  // The node's heartbeat timer fires.
+  Heartbeat
+}
+
+enum EffectKind : ubyte {
+  // A `Hello` on the control connection: `run`, `region_id`, and
+  // `last_sequence` as `sequence`.
+  Hello,
+  // A `Heartbeat` on the control connection, with `depth`.
+  Heartbeat,
+  // A `PathResponse` datagram: `request_id`, the frame's `run`, and
+  // `world_sequence` as `sequence`.
+  Answer,
+  // An `UnknownProfile` datagram: `request_id` and the frame's `run`.
+  UnknownProfile,
+  // The node dropped its link and closed every connection of it. Once per
+  // drop, however many connections it closed.
+  LinkDropped,
+  // The node closed the connection the step opened, which never joined the
+  // link.
+  Refused
+}
+
+table Effect {
+  kind:EffectKind;
+  run:ulong;
+  region_id:uint;
+  sequence:ulong;
+  depth:uint;
+  request_id:ulong;
+}
+
+// `effects` is everything the node does in reply to the step, in order.
+table Step {
+  kind:StepKind;
+  port:LinkPort;
+  frame:[ubyte];
+  millis:uint;
+  count:uint;
+  effects:[Effect];
+}
+
+table ConformanceCase {
+  name:string;
+  steps:[Step];
+}
+
+table ConformanceFixture {
+  cases:[ConformanceCase];
+}
+
+root_type ConformanceFixture;
+file_identifier "MCNF";

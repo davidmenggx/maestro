@@ -14,20 +14,18 @@ import org.junit.jupiter.api.Test;
 class HarnessConstantsTest {
 
   @Test
-  void aSampledLatencyNeverMakesACorrectControllerLate() {
-    // Any wider and a response is late regardless of the controller, so the latency
-    // invariant would measure the sampler instead of the code under test.
+  void anEdgeLatencyLeavesNoSlackForOneRequest() {
+    // At the edge, one request served at the highest cost is answered on the tick's
+    // last step the controller still reads, and one step more is a tick late.
+    for (int cost : new int[] {1, 125, 500, 997}) {
+      int edge = FaultPlan.edgeLatency(cost);
+      assertTrue(2 * edge + cost <= Simulation.STEPS_PER_TICK - 1, "cost " + cost);
+      assertTrue(2 * (edge + 1) + cost > Simulation.STEPS_PER_TICK - 1, "cost " + cost);
+    }
+    assertEquals(0, FaultPlan.edgeLatency(Simulation.STEPS_PER_TICK));
     assertTrue(
-        FaultPlan.MAX_MIN_LATENCY_STEPS + FaultPlan.MAX_LATENCY_SPAN_STEPS
-            <= FaultPlan.MAX_ONE_WAY_LATENCY_STEPS,
-        "sampled latency can pass the one-way limit");
-    // A batch that leaves at a tick boundary arrives before the fleet serves that tick.
-    assertTrue(
-        FaultPlan.MAX_ONE_WAY_LATENCY_STEPS <= Simulation.SERVICE_STEP,
-        "a batch at the latency limit misses the service it was meant for");
-    assertTrue(
-        FaultPlan.EDGE_SPAN_STEPS < FaultPlan.MAX_ONE_WAY_LATENCY_STEPS,
-        "an edge plan can draw a latency below one step");
+        FaultPlan.EDGE_SPAN_STEPS < FaultPlan.edgeLatency(Scenario.DEFAULT.maxCostSteps(1)),
+        "the default fleet has no edge plan");
   }
 
   @Test
@@ -50,7 +48,7 @@ class HarnessConstantsTest {
     // Answers later than the admission bound are abandoned, so an SLO at or past it
     // could never fail.
     assertTrue(
-        SimRun.TICK_BUDGET < ProbeController.MAX_TICKS_LATE,
+        SimRun.TICK_BUDGET < Controller.MAX_TICKS_LATE,
         "the SLO budget is no tighter than what admission control already guarantees");
   }
 

@@ -1,14 +1,12 @@
 package io.github.davidmenggx.maestro.controller.world;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import maestro.fbs.PathType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -24,15 +22,6 @@ class BoundaryContractTest {
 
   @Test
   void onlyPerBlockPathTypesAreCarriedByACell() {
-    // The fuzzer picks a cell type by index, so the enumeration and the predicate
-    // describe the same set and must name the same ordinals.
-    Set<Byte> enumerated = new LinkedHashSet<>();
-    for (int i = 0; i < PathTypes.perBlockCount(); i++) {
-      byte ordinal = PathTypes.perBlock(i);
-      assertTrue(PathTypes.isPerBlock(ordinal), PathTypes.name(ordinal));
-      assertTrue(enumerated.add(ordinal), "listed twice: " + PathTypes.name(ordinal));
-    }
-
     int matching = 0;
     for (int ordinal = 0; ordinal < PathTypes.count(); ordinal++) {
       if (PathTypes.isPerBlock((byte) ordinal)) {
@@ -40,7 +29,6 @@ class BoundaryContractTest {
       }
     }
     assertEquals(PER_BLOCK_TYPES, matching);
-    assertEquals(PER_BLOCK_TYPES, enumerated.size());
   }
 
   @Test
@@ -102,11 +90,59 @@ class BoundaryContractTest {
         () -> new WorldEvent.Search(0, 16f, WorldEvent.Search.MAX_VISITED_NODES + 1, 3));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 0f, 256, 3));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, Float.NaN, 256, 3));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new WorldEvent.Search(0, Float.POSITIVE_INFINITY, 256, 3));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 16f, 0, 3));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(0, 16f, 256, -1));
     assertThrows(
         IllegalArgumentException.class,
         () -> new WorldEvent.Search(0, 16f, 256, WorldEvent.Search.MAX_FALL_DISTANCE + 1));
+  }
+
+  @Test
+  void aSearchFitsExactlyWhenItCanBeMadeAndItsReachIsKnown() {
+    int[] reaches = {
+      -1, 0, WorldEvent.Search.MAX_REACH_RANGE, WorldEvent.Search.MAX_REACH_RANGE + 1
+    };
+    float[] lengths = {
+      Float.NaN,
+      Float.NEGATIVE_INFINITY,
+      -1f,
+      0f,
+      Float.MIN_VALUE,
+      16f,
+      WorldEvent.Search.MAX_PATH_LENGTH,
+      Math.nextUp(WorldEvent.Search.MAX_PATH_LENGTH),
+      Float.MAX_VALUE,
+      Float.POSITIVE_INFINITY
+    };
+    int[] budgets = {
+      0, 1, WorldEvent.Search.MAX_VISITED_NODES, WorldEvent.Search.MAX_VISITED_NODES + 1
+    };
+    int[] falls = {
+      -1, 0, WorldEvent.Search.MAX_FALL_DISTANCE, WorldEvent.Search.MAX_FALL_DISTANCE + 1
+    };
+    int fitting = 0;
+    for (int reach : reaches) {
+      for (float length : lengths) {
+        for (int budget : budgets) {
+          for (int fall : falls) {
+            boolean fits = WorldEvent.Search.fits(reach, length, budget, fall);
+            Executable make = () -> new WorldEvent.Search(reach, length, budget, fall);
+            if (fits) {
+              fitting++;
+              assertDoesNotThrow(make);
+              // Admission derives how far the search reads from the length bound.
+              assertDoesNotThrow(() -> SearchReach.blocks(length, 0.6f));
+            } else {
+              assertThrows(IllegalArgumentException.class, make);
+            }
+          }
+        }
+      }
+    }
+    assertEquals(2 * 3 * 2 * 2, fitting);
   }
 
   @Test

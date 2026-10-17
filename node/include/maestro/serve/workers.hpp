@@ -4,28 +4,20 @@
 #include <thread>
 #include <vector>
 
-#include <asio/ip/udp.hpp>
-
-#include "maestro/serve/request_queue.hpp"
-#include "maestro/world/world_store.hpp"
-#include "pathfinding_generated.h"
+#include "maestro/serve/node_core.hpp"
 
 namespace maestro::serve {
 
-/// Threads that take jobs from a `RequestQueue`, each running its own search
-/// on the version of the area current when the job starts, and hand each
-/// answer to `Send`. A node that holds no area answers with no path at
-/// sequence 0, which the controller reads as a search that ran too early.
+/// Threads that take jobs from a node's queue, each running them through
+/// `NodeCore::run` with its own scratch, and hand each answer to `Send`.
 class Workers {
 public:
-  /// Called from a worker thread.
-  using Send =
-      std::function<void(const asio::ip::udp::endpoint &ReplyTo, Answer)>;
+  /// Called from a worker thread with a job and its answer, which the caller
+  /// passes on to `NodeCore::deliver` on the node's event thread.
+  using Send = std::function<void(const Job &Finished, Answer)>;
 
-  /// Starts `Count` threads running the search `Kind`, which this build must
-  /// have.
-  Workers(RequestQueue &Queue, const world::WorldStore &Store,
-          fbs::Pathfinder Kind, unsigned Count, Send Reply);
+  /// Starts `Count` threads.
+  Workers(NodeCore &Core, unsigned Count, Send Reply);
 
   Workers(const Workers &) = delete;
   Workers &operator=(const Workers &) = delete;
@@ -37,10 +29,9 @@ public:
   void stop();
 
 private:
-  void run(fbs::Pathfinder Kind);
+  void run();
 
-  RequestQueue &Queue;
-  const world::WorldStore &Store;
+  NodeCore &Core;
   Send Reply;
   std::vector<std::thread> Threads;
 };

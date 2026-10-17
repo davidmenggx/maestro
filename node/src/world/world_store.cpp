@@ -73,6 +73,14 @@ ChunkPtr decodeChunk(const fbs::ChunkSnapshot &Snapshot, int Height,
   return Content;
 }
 
+/// Whether `Sequence` may follow `Held`.
+ApplyStatus admit(const Area &Held, std::uint64_t Sequence) {
+  if (Sequence == 0)
+    return ApplyStatus::Malformed;
+  return Sequence == Held.sequence() + 1 ? ApplyStatus::Applied
+                                         : ApplyStatus::OutOfSequence;
+}
+
 } // namespace
 
 ApplyStatus WorldStore::apply(std::span<const std::uint8_t> Frame) {
@@ -151,7 +159,7 @@ ApplyStatus WorldStore::applyChunk(const fbs::ChunkSnapshot &Snapshot) {
   if (Malformed)
     return ApplyStatus::Malformed;
 
-  if (const ApplyStatus Status = admit(Snapshot.sequence());
+  if (const ApplyStatus Status = admit(*Held, Snapshot.sequence());
       Status != ApplyStatus::Applied)
     return Status;
   Current.store(Held->withChunk(Position->x(), Position->z(),
@@ -177,18 +185,11 @@ ApplyStatus WorldStore::applyDelta(const fbs::WorldDelta &Delta) {
     }
   }
 
-  if (const ApplyStatus Status = admit(Delta.sequence());
+  if (const ApplyStatus Status = admit(*Held, Delta.sequence());
       Status != ApplyStatus::Applied)
     return Status;
   Current.store(Held->withCells(Edits, Delta.sequence()));
   return ApplyStatus::Applied;
-}
-
-ApplyStatus WorldStore::admit(std::uint64_t Sequence) const {
-  if (Sequence == 0)
-    return ApplyStatus::Malformed;
-  return Sequence == pin()->sequence() + 1 ? ApplyStatus::Applied
-                                           : ApplyStatus::OutOfSequence;
 }
 
 } // namespace maestro::world

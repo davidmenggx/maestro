@@ -14,7 +14,6 @@ import org.slf4j.LoggerFactory;
 public final class MaestroServer implements DedicatedServerModInitializer {
 
   public static final String MOD_ID = "maestro";
-  public static final String VERSION = "0.1.0";
 
   /** Serialization is the only offloaded work, so one worker is enough. */
   private static final int OFFLOAD_THREADS = 1;
@@ -23,10 +22,12 @@ public final class MaestroServer implements DedicatedServerModInitializer {
 
   @Override
   public void onInitializeServer() {
+    FabricLoader loader = FabricLoader.getInstance();
+    String version =
+        loader.getModContainer(MOD_ID).orElseThrow().getMetadata().getVersion().getFriendlyString();
     MaestroConfig config =
-        MaestroConfig.load(
-            FabricLoader.getInstance().getConfigDir().resolve(MaestroConfig.FILE_NAME));
-    Telemetry.init(config, VERSION);
+        MaestroConfig.load(loader.getConfigDir().resolve(MaestroConfig.FILE_NAME));
+    Telemetry.init(config, version);
 
     ServerClock clock = new ServerClock();
     PoolOffload offload = new PoolOffload(OFFLOAD_THREADS);
@@ -46,7 +47,7 @@ public final class MaestroServer implements DedicatedServerModInitializer {
 
     LOG.info(
         "Maestro {} initializing: mode={} subMode={} otlp={}",
-        VERSION,
+        version,
         config.mode(),
         config.subMode(),
         config.otlpEndpoint());

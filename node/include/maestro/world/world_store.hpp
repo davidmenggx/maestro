@@ -52,9 +52,6 @@ private:
   ApplyStatus applyChunk(const fbs::ChunkSnapshot &Snapshot);
   ApplyStatus applyDelta(const fbs::WorldDelta &Delta);
 
-  /// Whether `Sequence` may follow what is held.
-  ApplyStatus admit(std::uint64_t Sequence) const;
-
   std::atomic<std::shared_ptr<const Area>> Current;
 };
 

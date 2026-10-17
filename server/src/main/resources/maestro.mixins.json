@@ -5,7 +5,6 @@
   "compatibilityLevel": "JAVA_25",
   "server": [
     "EnderEyeItemMixin",
-    "EntityMixin",
     "MinecraftServerMixin",
     "PathFinderMixin",
     "PortalShapeMixin"

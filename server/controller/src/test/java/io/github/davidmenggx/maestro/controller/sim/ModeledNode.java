@@ -2,9 +2,11 @@ package io.github.davidmenggx.maestro.controller.sim;
 
 import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
+import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
+import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import java.nio.ByteBuffer;
@@ -13,10 +15,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Deque;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import maestro.fbs.CellDelta;
 import maestro.fbs.CellRun;
 import maestro.fbs.ChunkSnapshot;
@@ -26,7 +26,7 @@ import maestro.fbs.ControlReplyFrame;
 import maestro.fbs.ControlReplyMsg;
 import maestro.fbs.Heartbeat;
 import maestro.fbs.Hello;
-import maestro.fbs.MobClass;
+import maestro.fbs.Join;
 import maestro.fbs.PathCancel;
 import maestro.fbs.PathNode;
 import maestro.fbs.PathRequest;
@@ -48,45 +48,116 @@ import maestro.fbs.WorldMsg;
 
 /**
  * Model of a C++ compute node. It decodes real frames with the generated bindings, holds the region
- * state a stateful node would, and answers requests at a fixed rate. Paths are straight lines,
- * because the controller and the wire are under test, not A*.
+ * state a stateful node would, and makes the same decisions about links, requests, cancels and
+ * world frames as the real node, which the conformance fixtures check against it. Paths are
+ * straight lines, because the controller and the wire are under test, not A*.
+ *
+ * <p>Workers start a request as soon as one is free and take a seeded time to serve it, so answers
+ * can finish out of order and a burst waits behind the workers. With no workers, requests only wait
+ * until {@link #serve} runs them.
  *
  * <p>It refuses exactly the world frames the real node's {@code WorldStore} refuses, and reacts the
- * same way: nothing in the frame is applied, all held state is dropped, and the link is reset so
+ * same way: nothing in the frame is applied, all held state is dropped, and the link is dropped so
  * the node reconnects reporting nothing held. A correct controller never sends such a frame, so
  * each refusal is recorded in {@link #violations()} instead of thrown, and one run reports every
- * problem it hit. Like the real node, it forgets its profiles and requests with its link, and keeps
- * its world state.
+ * problem it hit.
  */
 public final class ModeledNode {
 
+  /** What the node does to the world outside it. */
+  interface Host {
+
+    /** Absolute time in simulation steps. */
+    long now();
+
+    /** A frame from the node: control replies on {@code CONTROL}, answers on {@code REQUEST}. */
+    void send(Channel channel, byte[] frame);
+
+    /** The node dropped its link and closed every connection of it. */
+    void linkDropped();
+
+    /** The node closed a connection on {@code port} that never joined the link. */
+    void refused(Channel port);
+
+    /** Runs {@code action} after {@code delaySteps}, at least one. */
+    void schedule(long delaySteps, String name, Runnable action);
+
+    /** The node applied world frame {@code sequence} of a region's stream. */
+    void applied(ModeledNode node, long run, long region, long sequence);
+
+    /** The node took a fresh assignment standing at {@code sequence}. */
+    void assigned(ModeledNode node, long run, long region, long sequence);
+  }
+
+  /** How the node serves requests. With no workers, only {@link #serve} runs them. */
+  record Service(int workers, int minCostSteps, int maxCostSteps) {
+
+    Service {
+      if (workers < 0 || minCostSteps < 1 || maxCostSteps < minCostSteps) {
+        throw new IllegalArgumentException(
+            "workers " + workers + ", cost " + minCostSteps + " to " + maxCostSteps);
+      }
+    }
+
+    static final Service MANUAL = new Service(0, 1, 1);
+  }
+
   private static final int MAX_PATH_NODES = 32;
 
-  /** The node's own interval. The controller neither sets nor requests it. */
-  private static final int HEARTBEAT_TICKS = 20;
+  /** The node's own heartbeat interval, 1 s. The controller neither sets nor requests it. */
+  static final int HEARTBEAT_STEPS = 20 * Simulation.STEPS_PER_TICK;
 
-  /** Positions are relative to the region, as received. */
-  private record Pending(long requestId, Pos start, Pos target) {}
+  /** How long an answer or a cancel is kept for later copies of its request: 500 ms. */
+  static final int RETENTION_STEPS = 10 * Simulation.STEPS_PER_TICK;
 
-  private final Simulation sim;
-  private final SimTransport transport;
+  private enum State {
+    WAITING,
+    RUNNING
+  }
+
+  /** An admitted request. Positions are relative to the area, as received. */
+  private record Job(
+      long requestId, long run, long regionId, Pos start, Pos target, long generation) {}
+
+  /** A request settled within {@link #RETENTION_STEPS}: its answer, or null if canceled. */
+  private record Settled(byte[] answer, long at) {}
+
+  private record SettledAt(long at, long requestId) {}
+
   private final NodeId id;
-  private final int capacityPerTick;
-  private final Deque<Pending> queue = new ArrayDeque<>();
-  private final Set<Long> queued = new LinkedHashSet<>();
-
-  /**
-   * Answers kept for retries. The real node keeps them for a while, but a link is short enough here
-   * not to.
-   */
-  private final Map<Long, byte[]> answered = new LinkedHashMap<>();
-
-  /** Requests canceled before they were answered. A later copy of one is dropped. */
-  private final Set<Long> canceled = new LinkedHashSet<>();
-
-  private final Set<Short> knownClasses = new LinkedHashSet<>();
+  private final Host host;
+  private final Service service;
+  private final Rng rng;
   private final List<String> violations = new ArrayList<>();
 
+  // The link: the token of the last `Join` taken, and which ports have joined.
+  private long linkRun;
+  private long linkAttempt;
+  private boolean live;
+  private boolean worldJoined;
+  private boolean controlJoined;
+
+  // What belongs to the link, forgotten with it.
+  private final Map<Short, MobClass.Shape> knownClasses = new LinkedHashMap<>();
+  private final Deque<Job> waiting = new ArrayDeque<>();
+  private final Map<Long, State> open = new LinkedHashMap<>();
+  private final Map<Long, Settled> settled = new LinkedHashMap<>();
+  private final Deque<SettledAt> settledOrder = new ArrayDeque<>();
+  private int waitingCount;
+  private int running;
+
+  /** Bumped when the link goes, so a job still running settles without effect. */
+  private long generation;
+
+  /** Bumped when the process dies, so its timers and jobs never fire. */
+  private long process;
+
+  private boolean paused;
+
+  /** Timers and completions that fell due while paused, run in order on resume. */
+  private final List<Runnable> deferred = new ArrayList<>();
+
+  // The world: one area, kept across links.
   private long run;
   private long regionId;
   private int size;
@@ -95,19 +166,18 @@ public final class ModeledNode {
   private byte[] cells = new byte[0];
   private byte[] floors = new byte[0];
   private long lastSequence;
+
   private long duplicateRequests;
   private long canceledRequests;
-  private int servicedTicks;
+  private long servedRequests;
   private boolean backlogged;
 
-  ModeledNode(Simulation sim, SimTransport transport, NodeId id, int capacityPerTick) {
-    if (capacityPerTick < 1) {
-      throw new IllegalArgumentException("a node serves at least one request a tick");
-    }
-    this.sim = sim;
-    this.transport = transport;
+  ModeledNode(NodeId id, Host host, Service service, Rng rng) {
     this.id = id;
-    this.capacityPerTick = capacityPerTick;
+    this.host = host;
+    this.service = service;
+    this.rng = rng;
+    startHeartbeat();
   }
 
   // Accessors for harness assertions. Everything below this point is behavior.
@@ -116,7 +186,11 @@ public final class ModeledNode {
     return id;
   }
 
-  /** Mob profiles this node has received. */
+  public Service service() {
+    return service;
+  }
+
+  /** Mob profiles this node holds on its current link. */
   public int knownClassCount() {
     return knownClasses.size();
   }
@@ -134,9 +208,18 @@ public final class ModeledNode {
     return canceledRequests;
   }
 
-  /** Whether a service ever ended with requests still queued, because more came than it serves. */
+  public long servedRequests() {
+    return servedRequests;
+  }
+
+  /** Whether a request ever waited for a worker. */
   public boolean backlogged() {
     return backlogged;
+  }
+
+  /** Waiting and running requests, as the heartbeat reports them. */
+  public int depth() {
+    return waitingCount + running;
   }
 
   public List<String> violations() {
@@ -172,44 +255,91 @@ public final class ModeledNode {
         .value();
   }
 
-  /** Process death, or a full reset after a refused frame: all held state is lost. */
+  /** Process death: everything is lost, and nothing the process scheduled runs. */
   void kill() {
+    process++;
+    deferred.clear();
+    paused = false;
     run = 0;
     regionId = 0;
     cells = new byte[0];
     floors = new byte[0];
     lastSequence = 0;
-    linkDown();
+    forgetLink();
+    linkRun = 0;
+    linkAttempt = 0;
+    running = 0;
+  }
+
+  /** A new process, holding nothing. */
+  void revive() {
+    startHeartbeat();
+  }
+
+  /** A frozen process runs nothing until it is resumed. Its frames are held by the network. */
+  void pause(boolean active) {
+    paused = active;
+    if (active) {
+      return;
+    }
+    List<Runnable> due = new ArrayList<>(deferred);
+    deferred.clear();
+    for (Runnable action : due) {
+      action.run();
+    }
+    startWorkers();
   }
 
   /**
-   * The link is gone. Profiles and request ids belong to it, since the next link may come from
-   * another controller run, so they are forgotten. The world state stays, to be resumed.
+   * The network broke the link, or the controller closed it, and the transport has already told
+   * both sides. The node forgets what belonged to the link.
    */
-  void linkDown() {
-    queue.clear();
-    queued.clear();
-    answered.clear();
-    canceled.clear();
-    knownClasses.clear();
+  void connectionLost() {
+    if (live) {
+      forgetLink();
+    }
   }
 
   /**
-   * Opens a new connection by reporting what this node still holds. A restarted process reports
-   * sequence 0 and gets a snapshot. A node that only lost its socket reports its sequence and the
-   * controller replays from there.
+   * The controller closed a connection on {@code port}. If it was part of the link, the link goes.
    */
-  void linkUp() {
-    FlatBufferBuilder builder = new FlatBufferBuilder(64);
-    int hello =
-        hasState()
-            ? Hello.createHello(builder, run, regionId, lastSequence, Pathfinder.VANILLA)
-            : Hello.createHello(builder, 0, 0, 0, Pathfinder.VANILLA);
-    builder.finish(
-        ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Hello, hello));
-    transport.toController(id, Channel.CONTROL, ByteBuffer.wrap(builder.sizedByteArray()));
+  void disconnected(Channel port) {
+    if (live && joined(port)) {
+      dropLink();
+    }
   }
 
+  /**
+   * A new connection on {@code port}, with its first frame. It joins the link, replaces it, or is
+   * refused, as the comment on {@code Join} in the schema says.
+   */
+  void connect(Channel port, ByteBuffer first) {
+    Join join = joinIn(port, first);
+    if (join == null || join.run() == 0 || join.link() == 0) {
+      host.refused(port);
+      return;
+    }
+    boolean replaces = linkAttempt == 0 || join.run() != linkRun || join.link() > linkAttempt;
+    if (replaces) {
+      if (live) {
+        dropLink();
+      }
+      linkRun = join.run();
+      linkAttempt = join.link();
+      live = true;
+    } else if (join.link() != linkAttempt || !live || joined(port)) {
+      host.refused(port);
+      return;
+    }
+    if (port == Channel.WORLD) {
+      worldJoined = true;
+    } else {
+      controlJoined = true;
+      hello();
+    }
+  }
+
+  /** A frame on a joined connection, or a datagram. */
   void receive(Channel channel, ByteBuffer frame) {
     switch (channel) {
       case WORLD -> onWorld(frame);
@@ -218,31 +348,117 @@ public final class ModeledNode {
     }
   }
 
-  void service() {
-    if (++servicedTicks % HEARTBEAT_TICKS == 0) {
-      heartbeat();
+  /**
+   * Runs up to {@code count} waiting requests at once, oldest first, or every waiting request if
+   * {@code count} is 0. For a node with no workers.
+   */
+  void serve(int count) {
+    for (int served = 0; count == 0 || served < count; served++) {
+      Job job = take();
+      if (job == null) {
+        return;
+      }
+      running++;
+      settle(job, answerBuilder(job));
     }
-    int served = 0;
-    while (!queue.isEmpty() && served < capacityPerTick) {
-      Pending pending = queue.poll();
-      queued.remove(pending.requestId());
-      byte[] response = buildResponse(pending);
-      answered.put(pending.requestId(), response);
-      transport.toController(id, Channel.REQUEST, ByteBuffer.wrap(response));
-      served++;
+  }
+
+  /** The heartbeat timer fired. */
+  void heartbeatDue() {
+    if (live && controlJoined) {
+      FlatBufferBuilder builder = new FlatBufferBuilder(64);
+      int heartbeat = Heartbeat.createHeartbeat(builder, depth());
+      builder.finish(
+          ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Heartbeat, heartbeat));
+      host.send(Channel.CONTROL, builder.sizedByteArray());
     }
-    backlogged |= !queue.isEmpty();
-    sim.metrics().gauge("node.queue.depth", queue.size(), "node", id.toString());
+  }
+
+  private void startHeartbeat() {
+    long process = this.process;
+    host.schedule(
+        1 + rng.nextInt(HEARTBEAT_STEPS), "heartbeat:" + id, () -> heartbeatTimer(process));
+  }
+
+  private void heartbeatTimer(long process) {
+    if (process != this.process) {
+      return;
+    }
+    if (paused) {
+      deferred.add(() -> heartbeatTimer(process));
+      return;
+    }
+    heartbeatDue();
+    host.schedule(HEARTBEAT_STEPS, "heartbeat:" + id, () -> heartbeatTimer(process));
+  }
+
+  private boolean joined(Channel port) {
+    return port == Channel.WORLD ? worldJoined : controlJoined;
+  }
+
+  private static Join joinIn(Channel port, ByteBuffer frame) {
+    try {
+      if (port == Channel.WORLD) {
+        WorldFrame world = WorldFrame.getRootAsWorldFrame(frame);
+        return world.bodyType() == WorldMsg.Join ? (Join) world.body(new Join()) : null;
+      }
+      ControlFrame control = ControlFrame.getRootAsControlFrame(frame);
+      return control.bodyType() == ControlMsg.Join ? (Join) control.body(new Join()) : null;
+    } catch (RuntimeException e) {
+      return null;
+    }
+  }
+
+  private void hello() {
+    FlatBufferBuilder builder = new FlatBufferBuilder(64);
+    int hello =
+        hasState()
+            ? Hello.createHello(builder, run, regionId, lastSequence, Pathfinder.VANILLA)
+            : Hello.createHello(builder, 0, 0, 0, Pathfinder.VANILLA);
+    builder.finish(
+        ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Hello, hello));
+    host.send(Channel.CONTROL, builder.sizedByteArray());
+  }
+
+  /** The node drops its link and closes its connections. */
+  private void dropLink() {
+    forgetLink();
+    host.linkDropped();
+  }
+
+  /**
+   * Profiles and request ids belong to the link, since the next link may come from another
+   * controller run, so they are forgotten. The world state and the link's token stay.
+   */
+  private void forgetLink() {
+    live = false;
+    worldJoined = false;
+    controlJoined = false;
+    knownClasses.clear();
+    waiting.clear();
+    open.clear();
+    settled.clear();
+    settledOrder.clear();
+    waitingCount = 0;
+    generation++;
   }
 
   private void onWorld(ByteBuffer frame) {
-    String refusal = applyWorld(WorldFrame.getRootAsWorldFrame(frame));
+    WorldFrame world = WorldFrame.getRootAsWorldFrame(frame);
+    if (world.bodyType() == WorldMsg.Join) {
+      return;
+    }
+    String refusal = applyWorld(world);
     if (refusal == null) {
       return;
     }
     violations.add(id + ": " + refusal);
-    kill();
-    transport.resetLink(id);
+    run = 0;
+    regionId = 0;
+    cells = new byte[0];
+    floors = new byte[0];
+    lastSequence = 0;
+    dropLink();
   }
 
   /** Applies one world frame, or returns the reason the real node would refuse it. */
@@ -257,40 +473,243 @@ public final class ModeledNode {
     };
   }
 
-  private void onRequest(ByteBuffer frame) {
-    RequestFrame request = RequestFrame.getRootAsRequestFrame(frame);
-    switch (request.bodyType()) {
-      case RequestMsg.PathRequestBatch -> {
-        PathRequestBatch batch = (PathRequestBatch) request.body(new PathRequestBatch());
-        PathRequest scratch = new PathRequest();
-        for (int i = 0; i < batch.requestsLength(); i++) {
-          enqueue(batch.requests(scratch, i));
-        }
-      }
-      case RequestMsg.PathCancel -> {
-        PathCancel cancel = (PathCancel) request.body(new PathCancel());
-        for (int i = 0; i < cancel.requestIdsLength(); i++) {
-          cancel(cancel.requestIds(i));
-        }
-      }
-      default -> violations.add(id + ": unknown request body " + request.bodyType());
-    }
-  }
-
   private void onControl(ByteBuffer frame) {
     ControlFrame control = ControlFrame.getRootAsControlFrame(frame);
-    switch (control.bodyType()) {
-      case ControlMsg.MobClass -> registerClass((MobClass) control.body(new MobClass()));
-      default -> violations.add(id + ": unknown control body " + control.bodyType());
+    if (control.bodyType() != ControlMsg.MobClass) {
+      // A `Join` after the first frame, or a message this node does not know.
+      return;
+    }
+    maestro.fbs.MobClass profile = (maestro.fbs.MobClass) control.body(new maestro.fbs.MobClass());
+    if (profile.malusLength() != PathTypes.count()
+        || !MobClass.Shape.fits(profile.width(), profile.height(), profile.maxUpStep())) {
+      violations.add(id + ": class " + profile.classId() + " breaks the profile contract");
+      dropLink();
+      return;
+    }
+    knownClasses.put(
+        (short) profile.classId(),
+        new MobClass.Shape(profile.width(), profile.height(), profile.maxUpStep()));
+  }
+
+  private void onRequest(ByteBuffer frame) {
+    RequestFrame request;
+    try {
+      request = RequestFrame.getRootAsRequestFrame(frame);
+      if (!live || request.run() != linkRun) {
+        return;
+      }
+    } catch (RuntimeException e) {
+      return;
+    }
+    try {
+      switch (request.bodyType()) {
+        case RequestMsg.PathRequestBatch -> {
+          PathRequestBatch batch = (PathRequestBatch) request.body(new PathRequestBatch());
+          PathRequest scratch = new PathRequest();
+          for (int i = 0; i < batch.requestsLength(); i++) {
+            admit(batch.requests(scratch, i), request.run(), request.regionId());
+          }
+        }
+        case RequestMsg.PathCancel -> {
+          PathCancel cancel = (PathCancel) request.body(new PathCancel());
+          for (int i = 0; i < cancel.requestIdsLength(); i++) {
+            cancel(cancel.requestIds(i));
+          }
+        }
+        default -> {}
+      }
+    } catch (RuntimeException e) {
+      // A malformed datagram, which the real node ignores after verifying it.
     }
   }
 
-  private void registerClass(MobClass profile) {
-    if (profile.malusLength() != PathTypes.count()) {
-      violations.add(
-          id + ": class " + profile.classId() + " malus covers " + profile.malusLength());
+  private void admit(PathRequest request, long frameRun, long frameRegion) {
+    long requestId = request.requestId();
+    if (!knownClasses.containsKey((short) request.classId())) {
+      // The profile has not arrived yet, so tell the controller immediately instead of
+      // letting the request time out. Nothing is recorded, so a later copy is served.
+      host.send(Channel.REQUEST, unknownProfile(frameRun, requestId, request.classId()));
+      return;
     }
-    knownClasses.add((short) profile.classId());
+    if (request.start() == null || request.target() == null) {
+      return;
+    }
+    expire();
+    Settled earlier = settled.get(requestId);
+    if (earlier != null) {
+      if (earlier.answer() != null) {
+        // At-least-once delivery: answer the copy with the byte-identical response.
+        duplicateRequests++;
+        host.send(Channel.REQUEST, earlier.answer());
+      }
+      return;
+    }
+    if (open.containsKey(requestId)) {
+      duplicateRequests++;
+      return;
+    }
+    open.put(requestId, State.WAITING);
+    waitingCount++;
+    waiting.add(
+        new Job(
+            requestId,
+            frameRun,
+            frameRegion,
+            new Pos(request.start().x(), request.start().y(), request.start().z()),
+            new Pos(request.target().x(), request.target().y(), request.target().z()),
+            generation));
+    startWorkers();
+  }
+
+  /**
+   * Drops a waiting request, and any copy that arrives later. One running or answered is left
+   * alone.
+   */
+  private void cancel(long requestId) {
+    expire();
+    if (settled.containsKey(requestId) || open.get(requestId) == State.RUNNING) {
+      return;
+    }
+    if (open.remove(requestId) != null) {
+      waitingCount--;
+      canceledRequests++;
+    }
+    record(requestId, null);
+  }
+
+  /**
+   * The oldest waiting request, now running, or null. A canceled one stays in the queue until
+   * reached and is skipped then, as the real node's queue does.
+   */
+  private Job take() {
+    while (waitingCount > 0) {
+      Job next = waiting.poll();
+      if (open.get(next.requestId()) == State.WAITING) {
+        open.put(next.requestId(), State.RUNNING);
+        waitingCount--;
+        return next;
+      }
+    }
+    return null;
+  }
+
+  private void startWorkers() {
+    if (paused) {
+      return;
+    }
+    while (running < service.workers()) {
+      Job job = take();
+      if (job == null) {
+        return;
+      }
+      running++;
+      // The area is pinned when the job starts, as a worker pins the current version.
+      byte[] answer = answerBuilder(job);
+      long process = this.process;
+      int cost =
+          service.minCostSteps() + rng.nextInt(service.maxCostSteps() - service.minCostSteps() + 1);
+      host.schedule(cost, "served:" + id, () -> completed(process, job, answer));
+    }
+    backlogged |= waitingCount > 0;
+  }
+
+  private void completed(long process, Job job, byte[] answer) {
+    if (process != this.process) {
+      return;
+    }
+    if (paused) {
+      deferred.add(() -> completed(process, job, answer));
+      return;
+    }
+    settle(job, answer);
+    startWorkers();
+  }
+
+  /** Records a finished job's answer and sends it, unless its link has gone since. */
+  private void settle(Job job, byte[] answer) {
+    running--;
+    if (job.generation() != generation) {
+      return;
+    }
+    servedRequests++;
+    open.remove(job.requestId());
+    expire();
+    record(job.requestId(), answer);
+    host.send(Channel.REQUEST, answer);
+  }
+
+  private void record(long requestId, byte[] answer) {
+    long now = host.now();
+    settled.put(requestId, new Settled(answer, now));
+    settledOrder.add(new SettledAt(now, requestId));
+  }
+
+  /** Forgets requests settled {@link #RETENTION_STEPS} ago or more. */
+  private void expire() {
+    long now = host.now();
+    while (!settledOrder.isEmpty() && settledOrder.peek().at() + RETENTION_STEPS <= now) {
+      SettledAt oldest = settledOrder.poll();
+      // A request settled again later has a newer entry of its own.
+      Settled current = settled.get(oldest.requestId());
+      if (current != null && current.at() == oldest.at()) {
+        settled.remove(oldest.requestId());
+      }
+    }
+  }
+
+  /**
+   * The answer to a job against the area held now. A node holding no area, or another run's or
+   * region's, answers with no path at sequence 0, which the controller reads as a search that ran
+   * too early.
+   */
+  private byte[] answerBuilder(Job job) {
+    boolean matches = cells.length > 0 && run == job.run() && regionId == job.regionId();
+    List<Pos> path = matches ? straightLine(job.start(), job.target()) : List.of();
+    boolean reached = !path.isEmpty() && path.get(path.size() - 1).equals(job.target());
+
+    FlatBufferBuilder builder = new FlatBufferBuilder(256);
+    PathResponse.startNodesVector(builder, path.size());
+    for (int i = path.size() - 1; i >= 0; i--) {
+      Pos node = path.get(i);
+      PathNode.createPathNode(
+          builder, (short) node.x(), (short) node.y(), (short) node.z(), PathType.WALKABLE);
+    }
+    int nodes = builder.endVector();
+
+    PathResponse.startPathResponse(builder);
+    PathResponse.addRequestId(builder, job.requestId());
+    PathResponse.addReached(builder, reached);
+    PathResponse.addNodes(builder, nodes);
+    PathResponse.addCost(builder, path.size());
+    PathResponse.addWorldSequence(builder, matches ? lastSequence : 0);
+    int response = PathResponse.endPathResponse(builder);
+
+    builder.finish(
+        ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, response, job.run()));
+    return builder.sizedByteArray();
+  }
+
+  private static byte[] unknownProfile(long run, long requestId, int classId) {
+    FlatBufferBuilder builder = new FlatBufferBuilder(64);
+    int reply = UnknownProfile.createUnknownProfile(builder, requestId, classId);
+    builder.finish(
+        ResponseFrame.createResponseFrame(builder, ResponseMsg.UnknownProfile, reply, run));
+    return builder.sizedByteArray();
+  }
+
+  private static List<Pos> straightLine(Pos start, Pos target) {
+    List<Pos> path = new ArrayList<>();
+    int x = start.x();
+    int y = start.y();
+    int z = start.z();
+    while (path.size() < MAX_PATH_NODES
+        && (x != target.x() || y != target.y() || z != target.z())) {
+      x += Integer.signum(target.x() - x);
+      z += Integer.signum(target.z() - z);
+      y += Integer.signum(target.y() - y);
+      path.add(new Pos(x, y, z));
+    }
+    return path;
   }
 
   private String assign(RegionAssignment assignment) {
@@ -340,6 +759,7 @@ public final class ModeledNode {
     // The controller's sequence continues across a reassignment, so the
     // assignment says where it stands.
     lastSequence = assignment.sequence();
+    host.assigned(this, run, regionId, lastSequence);
     return null;
   }
 
@@ -352,11 +772,6 @@ public final class ModeledNode {
       return "world sequence gap, expected " + (lastSequence + 1) + " got " + sequence;
     }
     return null;
-  }
-
-  private void advance(long sequence) {
-    lastSequence = sequence;
-    sim.applied(id, regionId, sequence);
   }
 
   private String applyChunkSnapshot(ChunkSnapshot snapshot) {
@@ -383,29 +798,29 @@ public final class ModeledNode {
     if (refused != null) {
       return refused;
     }
-    advance(snapshot.sequence());
 
     int originX = position.x() * Chunks.SIZE;
     int originZ = position.z() * Chunks.SIZE;
     // No columns means the server does not hold the chunk, so it is air.
     if (snapshot.runCountsLength() == 0) {
       fillChunk(originX, originZ, (byte) PathType.OPEN, (byte) 0);
-      return null;
-    }
-    CellRun cellRun = new CellRun();
-    int runIndex = 0;
-    for (int column = 0; column < snapshot.runCountsLength(); column++) {
-      int base = index(originX + column / Chunks.SIZE, baseY, originZ + column % Chunks.SIZE);
-      int y = 0;
-      for (int r = snapshot.runCounts(column); r > 0; r--) {
-        snapshot.runs(cellRun, runIndex++);
-        for (int i = 0; i < cellRun.length(); i++) {
-          cells[base + y] = (byte) cellRun.nodeType();
-          floors[base + y] = (byte) cellRun.floor();
-          y++;
+    } else {
+      CellRun cellRun = new CellRun();
+      int runIndex = 0;
+      for (int column = 0; column < snapshot.runCountsLength(); column++) {
+        int base = index(originX + column / Chunks.SIZE, baseY, originZ + column % Chunks.SIZE);
+        int y = 0;
+        for (int r = snapshot.runCounts(column); r > 0; r--) {
+          snapshot.runs(cellRun, runIndex++);
+          for (int i = 0; i < cellRun.length(); i++) {
+            cells[base + y] = (byte) cellRun.nodeType();
+            floors[base + y] = (byte) cellRun.floor();
+            y++;
+          }
         }
       }
     }
+    advance(snapshot.sequence());
     return null;
   }
 
@@ -485,7 +900,6 @@ public final class ModeledNode {
     if (refused != null) {
       return refused;
     }
-    advance(delta.sequence());
 
     for (int i = 0; i < delta.cellsLength(); i++) {
       delta.cells(cell, i);
@@ -494,107 +908,13 @@ public final class ModeledNode {
       cells[index] = (byte) cell.nodeType();
       floors[index] = (byte) cell.floor();
     }
+    advance(delta.sequence());
     return null;
   }
 
-  private void enqueue(PathRequest request) {
-    long requestId = request.requestId();
-    if (!knownClasses.contains((short) request.classId())) {
-      // The profile has not arrived yet, so tell the controller immediately instead of
-      // letting the request time out.
-      transport.toController(
-          id, Channel.REQUEST, ByteBuffer.wrap(unknownProfile(requestId, request.classId())));
-      return;
-    }
-    byte[] prior = answered.get(requestId);
-    if (prior != null) {
-      // At-least-once delivery: answer the retry with the byte-identical response.
-      duplicateRequests++;
-      transport.toController(id, Channel.REQUEST, ByteBuffer.wrap(prior));
-      return;
-    }
-    if (canceled.contains(requestId)) {
-      return;
-    }
-    if (!queued.add(requestId)) {
-      duplicateRequests++;
-      return;
-    }
-    queue.add(
-        new Pending(
-            requestId,
-            new Pos(request.start().x(), request.start().y(), request.start().z()),
-            new Pos(request.target().x(), request.target().y(), request.target().z())));
-  }
-
-  /**
-   * Drops a request that has not been served, and any copy that arrives later. One already answered
-   * is left alone, as the real node leaves one it has started.
-   */
-  private void cancel(long requestId) {
-    if (answered.containsKey(requestId)) {
-      return;
-    }
-    canceled.add(requestId);
-    if (queued.remove(requestId)) {
-      queue.removeIf(pending -> pending.requestId() == requestId);
-      canceledRequests++;
-    }
-  }
-
-  private void heartbeat() {
-    FlatBufferBuilder builder = new FlatBufferBuilder(64);
-    int heartbeat = Heartbeat.createHeartbeat(builder, queue.size());
-    builder.finish(
-        ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Heartbeat, heartbeat));
-    transport.toController(id, Channel.CONTROL, ByteBuffer.wrap(builder.sizedByteArray()));
-  }
-
-  private static byte[] unknownProfile(long requestId, int classId) {
-    FlatBufferBuilder builder = new FlatBufferBuilder(64);
-    int reply = UnknownProfile.createUnknownProfile(builder, requestId, classId);
-    builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.UnknownProfile, reply));
-    return builder.sizedByteArray();
-  }
-
-  private byte[] buildResponse(Pending pending) {
-    List<Pos> path = straightLine(pending.start(), pending.target());
-    boolean reached = !path.isEmpty() && path.get(path.size() - 1).equals(pending.target());
-
-    FlatBufferBuilder builder = new FlatBufferBuilder(256);
-    PathResponse.startNodesVector(builder, path.size());
-    for (int i = path.size() - 1; i >= 0; i--) {
-      Pos node = path.get(i);
-      PathNode.createPathNode(
-          builder, (short) node.x(), (short) node.y(), (short) node.z(), PathType.WALKABLE);
-    }
-    int nodes = builder.endVector();
-
-    PathResponse.startPathResponse(builder);
-    PathResponse.addRequestId(builder, pending.requestId());
-    PathResponse.addReached(builder, reached);
-    PathResponse.addNodes(builder, nodes);
-    PathResponse.addCost(builder, path.size());
-    PathResponse.addWorldSequence(builder, lastSequence);
-    int response = PathResponse.endPathResponse(builder);
-
-    builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, response));
-    return builder.sizedByteArray();
-  }
-
-  private static List<Pos> straightLine(Pos start, Pos target) {
-    List<Pos> path = new ArrayList<>();
-    int x = start.x();
-    int y = start.y();
-    int z = start.z();
-    while (path.size() < MAX_PATH_NODES
-        && (x != target.x() || y != target.y() || z != target.z())) {
-      x += Integer.signum(target.x() - x);
-      z += Integer.signum(target.z() - z);
-      y += Integer.signum(target.y() - y);
-      path.add(new Pos(x, y, z));
-    }
-    return path;
+  private void advance(long sequence) {
+    lastSequence = sequence;
+    host.applied(this, run, regionId, sequence);
   }
 
   private int index(int x, int y, int z) {

@@ -25,8 +25,8 @@ enum Pathfinder : ubyte {
 // the rail check, use `start` instead.
 //
 // There are no tracing fields. A request's trace id is `(run, mix(request_id))`
-// and its span id is `request_id`, where `run` comes from the
-// `RegionAssignment` and `mix` is the splitmix64 finalizer
+// and its span id is `request_id`, where `run` is the request frame's and `mix`
+// is the splitmix64 finalizer
 //   z ^= z >> 30; z *= 0xbf58476d1ce4e5b9;
 //   z ^= z >> 27; z *= 0x94d049bb133111eb;
 //   z ^= z >> 31;

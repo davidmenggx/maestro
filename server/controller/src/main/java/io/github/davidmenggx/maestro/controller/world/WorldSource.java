@@ -36,7 +36,7 @@ public interface WorldSource {
    */
   int floorAt(int x, int y, int z);
 
-  /** Blocks in one section, the unit of {@link #uniformCell}. */
+  /** Blocks in one section, the unit of {@link #uniformCell} and {@link #readSection}. */
   int SECTION_HEIGHT = 16;
 
   /** Returned by {@link #uniformCell} for a section that is not known to be uniform. */
@@ -51,5 +51,15 @@ public interface WorldSource {
    */
   default int uniformCell(int chunkX, int chunkZ, int section) {
     return NOT_UNIFORM;
+  }
+
+  /**
+   * Reads every block of one section as a cell, {@code (floor << 8) | pathType}, into {@code cells}
+   * at {@code (dx * Chunks.SIZE + dz) * SECTION_HEIGHT + dy}, and returns true, or returns false,
+   * leaving {@code cells} undefined, if this source reads blocks one at a time. Must agree with
+   * {@link #pathTypeAt} and {@link #floorAt} for every block of the section.
+   */
+  default boolean readSection(int chunkX, int chunkZ, int section, int[] cells) {
+    return false;
   }
 }

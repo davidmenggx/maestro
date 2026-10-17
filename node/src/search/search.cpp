@@ -29,7 +29,7 @@ std::optional<Request> Request::decode(const fbs::PathRequest &Wire) {
   return Out;
 }
 
-bool encodeResponse(flatbuffers::FlatBufferBuilder &Builder,
+bool encodeResponse(flatbuffers::FlatBufferBuilder &Builder, std::uint64_t Run,
                     std::uint64_t RequestId, const Result &Path,
                     std::uint64_t WorldSequence) {
   Builder.Clear();
@@ -48,16 +48,17 @@ bool encodeResponse(flatbuffers::FlatBufferBuilder &Builder,
   const auto Response = fbs::CreatePathResponse(
       Builder, RequestId, Path.Reached, NodesVec, Path.Cost, WorldSequence);
   Builder.Finish(fbs::CreateResponseFrame(
-      Builder, fbs::ResponseMsg::PathResponse, Response.Union()));
+      Builder, fbs::ResponseMsg::PathResponse, Response.Union(), Run));
   return true;
 }
 
 void encodeUnknownProfile(flatbuffers::FlatBufferBuilder &Builder,
-                          std::uint64_t RequestId, std::uint16_t ClassId) {
+                          std::uint64_t Run, std::uint64_t RequestId,
+                          std::uint16_t ClassId) {
   Builder.Clear();
   const auto Body = fbs::CreateUnknownProfile(Builder, RequestId, ClassId);
   Builder.Finish(fbs::CreateResponseFrame(
-      Builder, fbs::ResponseMsg::UnknownProfile, Body.Union()));
+      Builder, fbs::ResponseMsg::UnknownProfile, Body.Union(), Run));
 }
 
 std::unique_ptr<Search> makeSearch(fbs::Pathfinder Kind) {

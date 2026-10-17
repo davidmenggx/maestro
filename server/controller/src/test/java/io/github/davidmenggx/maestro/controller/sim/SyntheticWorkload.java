@@ -8,11 +8,11 @@ import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldInput;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Generated replacement for a recorded server trace, and the fuzzer of the suite. Every event the
@@ -78,11 +78,29 @@ public final class SyntheticWorkload implements Workload {
     this::cancelPath,
     this::movePlayers
   };
+
+  /** Tries at finding a loaded chunk to spawn a mob in, before giving up for the tick. */
+  private static final int SPAWN_TRIES = 8;
+
+  /** Every type a cell may carry, in enum order, so a given index always picks the same type. */
+  private static final byte[] PER_BLOCK_TYPES = perBlockTypes();
+
+  private static byte[] perBlockTypes() {
+    byte[] all = new byte[PathTypes.count()];
+    int found = 0;
+    for (int ordinal = 0; ordinal < PathTypes.count(); ordinal++) {
+      if (PathTypes.isPerBlock((byte) ordinal)) {
+        all[found++] = (byte) ordinal;
+      }
+    }
+    return Arrays.copyOf(all, found);
+  }
+
   private final long quietAfter;
   private final Scenario scenario;
   private final int classCount;
   private final Map<Integer, Pos> mobs = new LinkedHashMap<>();
-  private final Set<Integer> players = new LinkedHashSet<>();
+  private final Map<Integer, Pos> players = new LinkedHashMap<>();
 
   private int nextMobId = 1;
 
@@ -122,8 +140,24 @@ public final class SyntheticWorkload implements Workload {
       spawn(0, input);
     }
     for (int player = 1; player <= scenario.counts().get(Count.PLAYERS); player++) {
-      players.add(player);
-      input.accept(new WorldEvent.PlayerMoved(0, player, randomStanding()));
+      movePlayer(0, player, input);
+    }
+  }
+
+  @Override
+  public void replayState(long tick, WorldInput input) {
+    for (int chunkX = 0; chunkX < world.chunksPerSide(); chunkX++) {
+      for (int chunkZ = 0; chunkZ < world.chunksPerSide(); chunkZ++) {
+        if (world.chunkLoaded(chunkX, chunkZ)) {
+          input.accept(new WorldEvent.ChunkLoaded(tick, chunkX, chunkZ));
+        }
+      }
+    }
+    for (Map.Entry<Integer, Pos> mob : mobs.entrySet()) {
+      input.accept(new WorldEvent.MobSpawned(tick, mob.getKey(), mob.getValue()));
+    }
+    for (Map.Entry<Integer, Pos> player : players.entrySet()) {
+      input.accept(new WorldEvent.PlayerMoved(tick, player.getKey(), player.getValue()));
     }
   }
 
@@ -143,8 +177,22 @@ public final class SyntheticWorkload implements Workload {
     int chunkX = rng.nextInt(world.chunksPerSide());
     int chunkZ = rng.nextInt(world.chunksPerSide());
     if (world.chunkLoaded(chunkX, chunkZ)) {
+      // Mobs leave with their chunk, and as many appear in the chunks still loaded.
+      int left = 0;
+      Iterator<Map.Entry<Integer, Pos>> each = mobs.entrySet().iterator();
+      while (each.hasNext()) {
+        Map.Entry<Integer, Pos> mob = each.next();
+        if (Chunks.of(mob.getValue().x()) == chunkX && Chunks.of(mob.getValue().z()) == chunkZ) {
+          each.remove();
+          input.accept(new WorldEvent.MobRemoved(tick, mob.getKey()));
+          left++;
+        }
+      }
       world.unloadChunk(chunkX, chunkZ);
       input.accept(new WorldEvent.ChunkUnloaded(tick, chunkX, chunkZ));
+      for (int i = 0; i < left; i++) {
+        spawn(tick, input);
+      }
     } else {
       world.loadChunk(chunkX, chunkZ);
       input.accept(new WorldEvent.ChunkLoaded(tick, chunkX, chunkZ));
@@ -169,7 +217,7 @@ public final class SyntheticWorkload implements Workload {
               world.groundAt(x, z) + rng.nextInt(2 * BLOCK_CHANGE_SPREAD + 1) - BLOCK_CHANGE_SPREAD,
               world.minY(),
               world.minY() + world.height() - 1);
-      byte type = PathTypes.perBlock(rng.nextInt(PathTypes.perBlockCount()));
+      byte type = PER_BLOCK_TYPES[rng.nextInt(PER_BLOCK_TYPES.length)];
       int floor = SimWorld.floorFor(type, rng);
       world.set(x, y, z, type, floor);
       input.accept(new WorldEvent.BlockChanged(tick, new Pos(x, y, z), type, floor));
@@ -186,13 +234,16 @@ public final class SyntheticWorkload implements Workload {
 
   /**
    * Mobs wander, so successive requests for one mob can fall in different regions, and a mob's
-   * owner can change during a run.
+   * owner can change during a run. A mob never walks into a chunk that is not loaded, as vanilla
+   * does not tick it there.
    */
   private void moveMobs() {
     for (Map.Entry<Integer, Pos> mob : mobs.entrySet()) {
       int x = Math.clamp(mob.getValue().x() + rng.nextInt(3) - 1, 0, world.size() - 1);
       int z = Math.clamp(mob.getValue().z() + rng.nextInt(3) - 1, 0, world.size() - 1);
-      mob.setValue(new Pos(x, world.groundAt(x, z) + 1, z));
+      if (world.chunkLoaded(Chunks.of(x), Chunks.of(z))) {
+        mob.setValue(new Pos(x, world.groundAt(x, z) + 1, z));
+      }
     }
   }
 
@@ -210,6 +261,16 @@ public final class SyntheticWorkload implements Workload {
       input.accept(
           new WorldEvent.PathRequested(
               tick, mob.getKey(), randomClass(), start, randomStanding(), randomSearch()));
+      if (rng.nextDouble() < scenario.chances().get(Chance.REPEAT_REQUEST)) {
+        input.accept(
+            new WorldEvent.PathRequested(
+                tick,
+                mob.getKey(),
+                randomClass(),
+                mob.getValue(),
+                randomStanding(),
+                randomSearch()));
+      }
     }
   }
 
@@ -248,26 +309,37 @@ public final class SyntheticWorkload implements Workload {
     int playerCount = scenario.counts().get(Count.PLAYERS);
     if (playerCount > 0 && rng.nextDouble() < scenario.chances().get(Chance.PLAYER_CHURN)) {
       int player = 1 + rng.nextInt(playerCount);
-      if (players.remove(player)) {
+      if (players.remove(player) != null) {
         input.accept(new WorldEvent.PlayerLeft(tick, player));
       } else {
-        players.add(player);
-        input.accept(new WorldEvent.PlayerMoved(tick, player, randomStanding()));
+        movePlayer(tick, player, input);
       }
     }
     if (tick % PLAYER_MOVE_INTERVAL_TICKS != 0) {
       return;
     }
-    for (int player : players) {
-      input.accept(new WorldEvent.PlayerMoved(tick, player, randomStanding()));
+    for (int player : List.copyOf(players.keySet())) {
+      movePlayer(tick, player, input);
     }
   }
 
-  private void spawn(long tick, WorldInput input) {
-    int mobId = nextMobId++;
+  private void movePlayer(long tick, int player, WorldInput input) {
     Pos pos = randomStanding();
-    mobs.put(mobId, pos);
-    input.accept(new WorldEvent.MobSpawned(tick, mobId, pos));
+    players.put(player, pos);
+    input.accept(new WorldEvent.PlayerMoved(tick, player, pos));
+  }
+
+  /** A mob appears in a loaded chunk, if one is found. */
+  private void spawn(long tick, WorldInput input) {
+    for (int i = 0; i < SPAWN_TRIES; i++) {
+      Pos pos = randomStanding();
+      if (world.chunkLoaded(Chunks.of(pos.x()), Chunks.of(pos.z()))) {
+        int mobId = nextMobId++;
+        mobs.put(mobId, pos);
+        input.accept(new WorldEvent.MobSpawned(tick, mobId, pos));
+        return;
+      }
+    }
   }
 
   /**

@@ -42,7 +42,16 @@ bool RequestQueue::cancel(std::uint64_t RequestId, Clock::time_point Now) {
 std::optional<Job> RequestQueue::take() {
   std::unique_lock Lock(Mutex);
   Ready.wait(Lock, [&] { return Closed || WaitingCount > 0; });
-  if (Closed)
+  return next();
+}
+
+std::optional<Job> RequestQueue::tryTake() {
+  std::lock_guard Lock(Mutex);
+  return next();
+}
+
+std::optional<Job> RequestQueue::next() {
+  if (Closed || WaitingCount == 0)
     return std::nullopt;
   // `WaitingCount` counts ids, and each has a job in the queue, so this ends.
   for (;;) {
@@ -68,6 +77,11 @@ bool RequestQueue::settle(const Job &Finished, Answer Result,
   expire(Now);
   record(Finished.RequestId, std::move(Result), Now);
   return true;
+}
+
+bool RequestQueue::current(const Job &Finished) const {
+  std::lock_guard Lock(Mutex);
+  return Finished.Generation == Generation;
 }
 
 std::size_t RequestQueue::depth() const {

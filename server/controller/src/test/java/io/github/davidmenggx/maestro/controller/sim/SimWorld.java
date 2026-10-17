@@ -219,6 +219,29 @@ public final class SimWorld implements WorldSource {
   }
 
   /**
+   * Reads even sections whole and leaves odd ones to block reads, so every run encodes chunks both
+   * ways and the state comparisons check both.
+   */
+  @Override
+  public boolean readSection(int chunkX, int chunkZ, int section, int[] cells) {
+    if (section % 2 == 1 || !chunkLoaded(chunkX, chunkZ)) {
+      return false;
+    }
+    int low = topology.minY() + section * SECTION_HEIGHT;
+    for (int dx = 0; dx < Chunks.SIZE; dx++) {
+      for (int dz = 0; dz < Chunks.SIZE; dz++) {
+        int x = chunkX * Chunks.SIZE + dx;
+        int z = chunkZ * Chunks.SIZE + dz;
+        for (int dy = 0; dy < SECTION_HEIGHT; dy++) {
+          cells[(dx * Chunks.SIZE + dz) * SECTION_HEIGHT + dy] =
+              (floorAt(x, low + dy, z) << 8) | (pathTypeAt(x, low + dy, z) & 0xFF);
+        }
+      }
+    }
+    return true;
+  }
+
+  /**
    * One randomly drawn {@code WalkNodeEvaluator} profile. Every field the wire carries is drawn, so
    * the mob class table is encoded and decoded with values that vary between runs, not constants.
    */

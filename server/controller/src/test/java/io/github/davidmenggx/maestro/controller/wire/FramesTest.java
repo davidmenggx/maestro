@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.world.Cells;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
@@ -14,6 +15,10 @@ import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.IntPredicate;
+import maestro.fbs.ControlFrame;
+import maestro.fbs.ControlMsg;
+import maestro.fbs.Join;
 import maestro.fbs.PathCancel;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
@@ -24,11 +29,34 @@ import maestro.fbs.RequestFrame;
 import maestro.fbs.RequestMsg;
 import maestro.fbs.ResponseFrame;
 import maestro.fbs.WorldFrame;
+import maestro.fbs.WorldMsg;
 import org.junit.jupiter.api.Test;
 
 class FramesTest {
 
   private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256, 3);
+
+  private static final long RUN = 0x5eed;
+
+  @Test
+  void aLinkOpensEachConnectionWithAJoinNamingTheRunAndAttempt() {
+    WorldFrame world = WorldFrame.getRootAsWorldFrame(ByteBuffer.wrap(Frames.joinWorld(RUN, 4)));
+    assertEquals(WorldMsg.Join, world.bodyType());
+    Join worldJoin = (Join) world.body(new Join());
+    assertEquals(RUN, worldJoin.run());
+    assertEquals(4, worldJoin.link());
+
+    ControlFrame control =
+        ControlFrame.getRootAsControlFrame(ByteBuffer.wrap(Frames.joinControl(RUN, 4)));
+    assertEquals(ControlMsg.Join, control.bodyType());
+    Join controlJoin = (Join) control.body(new Join());
+    assertEquals(RUN, controlJoin.run());
+    assertEquals(4, controlJoin.link());
+
+    // The node refuses a zero field, so the controller never sends one.
+    assertThrows(IllegalArgumentException.class, () -> Frames.joinWorld(0, 1));
+    assertThrows(IllegalArgumentException.class, () -> Frames.joinControl(RUN, 0));
+  }
 
   @Test
   void aValueTooWideForItsWireFieldIsRefusedRatherThanWrapped() {
@@ -40,7 +68,8 @@ class FramesTest {
 
     Frames.Request farAway =
         new Frames.Request(1, (short) 1, new Pos(40_000, 40, 0), new Pos(0, 40, 0), SEARCH);
-    assertThrows(IllegalArgumentException.class, () -> Frames.requests(List.of(farAway), 0, 0));
+    assertThrows(
+        IllegalArgumentException.class, () -> Frames.requests(RUN, 0, List.of(farAway), 0, 0));
   }
 
   @Test
@@ -49,7 +78,7 @@ class FramesTest {
     WorldEvent.Search widest =
         new WorldEvent.Search(
             WorldEvent.Search.MAX_REACH_RANGE,
-            Float.MAX_VALUE,
+            WorldEvent.Search.MAX_PATH_LENGTH,
             WorldEvent.Search.MAX_VISITED_NODES,
             WorldEvent.Search.MAX_FALL_DISTANCE);
     List<Frames.Request> batch = new ArrayList<>();
@@ -62,10 +91,11 @@ class FramesTest {
               new Pos(Short.MAX_VALUE, Short.MAX_VALUE, Short.MAX_VALUE),
               widest));
     }
-    assertTrue(Frames.requests(batch, 0, 0).length <= Frames.MAX_REQUEST_FRAME_BYTES);
+    byte[] full = Frames.requests(Long.MAX_VALUE, Integer.MAX_VALUE, batch, 0, 0);
+    assertTrue(full.length <= Frames.MAX_REQUEST_FRAME_BYTES, full.length + " bytes");
 
     batch.add(batch.get(0));
-    assertThrows(IllegalArgumentException.class, () -> Frames.requests(batch, 0, 0));
+    assertThrows(IllegalArgumentException.class, () -> Frames.requests(RUN, 0, batch, 0, 0));
   }
 
   @Test
@@ -74,11 +104,12 @@ class FramesTest {
     for (int i = 0; i < Frames.MAX_CANCELS_PER_FRAME; i++) {
       ids.add(Long.MAX_VALUE - i);
     }
-    byte[] bytes = Frames.cancels(ids);
+    byte[] bytes = Frames.cancels(Long.MAX_VALUE, ids);
     assertTrue(bytes.length <= Frames.MAX_REQUEST_FRAME_BYTES, bytes.length + " bytes");
 
     RequestFrame frame = RequestFrame.getRootAsRequestFrame(ByteBuffer.wrap(bytes));
     assertEquals(RequestMsg.PathCancel, frame.bodyType());
+    assertEquals(Long.MAX_VALUE, frame.run());
     PathCancel cancel = (PathCancel) frame.body(new PathCancel());
     assertEquals(ids.size(), cancel.requestIdsLength());
     for (int i = 0; i < ids.size(); i++) {
@@ -86,7 +117,7 @@ class FramesTest {
     }
 
     ids.add(1L);
-    assertThrows(IllegalArgumentException.class, () -> Frames.cancels(ids));
+    assertThrows(IllegalArgumentException.class, () -> Frames.cancels(RUN, ids));
   }
 
   @Test
@@ -121,10 +152,12 @@ class FramesTest {
     WorldEvent.Search search = new WorldEvent.Search(6, 40.5f, 640, 300);
     Frames.Request request =
         new Frames.Request(9, (short) 2, new Pos(3, 40, 5), new Pos(7, 41, 11), search);
-    ByteBuffer frame = ByteBuffer.wrap(Frames.requests(List.of(request), 0, 0));
+    ByteBuffer frame = ByteBuffer.wrap(Frames.requests(RUN, 3, List.of(request), 0, 0));
 
-    PathRequestBatch batch =
-        (PathRequestBatch) RequestFrame.getRootAsRequestFrame(frame).body(new PathRequestBatch());
+    RequestFrame root = RequestFrame.getRootAsRequestFrame(frame);
+    assertEquals(RUN, root.run());
+    assertEquals(3, root.regionId());
+    PathRequestBatch batch = (PathRequestBatch) root.body(new PathRequestBatch());
     assertEquals(1, batch.requestsLength());
     PathRequest decoded = batch.requests(0);
     assertEquals(9, decoded.requestId());
@@ -139,7 +172,7 @@ class FramesTest {
   void positionsLeaveRelativeToTheAreaCorner() {
     Frames.Request request =
         new Frames.Request(1, (short) 1, new Pos(-30, 64, 1050), new Pos(-17, 70, 1040), SEARCH);
-    ByteBuffer frame = ByteBuffer.wrap(Frames.requests(List.of(request), -32, 1024));
+    ByteBuffer frame = ByteBuffer.wrap(Frames.requests(RUN, 0, List.of(request), -32, 1024));
 
     PathRequestBatch batch =
         (PathRequestBatch) RequestFrame.getRootAsRequestFrame(frame).body(new PathRequestBatch());
@@ -155,10 +188,11 @@ class FramesTest {
             new WorldOutput.Node(new Pos(100, 64, 200), (byte) PathType.WALKABLE),
             new WorldOutput.Node(new Pos(101, 65, 200), (byte) PathType.WATER_BORDER),
             new WorldOutput.Node(new Pos(102, 65, 201), (byte) PathType.DOOR_OPEN));
-    ByteBuffer frame = ByteBuffer.wrap(Frames.response(7, true, nodes, 3.25f, 12, 96, 192));
+    ByteBuffer frame = ByteBuffer.wrap(Frames.response(RUN, 7, true, nodes, 3.25f, 12, 96, 192));
 
-    PathResponse decoded =
-        (PathResponse) ResponseFrame.getRootAsResponseFrame(frame).body(new PathResponse());
+    ResponseFrame root = ResponseFrame.getRootAsResponseFrame(frame);
+    assertEquals(RUN, root.run());
+    PathResponse decoded = (PathResponse) root.body(new PathResponse());
     assertEquals(7, decoded.requestId());
     assertEquals(true, decoded.reached());
     assertEquals(3.25f, decoded.cost());
@@ -217,6 +251,77 @@ class FramesTest {
     assertEquals(256 * 16 * 2, sectionReads[0]);
   }
 
+  @Test
+  void sectionsReadWholeGiveTheSameChunkWithoutReadingBlocks() {
+    WorldSource blocks = mixed(-64, 384);
+    int[] reads = {0};
+    byte[] expected = Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(blocks, 3, -2));
+    byte[] actual =
+        Frames.chunkSnapshot(
+            1,
+            0,
+            0,
+            Frames.readChunk(counting(readingSections(blocks, section -> true), reads), 3, -2));
+
+    assertArrayEquals(expected, actual);
+    assertEquals(0, reads[0]);
+  }
+
+  @Test
+  void aSectionNotReadWholeIsReadBlockByBlock() {
+    // Every other section is read whole, and the blocks above the last whole section one by one.
+    WorldSource blocks = mixed(-8, 5 * 16 + 7);
+    int[] reads = {0};
+    byte[] expected = Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(blocks, -1, 4));
+    byte[] actual =
+        Frames.chunkSnapshot(
+            1,
+            0,
+            0,
+            Frames.readChunk(
+                counting(readingSections(blocks, section -> section % 2 == 0), reads), -1, 4));
+
+    assertArrayEquals(expected, actual);
+    assertEquals(256 * (2 * 16 + 7) * 2, reads[0]);
+  }
+
+  @Test
+  void aCellTheWireCannotCarryIsRefusedWhenASectionIsReadWhole() {
+    WorldSource tooTall =
+        readingSections(source(0, 32, (x, y, z) -> Cells.MAX_FLOOR + 1), section -> true);
+    assertThrows(IllegalArgumentException.class, () -> Frames.readChunk(tooTall, 0, 0));
+    WorldSource notPerBlock =
+        readingSections(
+            new WorldSource() {
+              @Override
+              public MobClass mobClass(short classId) {
+                return null;
+              }
+
+              @Override
+              public int minY() {
+                return 0;
+              }
+
+              @Override
+              public int height() {
+                return 32;
+              }
+
+              @Override
+              public byte pathTypeAt(int x, int y, int z) {
+                return (byte) PathType.WALKABLE;
+              }
+
+              @Override
+              public int floorAt(int x, int y, int z) {
+                return 0;
+              }
+            },
+            section -> true);
+    assertThrows(IllegalArgumentException.class, () -> Frames.readChunk(notPerBlock, 0, 0));
+  }
+
   private static WorldSource counting(WorldSource inner, int[] reads) {
     return new WorldSource() {
       @Override
@@ -249,6 +354,103 @@ class FramesTest {
       @Override
       public int uniformCell(int chunkX, int chunkZ, int section) {
         return inner.uniformCell(chunkX, chunkZ, section);
+      }
+
+      @Override
+      public boolean readSection(int chunkX, int chunkZ, int section, int[] cells) {
+        return inner.readSection(chunkX, chunkZ, section, cells);
+      }
+    };
+  }
+
+  /**
+   * {@code inner}, which reads blocks one at a time, but reading the sections {@code whole} picks
+   * in one call.
+   */
+  private static WorldSource readingSections(WorldSource inner, IntPredicate whole) {
+    return new WorldSource() {
+      @Override
+      public MobClass mobClass(short classId) {
+        return null;
+      }
+
+      @Override
+      public int minY() {
+        return inner.minY();
+      }
+
+      @Override
+      public int height() {
+        return inner.height();
+      }
+
+      @Override
+      public byte pathTypeAt(int x, int y, int z) {
+        return inner.pathTypeAt(x, y, z);
+      }
+
+      @Override
+      public int floorAt(int x, int y, int z) {
+        return inner.floorAt(x, y, z);
+      }
+
+      @Override
+      public boolean readSection(int chunkX, int chunkZ, int section, int[] cells) {
+        if (!whole.test(section)) {
+          return false;
+        }
+        int minY = minY() + section * SECTION_HEIGHT;
+        for (int dx = 0; dx < Chunks.SIZE; dx++) {
+          for (int dz = 0; dz < Chunks.SIZE; dz++) {
+            for (int dy = 0; dy < SECTION_HEIGHT; dy++) {
+              int x = chunkX * Chunks.SIZE + dx;
+              int z = chunkZ * Chunks.SIZE + dz;
+              cells[(dx * Chunks.SIZE + dz) * SECTION_HEIGHT + dy] =
+                  (inner.floorAt(x, minY + dy, z) << 8) | inner.pathTypeAt(x, minY + dy, z);
+            }
+          }
+        }
+        return true;
+      }
+    };
+  }
+
+  /** Runs of every length and several cells, which differ between neighbouring columns. */
+  private static WorldSource mixed(int minY, int height) {
+    return new WorldSource() {
+      private int cell(int x, int y, int z) {
+        return switch (Math.floorMod(x * 73 + z * 31 + x * z + (y >> 2) * 17 + (y >> 5), 7)) {
+          case 0, 1 -> (Cells.FULL_FLOOR << 8) | PathType.BLOCKED;
+          case 2 -> (24 << 8) | PathType.FENCE;
+          case 3 -> PathType.WATER;
+          case 4 -> (8 << 8) | PathType.BLOCKED;
+          default -> PathType.OPEN;
+        };
+      }
+
+      @Override
+      public MobClass mobClass(short classId) {
+        return null;
+      }
+
+      @Override
+      public int minY() {
+        return minY;
+      }
+
+      @Override
+      public int height() {
+        return height;
+      }
+
+      @Override
+      public byte pathTypeAt(int x, int y, int z) {
+        return (byte) cell(x, y, z);
+      }
+
+      @Override
+      public int floorAt(int x, int y, int z) {
+        return cell(x, y, z) >> 8;
       }
     };
   }

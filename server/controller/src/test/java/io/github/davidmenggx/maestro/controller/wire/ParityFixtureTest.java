@@ -203,8 +203,16 @@ class ParityFixtureTest {
                     request.maxPathLength(),
                     request.maxVisitedNodes(),
                     request.maxFallDistance()));
+        // A request names the run and region of the area it was recorded against.
+        RequestFrame requestFrame =
+            RequestFrame.getRootAsRequestFrame(recorded.requestAsByteBuffer());
+        assertEquals(assignment.run(), requestFrame.run(), name);
+        assertEquals(assignment.regionId(), requestFrame.regionId(), name);
         assertArrayEquals(
-            bytes(recorded.requestAsByteBuffer()), Frames.requests(List.of(rebuilt), 0, 0), name);
+            bytes(recorded.requestAsByteBuffer()),
+            Frames.requests(
+                requestFrame.run(), (int) requestFrame.regionId(), List.of(rebuilt), 0, 0),
+            name);
 
         PathResponse response = response(recorded);
         List<WorldOutput.Node> nodes = new ArrayList<>();
@@ -215,6 +223,7 @@ class ParityFixtureTest {
         assertArrayEquals(
             bytes(recorded.responseAsByteBuffer()),
             Frames.response(
+                ResponseFrame.getRootAsResponseFrame(recorded.responseAsByteBuffer()).run(),
                 response.requestId(),
                 response.reached(),
                 nodes,

@@ -1,6 +1,7 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.Rng;
+import io.github.davidmenggx.maestro.controller.region.RegionGrid;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import java.util.List;
 
@@ -41,12 +42,7 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
   }
 
   public Topology {
-    if (regionSize <= 0 || regionSize % Chunks.SIZE != 0) {
-      throw new IllegalArgumentException("region size must be a multiple of " + Chunks.SIZE);
-    }
-    if (regionsPerSide < 1) {
-      throw new IllegalArgumentException("a grid holds at least one region: " + regionsPerSide);
-    }
+    new RegionGrid(regionSize, regionsPerSide);
     if (height < MIN_HEIGHT) {
       throw new IllegalArgumentException("a column is at least " + MIN_HEIGHT + " blocks");
     }
@@ -55,12 +51,17 @@ public record Topology(int regionSize, int regionsPerSide, int minY, int height,
     }
   }
 
+  /** The regions the world is divided into. */
+  public RegionGrid grid() {
+    return new RegionGrid(regionSize, regionsPerSide);
+  }
+
   /** Size of the whole grid along one axis, in blocks. */
   public int extent() {
     return regionSize * regionsPerSide;
   }
 
-  /** One node per region, because resharding is not modeled. */
+  /** One node per region, because resharding is not built. */
   public int nodeCount() {
     return regionsPerSide * regionsPerSide;
   }

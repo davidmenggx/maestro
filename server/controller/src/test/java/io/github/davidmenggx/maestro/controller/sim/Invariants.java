@@ -25,8 +25,16 @@ public final class Invariants {
       violations.addAll(node.violations());
     }
 
-    // A region's sequence never goes back, across replays and resnapshots alike.
+    // A region's sequence never goes back, across replays and resnapshots alike, a
+    // stream starts over only where it stands, and a node at a checkpoint holds what
+    // the world held then.
     violations.addAll(run.sim.streamViolations());
+
+    // The transport always opens a link with a valid `Join`.
+    long refused = run.sim.metrics().total("transport.refused");
+    if (refused > 0) {
+      violations.add(refused + " connections were refused by their node");
+    }
 
     // The controller's own bookkeeping.
     violations.addAll(run.controller.selfCheck());
@@ -124,7 +132,7 @@ public final class Invariants {
    * A node has caught up when it holds its region and has applied everything the controller
    * produced for it. A node that is behind, partitioned or dead cannot be compared.
    */
-  public static boolean caughtUp(ProbeController controller, ModeledNode node) {
+  public static boolean caughtUp(Controller controller, ModeledNode node) {
     return node.assigned() && node.lastSequence() == controller.heldSequence(node.id());
   }
 
@@ -134,7 +142,7 @@ public final class Invariants {
    * directly, not through the encoder, so an encoding bug cannot cancel out.
    */
   public static List<String> checkAgainstFreshSnapshot(SimRun run, ModeledNode node) {
-    int region = run.regions.indexOf(node.id());
+    int region = run.regions.regionOf(node.id());
     if (region < 0) {
       return List.of(node.id() + " owns no region to compare");
     }
@@ -158,9 +166,9 @@ public final class Invariants {
    * The state a node assigned {@code region} holds once it has every frame: each block of a chunk
    * the server holds, and air elsewhere, as vanilla reads a chunk it could not fetch.
    */
-  private static long freshDigest(SimRun run, int region) {
+  static long freshDigest(SimRun run, int region) {
     SimWorld world = run.world;
-    int size = run.regions.topology().regionSize();
+    int size = run.regions.regionSize();
     int height = world.height();
     byte[] cells = new byte[size * size * height];
     byte[] floors = new byte[cells.length];

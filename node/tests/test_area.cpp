@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <random>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -61,6 +62,27 @@ TEST(Column, EditsAtTheEndsKeepTheHeight) {
   const std::vector<maestro::world::Run> Expected = {
       {1, Stone}, {47, Air}, {48, Stone}};
   EXPECT_TRUE(std::ranges::equal(Top->runs(), Expected));
+}
+
+TEST(Column, SeveralEditsGiveWhatOneAtATimeGives) {
+  std::mt19937 Rng(17);
+  const std::vector<Cell> Palette = {Air, Stone, Water};
+  for (int Trial = 0; Trial < 200; ++Trial) {
+    auto Ground = std::make_shared<const Column>(
+        std::vector<maestro::world::Run>{{48, Air}});
+    for (int I = 0; I < 6; ++I)
+      Ground = Ground->with(static_cast<int>(Rng() % 48), Palette[Rng() % 3]);
+    std::vector<ColumnEdit> Edits;
+    auto OneAtATime = Ground;
+    for (int Offset = 0; Offset < 48; ++Offset)
+      if (Rng() % 4 == 0) {
+        Edits.push_back({Offset, Palette[Rng() % 3]});
+        OneAtATime = OneAtATime->with(Offset, Edits.back().Value);
+      }
+    const auto Together = Ground->with(Edits);
+    EXPECT_TRUE(std::ranges::equal(Together->runs(), OneAtATime->runs()))
+        << Trial;
+  }
 }
 
 TEST(Area, IsAirUntilAChunkArrives) {
@@ -178,4 +200,37 @@ TEST(Area, ClearingAChunkLeavesTheOthers) {
   EXPECT_EQ(After->at(16, -1, 0), Air);
   EXPECT_EQ(After->at(15, -1, 0), Stone);
   EXPECT_EQ(Before->at(16, -1, 0), Stone);
+}
+
+TEST(Area, TheLastEditToACellWinsHoweverTheEditsInterleave) {
+  // Few cells, so one delta edits most columns and cells several times, in
+  // between edits to other chunks and rows.
+  constexpr int Size = 48;
+  constexpr int MinY = -8;
+  constexpr int Height = 16;
+  maestro::test::DenseWorld Expected(Size, MinY, Height);
+  Expected.fill(0, MinY, 0, Size - 1, -1, Size - 1, Stone);
+  std::shared_ptr<const Area> Held = Expected.load();
+  std::mt19937 Rng(23);
+  const std::vector<Cell> Palette = {Air, Stone, Water,
+                                     Cell{PathType::FENCE, 24}};
+  for (int Delta = 0; Delta < 20; ++Delta) {
+    std::vector<CellEdit> Edits;
+    for (int I = 0; I < 400; ++I) {
+      const int X = static_cast<int>(Rng() % 3) * 17 % Size;
+      const int Z = static_cast<int>(Rng() % 3) * 19 % Size;
+      const int Y = MinY + static_cast<int>(Rng() % 4) * 5 % Height;
+      Edits.push_back({X, Y, Z, Palette[Rng() % Palette.size()]});
+      Expected.set(X, Y, Z, Edits.back().Value);
+    }
+    const auto Before = Held;
+    Held = Held->withCells(Edits, Held->sequence() + 1);
+    for (int X = 0; X < Size; ++X)
+      for (int Y = MinY; Y < MinY + Height; ++Y)
+        for (int Z = 0; Z < Size; ++Z)
+          ASSERT_EQ(Held->at(X, Y, Z), Expected.at(X, Y, Z))
+              << Delta << ": " << X << " " << Y << " " << Z;
+    // A column no edit touched is shared.
+    EXPECT_EQ(Held->column(1, 1), Before->column(1, 1));
+  }
 }

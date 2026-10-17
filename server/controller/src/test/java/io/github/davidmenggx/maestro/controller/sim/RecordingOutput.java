@@ -20,6 +20,9 @@ import java.util.TreeMap;
  * open. While the controller handles a repeat, the older one must be closed first, as superseded.
  * An outcome therefore always names its request: the older one if it is superseded, otherwise the
  * only one.
+ *
+ * <p>A request open when its controller process restarts has no outcome, because nothing is left to
+ * report one. It is closed as lost with the process.
  */
 public final class RecordingOutput implements WorldOutput {
 
@@ -36,12 +39,16 @@ public final class RecordingOutput implements WorldOutput {
 
   private final List<String> unmatched = new ArrayList<>();
 
+  private int issued;
+  private int lostToRestart;
+
   public RecordingOutput(Simulation sim) {
     this.sim = sim;
   }
 
   /** A request went in. Called before the controller sees it. */
   public void issued(WorldEvent.PathRequested request) {
+    issued++;
     open.computeIfAbsent(request.mobId(), mob -> new ArrayDeque<>())
         .addLast(new Open(request.tick(), request.target()));
   }
@@ -55,10 +62,26 @@ public final class RecordingOutput implements WorldOutput {
     }
   }
 
+  /** The controller process restarted, and every open request went with it. */
+  public void restarted() {
+    for (Deque<Open> requests : open.values()) {
+      lostToRestart += requests.size();
+    }
+    open.clear();
+  }
+
   @Override
   public void pathComputed(PathResult result) {
     sim.digest().mix(sim.now()).mix(result.toString());
     results.add(result);
+    // A path that reached its target ends there, in world positions. The modeled node's paths
+    // are straight lines, so this checks the positions the controller put back in the world.
+    if (result.reached()
+        && (result.nodes().isEmpty()
+            || !result.nodes().get(result.nodes().size() - 1).pos().equals(result.target()))) {
+      unmatched.add(
+          "mob " + result.mobId() + " reached " + result.target() + " but its path ends elsewhere");
+    }
     Open request = close(result.mobId(), null);
     if (request == null) {
       return;
@@ -143,6 +166,15 @@ public final class RecordingOutput implements WorldOutput {
 
   public int answered() {
     return results.size();
+  }
+
+  public int issuedCount() {
+    return issued;
+  }
+
+  /** Requests open when their controller process restarted. */
+  public int lostToRestart() {
+    return lostToRestart;
   }
 
   public int dropped(DropReason reason) {

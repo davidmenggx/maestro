@@ -4,10 +4,13 @@ import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.region.RegionMap;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.BiFunction;
 
 /**
@@ -24,12 +27,18 @@ public final class SimRun {
 
   /**
    * The SLO: p99 latency must be below this many ticks. Tighter than the admission bound in
-   * `ProbeController`, which only keeps a saturated fleet from falling further behind.
+   * `Controller`, which only keeps a saturated fleet from falling further behind.
    */
   public static final double TICK_BUDGET = 3.0;
 
   /** Sweep size when nothing sets {@code maestro.dst.runs}. */
   private static final int DEFAULT_RUNS = 100;
+
+  /**
+   * Chance per tick of a checkpoint: the state each settled region's holder must have once it
+   * reaches the stream's current sequence. A few per run, since each reads every region.
+   */
+  private static final double CHECKPOINT_CHANCE = 1.0 / 32;
 
   /**
    * Length of a fuzzed run. The active part, before {@link #DRAIN_TICKS}, must leave room for a
@@ -48,8 +57,15 @@ public final class SimRun {
   public final SimWorld world;
   public final RegionMap regions;
   public final RecordingOutput out;
-  public final ProbeController controller;
   public final Workload workload;
+
+  /** The current controller process. A restart fault replaces it. */
+  public Controller controller;
+
+  /** Requests whose start is in each node's region, per tick. What the fleet was asked to do. */
+  private final Map<NodeId, Map<Long, Integer>> offered = new LinkedHashMap<>();
+
+  private final Rng checkpointRng;
 
   /**
    * {@code quietAfter} is the tick the workload stops changing the world, from which the run
@@ -75,18 +91,32 @@ public final class SimRun {
     for (int i = 0; i < topology.nodeCount(); i++) {
       NodeId id = NodeId.of(i);
       nodes.add(id);
-      sim.addNode(id, scenario.capacityOf(i));
+      sim.addNode(id, scenario.serviceOf(i));
     }
 
-    this.regions = new RegionMap(topology, nodes);
+    this.regions = new RegionMap(topology.grid(), nodes);
     this.world =
         new SimWorld(
             topology, scenario.counts().get(Count.MOB_CLASSES), sim.rng().derive("terrain"));
     this.out = new RecordingOutput(sim);
-    this.controller =
-        new ProbeController(
-            sim.env(), world, out, regions, scenario.counts().get(Count.NODE_CAPACITY));
+    this.controller = newController();
     this.workload = workloadFactory.apply(world, sim.rng().derive("workload"));
+    this.checkpointRng = sim.rng().derive("checkpoints");
+    sim.onRestart(this::restartController);
+  }
+
+  private Controller newController() {
+    return new Controller(sim.env(), world, out, regions, scenario.assumedCapacity());
+  }
+
+  /**
+   * The controller process restarted. Every request it held is gone with it, and the new process
+   * learns the world as a starting server would: every loaded chunk, mob and player.
+   */
+  private void restartController() {
+    out.restarted();
+    controller = newController();
+    workload.replayState(sim.env().clock().tick(), controller::accept);
   }
 
   public static SimRun of(long seed, FaultPlan faults, long ticks) {
@@ -119,7 +149,12 @@ public final class SimRun {
     long ticks = MIN_FUZZED_TICKS + rng.nextLong(MAX_FUZZED_TICKS - MIN_FUZZED_TICKS + 1);
     Topology topology = Topology.sample(rng);
     Scenario scenario = Scenario.sample(rng);
-    FaultPlan faults = FaultPlan.sample(rng, topology.nodeCount(), ticks - DRAIN_TICKS);
+    FaultPlan faults =
+        FaultPlan.sample(
+            rng,
+            topology.nodeCount(),
+            ticks - DRAIN_TICKS,
+            scenario.maxCostSteps(topology.nodeCount()));
     return of(seed, faults, ticks, topology, scenario);
   }
 
@@ -147,6 +182,7 @@ public final class SimRun {
     sim.run(
         event -> {
           if (event instanceof WorldEvent.PathRequested requested) {
+            offer(requested);
             out.issued(requested);
             controller.accept(event);
             out.handled(requested);
@@ -155,8 +191,37 @@ public final class SimRun {
           }
         },
         workload,
-        ticks);
+        ticks,
+        this::afterTick);
     return this;
+  }
+
+  private void offer(WorldEvent.PathRequested requested) {
+    int region = regions.regionAt(requested.start().x(), requested.start().z());
+    if (region >= 0) {
+      offered
+          .computeIfAbsent(regions.owner(region), node -> new LinkedHashMap<>())
+          .merge(requested.tick(), 1, Integer::sum);
+    }
+  }
+
+  /**
+   * Now and then, records what each region's holder must hold once it reaches the sequence the
+   * controller produced last, for every region whose changes are all in frames.
+   */
+  private void afterTick(long tick) {
+    if (checkpointRng.nextDouble() >= CHECKPOINT_CHANCE) {
+      return;
+    }
+    for (int region = 0; region < regions.regionCount(); region++) {
+      if (controller.regionSettled(region)) {
+        sim.checkpoint(
+            sim.env().run(),
+            region,
+            controller.heldSequence(regions.owner(region)),
+            Invariants.freshDigest(this, region));
+      }
+    }
   }
 
   public List<String> violations() {
@@ -164,12 +229,27 @@ public final class SimRun {
   }
 
   /**
-   * Whether the run is one the latency SLO applies to: nothing in the fault plan could delay or
-   * lose a request, and no node was ever offered more than it serves in a tick. A run that was
-   * saturated, or hit a fault, is held only to the other invariants.
+   * Whether the run is one the latency SLO applies to, decided from what went in, not from what the
+   * controller did: nothing in the fault plan could delay or lose a request, and every node can
+   * serve what it was offered in time. A tick's batch leaves at the end of the next tick, and its
+   * answers must arrive before the tick after that ends, so each tick's requests to a node, served
+   * by its workers at their highest cost with the slowest latency each way, must fit one tick.
    */
   public boolean fitsCapacity() {
-    return faults.clean() && sim.nodes().stream().noneMatch(ModeledNode::backlogged);
+    if (!faults.clean()) {
+      return false;
+    }
+    for (ModeledNode node : sim.nodes()) {
+      ModeledNode.Service service = node.service();
+      for (int requests : offered.getOrDefault(node.id(), Map.of()).values()) {
+        long rounds = (requests + service.workers() - 1) / service.workers();
+        if (2L * faults.maxLatencySteps() + rounds * service.maxCostSteps()
+            > Simulation.STEPS_PER_TICK - 1) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   /** Chunks the fleet covers, which is the number of frames in one full send of the world. */
@@ -193,7 +273,9 @@ public final class SimRun {
         + " ticks="
         + ticks
         + " issued="
-        + controller.requestsIssued()
+        + out.issuedCount()
+        + " controllers="
+        + sim.incarnations()
         + " answered="
         + out.answered()
         + " drops="

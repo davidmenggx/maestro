@@ -30,6 +30,9 @@ struct Job {
   std::shared_ptr<const search::Profile> Mob;
   search::Request Call;
   asio::ip::udp::endpoint ReplyTo;
+  /// The controller run and the region its request frame named.
+  std::uint64_t Run = 0;
+  std::uint32_t RegionId = 0;
   /// Set by `RequestQueue::admit`.
   std::uint64_t Generation = 0;
 };
@@ -68,10 +71,16 @@ public:
   /// The next waiting job, blocking until there is one. Nothing once closed.
   std::optional<Job> take();
 
+  /// The next waiting job, or nothing if none is waiting or once closed.
+  std::optional<Job> tryTake();
+
   /// Records the answer to a job from `take`. A null `Result` means it has
   /// none, and later copies are dropped. Returns false if `clear` ran since
   /// the job was admitted, and then the answer must not be sent.
   bool settle(const Job &Finished, Answer Result, Clock::time_point Now);
+
+  /// Whether `Finished` was admitted since the last `clear`.
+  bool current(const Job &Finished) const;
 
   /// Requests waiting or running.
   std::size_t depth() const;
@@ -90,6 +99,9 @@ private:
     Answer Result;
     Clock::time_point At;
   };
+
+  /// Takes the next waiting job, if any. Requires `Mutex`.
+  std::optional<Job> next();
 
   /// Records `RequestId` as settled. Requires `Mutex`.
   void record(std::uint64_t RequestId, Answer Result, Clock::time_point Now);

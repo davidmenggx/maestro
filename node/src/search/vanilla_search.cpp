@@ -86,7 +86,7 @@ float VanillaSearch::getBestH(NodeId Id) {
     BestHeuristic = H;
     BestNode = Id;
   }
-  return std::min(H, std::numeric_limits<float>::max());
+  return H;
 }
 
 } // namespace maestro::search

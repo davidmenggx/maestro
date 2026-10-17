@@ -55,8 +55,10 @@ class HarnessGuardsTest {
   /** Any value works for a node created outside a controller. */
   private static final long RUN = 7;
 
-  private static final RegionMap ONE_REGION =
-      new RegionMap(Topology.DEFAULT.withRegionsPerSide(1), List.of(NodeId.of(0)));
+  private static final Topology ONE_REGION = Topology.DEFAULT.withRegionsPerSide(1);
+
+  /** Highest cost of one request in the sampled plans' fleet. */
+  private static final int COST = 375;
 
   private static final Pos ORIGIN = new Pos(1, 40, 1);
   private static final Pos FAR = new Pos(9, 40, 9);
@@ -125,23 +127,23 @@ class HarnessGuardsTest {
     boolean sawEdge = false;
 
     for (int seed = 0; seed < DRAWS; seed++) {
-      FaultPlan plan = FaultPlan.sample(SeededRng.of(seed).derive("fuzz"), 4, active);
+      FaultPlan plan = FaultPlan.sample(SeededRng.of(seed).derive("fuzz"), 4, active, COST);
       faultCount.see(plan.faults().size());
       minLatency.see(plan.minLatencySteps());
       maxLatency.see(plan.maxLatencySteps());
       failureRate.see(plan.offloadFailureRate());
       assertTrue(plan.maxLatencySteps() >= plan.minLatencySteps(), plan.toString());
-      assertTrue(plan.maxLatencySteps() <= FaultPlan.MAX_ONE_WAY_LATENCY_STEPS, plan.toString());
-      sawEdge |=
-          plan.clean()
-              && plan.minLatencySteps()
-                  > FaultPlan.MAX_ONE_WAY_LATENCY_STEPS - FaultPlan.EDGE_SPAN_STEPS;
+      sawEdge |= plan.clean() && plan.maxLatencySteps() == FaultPlan.edgeLatency(COST);
 
       int died = 0;
       int recovered = 0;
       for (FaultPlan.Fault fault : plan.faults()) {
         kinds.add(fault.getClass().getSimpleName());
         assertTrue(fault.tick() >= 1 && fault.tick() < active, "fault at tick " + fault.tick());
+        assertTrue(
+            fault instanceof FaultPlan.ControllerRestarted
+                || ((FaultPlan.NodeFault) fault).node().id() < 4,
+            fault.toString());
         if (fault instanceof FaultPlan.NodeDied) {
           died++;
         } else if (fault instanceof FaultPlan.NodeRecovered) {
@@ -151,34 +153,44 @@ class HarnessGuardsTest {
       sawPermanentLoss |= died > recovered;
     }
 
-    // Process death, a silent partition, a stalled stream and a link reset need
-    // four different recoveries, so the sweep must cover all of them.
-    assertEquals(Set.of("NodeDied", "NodeRecovered", "Partitioned", "Stalled", "LinkReset"), kinds);
+    // Process death, a silent partition, a stalled stream, a frozen process, a link
+    // reset and a controller restart need different recoveries, so the sweep must
+    // cover all of them.
+    assertEquals(
+        Set.of(
+            "NodeDied",
+            "NodeRecovered",
+            "Partitioned",
+            "Stalled",
+            "Paused",
+            "LinkReset",
+            "ControllerRestarted"),
+        kinds);
     // Faults must be able to accumulate on one node, or the sweep can never cover a
     // second failure during a recovery. A paired fault adds two entries, so the
     // count only needs to exceed the number of faults drawn.
     faultCount.assertCovers("fault count", 0, FaultPlan.MAX_FAULTS);
     minLatency.assertCovers("min latency", 1, FaultPlan.MAX_MIN_LATENCY_STEPS);
-    maxLatency.assertCovers("max latency", 1, FaultPlan.MAX_ONE_WAY_LATENCY_STEPS);
-    // Clean plans at the edge make a round trip take nearly a tick, but never more than the
-    // one-way limit a correct controller can absorb.
+    maxLatency.assertCovers(
+        "max latency", 1, FaultPlan.MAX_MIN_LATENCY_STEPS + FaultPlan.MAX_LATENCY_SPAN_STEPS);
+    // Clean plans at the edge make a round trip and a search take nearly a tick.
     assertTrue(sawEdge, "no clean plan put its latency at the edge");
     failureRate.assertCovers("offload failure rate", 0, FaultPlan.MAX_SAMPLED_RATE);
     assertTrue(sawPermanentLoss, "no node was ever lost for the rest of the run");
-    assertEquals(List.of(), FaultPlan.sample(SeededRng.of(1).derive("fuzz"), 0, active).faults());
+    assertEquals(
+        List.of(), FaultPlan.sample(SeededRng.of(1).derive("fuzz"), 0, active, COST).faults());
   }
 
   @Test
   void aNodeToldToResumeFromAStreamItLostSaysSo() {
     Simulation sim = new Simulation(5L, FaultPlan.reliable());
-    ModeledNode node = sim.addNode(NodeId.of(0), 4);
+    ModeledNode node = sim.addNode(NodeId.of(0), ModeledNode.Service.MANUAL);
 
     // The node holds nothing, so it cannot honor a resume.
-    SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
+    SimWorld world = new SimWorld(ONE_REGION, 2, sim.rng().derive("terrain"));
     node.receive(
         Channel.WORLD,
-        ByteBuffer.wrap(
-            Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), 0, true, world)));
+        ByteBuffer.wrap(Frames.assignment(RUN, 0, ONE_REGION.regionSize(), 0, true, world)));
 
     assertEquals(1, node.violations().size(), node.violations().toString());
     assertTrue(node.violations().get(0).contains("resume"), node.violations().toString());
@@ -187,14 +199,13 @@ class HarnessGuardsTest {
   @Test
   void aGapInTheWorldStreamIsReported() {
     Simulation sim = new Simulation(3L, FaultPlan.reliable());
-    ModeledNode node = sim.addNode(NodeId.of(0), 4);
-    SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
+    ModeledNode node = sim.addNode(NodeId.of(0), ModeledNode.Service.MANUAL);
+    SimWorld world = new SimWorld(ONE_REGION, 2, sim.rng().derive("terrain"));
     world.loadChunk(0, 0);
 
     node.receive(
         Channel.WORLD,
-        ByteBuffer.wrap(
-            Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), 0, false, world)));
+        ByteBuffer.wrap(Frames.assignment(RUN, 0, ONE_REGION.regionSize(), 0, false, world)));
     node.receive(
         Channel.WORLD,
         ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
@@ -212,17 +223,13 @@ class HarnessGuardsTest {
 
   @Test
   void theModeledNodeRefusesWhatTheRealNodeRefusesAndStartsOver() {
-    RegionMap grid = new RegionMap(Topology.DEFAULT, nodes(Topology.DEFAULT.nodeCount()));
-    SimWorld world = new SimWorld(grid.topology(), 2, SeededRng.of(1).derive("terrain"));
+    Topology grid = Topology.DEFAULT;
+    SimWorld world = new SimWorld(grid, 2, SeededRng.of(1).derive("terrain"));
     SimWorld taller =
-        new SimWorld(
-            grid.topology().withHeight(grid.topology().height() + 16),
-            2,
-            SeededRng.of(1).derive("terrain"));
+        new SimWorld(grid.withHeight(grid.height() + 16), 2, SeededRng.of(1).derive("terrain"));
     world.loadChunk(0, 0);
     WorldEvent.BlockChanged outside =
-        new WorldEvent.BlockChanged(
-            0, new Pos(grid.topology().regionSize(), 40, 1), (byte) PathType.WATER, 0);
+        new WorldEvent.BlockChanged(0, new Pos(grid.regionSize(), 40, 1), (byte) PathType.WATER, 0);
     WorldEvent.BlockChanged inside =
         new WorldEvent.BlockChanged(0, new Pos(1, 40, 1), (byte) PathType.WATER, 0);
 
@@ -232,17 +239,14 @@ class HarnessGuardsTest {
     refused.put("chunk outside the area", Frames.chunkCleared(2, 2, 0));
     refused.put("repeated sequence", Frames.chunkCleared(1, 0, 0));
     refused.put(
-        "resume of another region",
-        Frames.assignment(RUN, 1, grid.topology().regionSize(), 1, true, world));
+        "resume of another region", Frames.assignment(RUN, 1, grid.regionSize(), 1, true, world));
     refused.put(
-        "resume of another run",
-        Frames.assignment(RUN + 1, 0, grid.topology().regionSize(), 1, true, world));
+        "resume of another run", Frames.assignment(RUN + 1, 0, grid.regionSize(), 1, true, world));
     refused.put(
-        "resume of another shape",
-        Frames.assignment(RUN, 0, grid.topology().regionSize(), 1, true, taller));
+        "resume of another shape", Frames.assignment(RUN, 0, grid.regionSize(), 1, true, taller));
     refused.put(
         "resume from another sequence",
-        Frames.assignment(RUN, 0, grid.topology().regionSize(), 2, true, world));
+        Frames.assignment(RUN, 0, grid.regionSize(), 2, true, world));
     refused.put("chunk a column short", chunkWithColumns(2, Chunks.SIZE * Chunks.SIZE - 1, 0));
     refused.put(
         "chunk run too tall", chunkWithColumns(2, Chunks.SIZE * Chunks.SIZE, Cells.MAX_FLOOR + 1));
@@ -250,11 +254,10 @@ class HarnessGuardsTest {
 
     for (Map.Entry<String, byte[]> entry : refused.entrySet()) {
       Simulation sim = new Simulation(5L, FaultPlan.reliable());
-      ModeledNode node = sim.addNode(NodeId.of(0), 4);
+      ModeledNode node = sim.addNode(NodeId.of(0), ModeledNode.Service.MANUAL);
       node.receive(
           Channel.WORLD,
-          ByteBuffer.wrap(
-              Frames.assignment(RUN, 0, grid.topology().regionSize(), 0, false, world)));
+          ByteBuffer.wrap(Frames.assignment(RUN, 0, grid.regionSize(), 0, false, world)));
       node.receive(
           Channel.WORLD,
           ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
@@ -274,10 +277,10 @@ class HarnessGuardsTest {
   @Test
   void theFirstFrameMustFollowTheAssignment() {
     Simulation sim = new Simulation(3L, FaultPlan.reliable());
-    ModeledNode node = sim.addNode(NodeId.of(0), 4);
-    SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
+    ModeledNode node = sim.addNode(NodeId.of(0), ModeledNode.Service.MANUAL);
+    SimWorld world = new SimWorld(ONE_REGION, 2, sim.rng().derive("terrain"));
     world.loadChunk(0, 0);
-    int size = ONE_REGION.topology().regionSize();
+    int size = ONE_REGION.regionSize();
 
     node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 7, false, world)));
     assertEquals(7, node.lastSequence());
@@ -293,70 +296,125 @@ class HarnessGuardsTest {
   @Test
   void aCanceledRequestIsNeverServed() {
     Simulation sim = new Simulation(9L, FaultPlan.reliable());
-    ModeledNode node = sim.addNode(NodeId.of(0), 4);
+    ModeledNode node = linked(sim);
     node.receive(Channel.CONTROL, ByteBuffer.wrap(Frames.mobClass(profile((short) 3))));
-    node.receive(
-        Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(walk(5), walk(6)), 0, 0)));
+    node.receive(Channel.REQUEST, requests(walk(5), walk(6)));
 
     // An unknown id is remembered, so its request is dropped when it arrives after the cancel.
-    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.cancels(List.of(5L, 9L))));
-    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(walk(9)), 0, 0)));
-    node.service();
+    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.cancels(RUN, List.of(5L, 9L))));
+    node.receive(Channel.REQUEST, requests(walk(9)));
+    node.serve(0);
 
     assertEquals(List.of(), node.violations());
     assertEquals(1, node.canceledRequests());
     assertEquals(1, requestFramesSent(sim));
     // An answered request is left alone, and a copy still gets its answer.
-    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.cancels(List.of(6L))));
-    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(walk(6)), 0, 0)));
+    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.cancels(RUN, List.of(6L))));
+    node.receive(Channel.REQUEST, requests(walk(6)));
     assertEquals(2, requestFramesSent(sim));
   }
 
   @Test
   void aLinkResetForgetsProfilesAndRequestsButKeepsTheWorld() {
     Simulation sim = new Simulation(9L, FaultPlan.reliable());
-    NodeId id = NodeId.of(0);
-    ModeledNode node = sim.addNode(id, 4);
-    SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
+    ModeledNode node = linked(sim);
+    SimWorld world = new SimWorld(ONE_REGION, 2, sim.rng().derive("terrain"));
     world.loadChunk(0, 0);
     node.receive(
         Channel.WORLD,
-        ByteBuffer.wrap(
-            Frames.assignment(RUN, 0, ONE_REGION.topology().regionSize(), 0, false, world)));
+        ByteBuffer.wrap(Frames.assignment(RUN, 0, ONE_REGION.regionSize(), 0, false, world)));
     node.receive(
         Channel.WORLD,
         ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
     node.receive(Channel.CONTROL, ByteBuffer.wrap(Frames.mobClass(profile((short) 3))));
-    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(walk(5)), 0, 0)));
+    node.receive(Channel.REQUEST, requests(walk(5)));
     long digest = node.stateDigest();
 
-    sim.transport().resetLink(id);
-    node.service();
+    node.connectionLost();
+    node.serve(0);
 
     assertEquals(0, node.knownClassCount());
     assertEquals(0, requestFramesSent(sim), "a request from the old link was served");
     assertTrue(node.hasState());
     assertEquals(digest, node.stateDigest());
+    // A request with no link is dropped, not refused.
+    node.receive(Channel.REQUEST, requests(walk(6)));
+    assertEquals(0, requestFramesSent(sim));
   }
 
   @Test
   void aRequestNamingAnUnknownProfileIsAnsweredAtOnce() {
     Simulation sim = new Simulation(9L, FaultPlan.reliable());
-    ModeledNode node = sim.addNode(NodeId.of(0), 4);
-    WorldEvent.Search search = new WorldEvent.Search(0, 16f, 256, 3);
-    Frames.Request request =
-        new Frames.Request(5, (short) 3, new Pos(1, 40, 1), new Pos(4, 40, 4), search);
+    ModeledNode node = linked(sim);
 
-    node.receive(Channel.REQUEST, ByteBuffer.wrap(Frames.requests(List.of(request), 0, 0)));
+    node.receive(Channel.REQUEST, requests(walk(5)));
 
     // A request arriving before its profile is network behavior, not a controller
     // bug, so it is not a violation. The answer is sent immediately instead of
-    // waiting for the node's next service.
+    // waiting for a worker.
     assertEquals(List.of(), node.violations());
-    assertEquals(
-        1,
-        sim.metrics()
-            .counter("transport.sent", "node", NodeId.of(0).toString(), "channel", "REQUEST"));
+    assertEquals(1, requestFramesSent(sim));
+  }
+
+  @Test
+  void aWorkerServesARequestInItsOwnTimeAndAnswersCanFinishOutOfOrder() {
+    Simulation sim = new Simulation(9L, FaultPlan.reliable());
+    NodeId id = NodeId.of(0);
+    ModeledNode node = sim.addNode(id, new ModeledNode.Service(2, 10, 400));
+    node.connect(Channel.CONTROL, ByteBuffer.wrap(Frames.joinControl(RUN, 1)));
+    node.receive(Channel.CONTROL, ByteBuffer.wrap(Frames.mobClass(profile((short) 3))));
+    node.receive(Channel.REQUEST, requests(walk(1), walk(2), walk(3)));
+
+    // Two run at once and the third waits for a worker.
+    assertEquals(3, node.depth());
+    assertTrue(node.backlogged());
+    sim.run(event -> {}, (tick, input) -> {}, 1);
+    assertEquals(0, node.depth());
+    assertEquals(3, node.servedRequests());
+  }
+
+  @Test
+  void aJoinIsRefusedUnlessItNamesTheCurrentOrALaterAttempt() {
+    Simulation sim = new Simulation(9L, FaultPlan.reliable());
+    ModeledNode node = sim.addNode(NodeId.of(0), ModeledNode.Service.MANUAL);
+    node.connect(Channel.CONTROL, ByteBuffer.wrap(Frames.joinControl(RUN, 2)));
+    node.connect(Channel.WORLD, ByteBuffer.wrap(Frames.joinWorld(RUN, 2)));
+    assertEquals(0, sim.metrics().total("transport.refused"));
+
+    // An earlier attempt, a second connection for a joined port, and a first frame that
+    // is not a `Join` are refused.
+    node.connect(Channel.WORLD, ByteBuffer.wrap(Frames.joinWorld(RUN, 1)));
+    node.connect(Channel.CONTROL, ByteBuffer.wrap(Frames.joinControl(RUN, 2)));
+    node.connect(Channel.CONTROL, ByteBuffer.wrap(Frames.mobClass(profile((short) 3))));
+    assertEquals(3, sim.metrics().total("transport.refused"));
+
+    // Another run replaces the link, which forgets its profiles.
+    node.receive(Channel.CONTROL, ByteBuffer.wrap(Frames.mobClass(profile((short) 3))));
+    assertEquals(1, node.knownClassCount());
+    node.connect(Channel.CONTROL, ByteBuffer.wrap(Frames.joinControl(RUN + 1, 1)));
+    assertEquals(0, node.knownClassCount());
+    assertEquals(3, sim.metrics().total("transport.refused"));
+  }
+
+  @Test
+  void aProfileThatBreaksTheContractDropsTheLink() {
+    Simulation sim = new Simulation(9L, FaultPlan.reliable());
+    ModeledNode node = linked(sim);
+    FlatBufferBuilder builder = new FlatBufferBuilder(128);
+    int malus = maestro.fbs.MobClass.createMalusVector(builder, new float[PathTypes.count()]);
+    int body =
+        maestro.fbs.MobClass.createMobClass(
+            builder, 3, 0f, 1.8f, malus, 0.6f, true, false, false, false);
+    builder.finish(
+        maestro.fbs.ControlFrame.createControlFrame(
+            builder, maestro.fbs.ControlMsg.MobClass, body));
+
+    node.receive(Channel.CONTROL, ByteBuffer.wrap(builder.sizedByteArray()));
+
+    assertEquals(1, node.violations().size(), node.violations().toString());
+    assertEquals(0, node.knownClassCount());
+    node.receive(Channel.REQUEST, requests(walk(5)));
+    assertEquals(0, requestFramesSent(sim), "the link survived a broken profile");
   }
 
   @Test
@@ -426,6 +484,20 @@ class HarnessGuardsTest {
     wrong.pathComputed(answer(request(3, 2, ORIGIN)));
     assertEquals(1, wrong.ledgerViolations().size(), wrong.ledgerViolations().toString());
 
+    // A path said to reach its target must end there.
+    RecordingOutput stopsShort = new RecordingOutput(new Simulation(1L, FaultPlan.reliable()));
+    WorldEvent.PathRequested toFar = request(6, 0, FAR);
+    stopsShort.issued(toFar);
+    stopsShort.pathComputed(
+        new WorldOutput.PathResult(
+            6,
+            FAR,
+            true,
+            List.of(new WorldOutput.Node(ORIGIN, (byte) PathType.WALKABLE)),
+            1.0f,
+            0));
+    assertEquals(1, stopsShort.ledgerViolations().size(), stopsShort.ledgerViolations().toString());
+
     // An outcome with nothing open, and a request with no outcome.
     RecordingOutput unmatched = new RecordingOutput(new Simulation(1L, FaultPlan.reliable()));
     unmatched.issued(request(4, 0, ORIGIN));
@@ -436,10 +508,10 @@ class HarnessGuardsTest {
   @Test
   void aRegionStreamThatGoesBackIsReported() {
     Simulation sim = new Simulation(3L, FaultPlan.reliable());
-    ModeledNode node = sim.addNode(NodeId.of(0), 4);
-    SimWorld world = new SimWorld(ONE_REGION.topology(), 2, sim.rng().derive("terrain"));
+    ModeledNode node = sim.addNode(NodeId.of(0), ModeledNode.Service.MANUAL);
+    SimWorld world = new SimWorld(ONE_REGION, 2, sim.rng().derive("terrain"));
     world.loadChunk(0, 0);
-    int size = ONE_REGION.topology().regionSize();
+    int size = ONE_REGION.regionSize();
 
     node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 4, false, world)));
     node.receive(
@@ -447,14 +519,50 @@ class HarnessGuardsTest {
         ByteBuffer.wrap(Frames.chunkSnapshot(5, 0, 0, Frames.readChunk(world, 0, 0))));
     assertEquals(List.of(), sim.streamViolations());
 
-    // A fresh assignment may start the stream anywhere, so the node cannot check it against the
-    // old one.
+    // The node accepts a fresh assignment wherever it starts, so the harness checks that it
+    // never starts behind what was applied, and that no frame after it goes back either.
     node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 2, false, world)));
     node.receive(
         Channel.WORLD,
         ByteBuffer.wrap(Frames.chunkSnapshot(3, 0, 0, Frames.readChunk(world, 0, 0))));
     assertEquals(List.of(), node.violations());
+    assertEquals(2, sim.streamViolations().size(), sim.streamViolations().toString());
+
+    // Another controller run has a stream of its own.
+    node.receive(
+        Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN + 1, 0, size, 0, false, world)));
+    node.receive(
+        Channel.WORLD,
+        ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
+    assertEquals(2, sim.streamViolations().size(), sim.streamViolations().toString());
+  }
+
+  @Test
+  void aNodeAtACheckpointMustHoldWhatTheWorldHeld() {
+    Simulation sim = new Simulation(3L, FaultPlan.reliable());
+    ModeledNode node = sim.addNode(NodeId.of(0), ModeledNode.Service.MANUAL);
+    SimWorld world = new SimWorld(ONE_REGION, 2, sim.rng().derive("terrain"));
+    world.loadChunk(0, 0);
+    int size = ONE_REGION.regionSize();
+    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 0, false, world)));
+    node.receive(
+        Channel.WORLD,
+        ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
+    long right = node.stateDigest();
+
+    sim.checkpoint(RUN, 0, 2, right);
+    sim.checkpoint(RUN, 0, 3, right);
+    List<WorldEvent.BlockChanged> cells =
+        List.of(new WorldEvent.BlockChanged(0, new Pos(1, 40, 1), (byte) PathType.WATER, 0));
+    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.delta(2, cells, 0, 0)));
     assertEquals(1, sim.streamViolations().size(), sim.streamViolations().toString());
+    assertEquals(1, sim.checkpointsCompared());
+
+    // A fresh assignment past a checkpoint means the node never reaches it, so it is not
+    // compared.
+    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 3, false, world)));
+    node.receive(Channel.WORLD, ByteBuffer.wrap(Frames.chunkCleared(4, 0, 0)));
+    assertEquals(1, sim.checkpointsCompared());
   }
 
   @Test
@@ -526,13 +634,10 @@ class HarnessGuardsTest {
     metrics.count("frames", 2, "node", "node-0");
     metrics.count("frames", 5, "node", "node-1");
     metrics.count("frames-held", 9, "node", "node-0");
-    metrics.gauge("depth", 3, "node", "node-0");
 
     assertEquals(2, metrics.counter("frames", "node", "node-0"));
     assertEquals(5, metrics.counter("frames", "node", "node-1"));
     assertEquals(0, metrics.counter("frames"));
-    assertEquals(3, metrics.gauge("depth", "node", "node-0"));
-    assertEquals(0, metrics.gauge("depth", "node", "node-1"));
     // A total covers every label of one counter and stops at the name boundary.
     assertEquals(7, metrics.total("frames"));
     assertEquals(9, metrics.total("frames-held"));
@@ -556,7 +661,7 @@ class HarnessGuardsTest {
   void aScenarioRejectsImpossibleSettings() {
     assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.with(Count.MOBS, -1));
     assertThrows(
-        IllegalArgumentException.class, () -> Scenario.DEFAULT.with(Count.NODE_CAPACITY, 0));
+        IllegalArgumentException.class, () -> Scenario.DEFAULT.with(Count.WORKER_CAPACITY, 0));
     assertThrows(IllegalArgumentException.class, () -> Scenario.DEFAULT.with(Chance.REQUEST, 1.5));
     assertThrows(
         IllegalArgumentException.class, () -> Scenario.DEFAULT.with(Chance.CHUNK_CHURN, -0.1));
@@ -568,11 +673,25 @@ class HarnessGuardsTest {
 
   @Test
   void aSlowNodeIsTheOnlyOneServedAtAReducedRate() {
-    assertEquals(8, scenario(8, 0).capacityOf(0));
-    assertEquals(2, scenario(8, 1).capacityOf(0));
-    assertEquals(8, scenario(8, 1).capacityOf(1));
-    // A capacity that rounds to zero still serves one request per tick.
-    assertEquals(1, scenario(2, 1).capacityOf(0));
+    // A worker at 125 steps a request serves 8 a tick, and a slow node takes four times as
+    // long per request.
+    assertEquals(new ModeledNode.Service(1, 63, 187), scenario(8, 0).serviceOf(0));
+    assertEquals(new ModeledNode.Service(1, 250, 750), scenario(8, 1).serviceOf(0));
+    assertEquals(new ModeledNode.Service(1, 63, 187), scenario(8, 1).serviceOf(1));
+    assertEquals(750, scenario(8, 1).maxCostSteps(2));
+    // With no spread, every request costs the mean.
+    assertEquals(
+        new ModeledNode.Service(1, 125, 125),
+        scenario(8, 0).with(Count.COST_SPREAD_PERCENT, 0).serviceOf(0));
+  }
+
+  @Test
+  void theControllerAssumesACapacityThatCanDifferFromTheTruth() {
+    assertEquals(8, scenario(8, 0).assumedCapacity());
+    assertEquals(16, scenario(8, 0).with(Count.WORKERS, 2).assumedCapacity());
+    assertEquals(12, scenario(8, 0).with(Count.CAPACITY_ESTIMATE_PERCENT, 150).assumedCapacity());
+    // An estimate never falls below one request a tick.
+    assertEquals(1, scenario(1, 0).with(Count.CAPACITY_ESTIMATE_PERCENT, 75).assumedCapacity());
   }
 
   @Test
@@ -584,18 +703,12 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> Topology.DEFAULT.withHeight(16));
     assertThrows(IllegalArgumentException.class, () -> Topology.DEFAULT.withRelief(32));
 
-    // One node per region, no more and no fewer.
-    assertThrows(IllegalArgumentException.class, () -> new RegionMap(Topology.DEFAULT, nodes(3)));
-
-    RegionMap regions = new RegionMap(Topology.DEFAULT, nodes(4));
-    assertEquals(4, regions.count());
-    assertThrows(IllegalArgumentException.class, () -> regions.minX(4));
-    assertThrows(IllegalArgumentException.class, () -> regions.owner(-1));
+    assertEquals(Topology.DEFAULT.nodeCount(), Topology.DEFAULT.grid().regionCount());
   }
 
   @Test
   void theWorldRefusesBlocksItDoesNotHold() {
-    Topology topology = ONE_REGION.topology().withMinY(-64);
+    Topology topology = ONE_REGION.withMinY(-64);
     SimWorld world = new SimWorld(topology, 2, SeededRng.of(1L));
 
     assertEquals(-64, world.minY());
@@ -627,10 +740,13 @@ class HarnessGuardsTest {
   @Test
   void theSimulatorRefusesToBeMisused() {
     Simulation sim = new Simulation(1L, FaultPlan.reliable());
-    sim.addNode(NodeId.of(0), 1);
+    sim.addNode(NodeId.of(0), ModeledNode.Service.MANUAL);
 
-    assertThrows(IllegalArgumentException.class, () -> sim.addNode(NodeId.of(0), 1));
-    assertThrows(IllegalArgumentException.class, () -> sim.addNode(NodeId.of(1), 0));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> sim.addNode(NodeId.of(0), ModeledNode.Service.MANUAL));
+    assertThrows(IllegalArgumentException.class, () -> new ModeledNode.Service(1, 0, 1));
+    assertThrows(IllegalArgumentException.class, () -> new ModeledNode.Service(1, 5, 4));
     assertThrows(IllegalArgumentException.class, () -> sim.scheduleAt(0, "past", () -> {}));
     assertThrows(IllegalArgumentException.class, () -> sim.schedule(0, "now", () -> {}));
     assertThrows(
@@ -641,25 +757,19 @@ class HarnessGuardsTest {
   void aDatagramTooLargeToSendIsRefusedAndAFragmentedOneIsLostMoreOften() {
     Simulation sim = new Simulation(1L, FaultPlan.reliable().withDropRate(0.2));
     NodeId node = NodeId.of(0);
-    sim.addNode(node, 1);
-    SimTransport transport = sim.transport();
-    transport.listen(new NoopListener());
-    transport.connect(node, "sim://0");
-    sim.run(event -> {}, (tick, input) -> {}, 1);
+    sim.addNode(node, ModeledNode.Service.MANUAL);
+    ModeledNode.Host host = sim.transport().hostFor(node);
 
-    transport.toController(
-        node, Channel.REQUEST, ByteBuffer.allocate(SimTransport.MAX_DATAGRAM_BYTES + 1));
+    host.send(Channel.REQUEST, new byte[SimTransport.MAX_DATAGRAM_BYTES + 1]);
     assertEquals(1, sim.metrics().total("transport.oversize"));
 
     int sends = 2000;
     for (int i = 0; i < sends; i++) {
-      transport.toController(
-          node, Channel.REQUEST, ByteBuffer.allocate(SimTransport.FRAGMENT_BYTES));
+      host.send(Channel.REQUEST, new byte[SimTransport.FRAGMENT_BYTES]);
     }
     long whole = sim.metrics().total("transport.dropped");
     for (int i = 0; i < sends; i++) {
-      transport.toController(
-          node, Channel.REQUEST, ByteBuffer.allocate(8 * SimTransport.FRAGMENT_BYTES));
+      host.send(Channel.REQUEST, new byte[8 * SimTransport.FRAGMENT_BYTES]);
     }
     long fragmented = sim.metrics().total("transport.dropped") - whole;
     // One fragment is lost at the plan's 20%, and eight lose 1 - 0.8^8, about 83%.
@@ -720,13 +830,89 @@ class HarnessGuardsTest {
   @Test
   void theTransportTakesOneListenerAndOnlyKnownNodes() {
     Simulation sim = new Simulation(1L, FaultPlan.reliable());
-    sim.addNode(NodeId.of(0), 1);
-    SimTransport transport = sim.transport();
+    sim.addNode(NodeId.of(0), ModeledNode.Service.MANUAL);
+    Transport transport = sim.env().transport();
 
-    assertThrows(IllegalStateException.class, () -> transport.connect(NodeId.of(0), "sim://0"));
+    assertThrows(IllegalStateException.class, () -> transport.connect(NodeId.of(0)));
     transport.listen(new NoopListener());
     assertThrows(IllegalStateException.class, () -> transport.listen(new NoopListener()));
-    assertThrows(IllegalArgumentException.class, () -> transport.connect(NodeId.of(7), "sim://7"));
+    assertThrows(IllegalArgumentException.class, () -> transport.connect(NodeId.of(7)));
+  }
+
+  @Test
+  void everyConnectAttemptEndsInExactlyOneCallback() {
+    Simulation sim = new Simulation(1L, FaultPlan.reliable());
+    NodeId id = NodeId.of(0);
+    ModeledNode node = sim.addNode(id, ModeledNode.Service.MANUAL);
+    CountingListener listener = new CountingListener();
+    Transport transport = sim.env().transport();
+    transport.listen(listener);
+
+    // The node dies while the attempt is pending, so it fails.
+    transport.connect(id);
+    sim.transport().kill(id);
+    sim.run(event -> {}, (tick, input) -> {}, 1);
+    assertEquals(0, listener.connected);
+    assertEquals(1, listener.disconnected);
+
+    sim.transport().revive(id);
+    transport.connect(id);
+    sim.run(event -> {}, (tick, input) -> {}, 1);
+    assertEquals(1, listener.connected);
+    // The link opened with a `Join` on each connection, and the node said hello.
+    assertEquals(0, sim.metrics().total("transport.refused"));
+    assertTrue(listener.frames >= 1, "no hello");
+
+    // A link the controller closes is not reported back, and the node forgets it.
+    node.receive(Channel.CONTROL, ByteBuffer.wrap(Frames.mobClass(profile((short) 3))));
+    transport.disconnect(id);
+    sim.run(event -> {}, (tick, input) -> {}, 1);
+    assertEquals(1, listener.disconnected);
+    assertEquals(0, node.knownClassCount());
+  }
+
+  @Test
+  void overlappingFaultsOfOneKindEndOnlyWhenEveryIntervalHas() {
+    Simulation sim = new Simulation(1L, FaultPlan.reliable());
+    NodeId id = NodeId.of(0);
+    sim.addNode(id, ModeledNode.Service.MANUAL);
+    SimTransport transport = sim.transport();
+
+    transport.kill(id);
+    transport.kill(id);
+    transport.revive(id);
+    assertFalse(transport.alive(id), "the first recovery ended both deaths");
+    transport.revive(id);
+    assertTrue(transport.alive(id));
+    // A recovery with no death is nothing to end.
+    transport.revive(id);
+    transport.kill(id);
+    assertFalse(transport.alive(id));
+  }
+
+  @Test
+  void aPausedNodeHandlesWhatReachedItOnlyOnceItResumes() {
+    Simulation sim = new Simulation(1L, FaultPlan.reliable());
+    NodeId id = NodeId.of(0);
+    ModeledNode node = sim.addNode(id, new ModeledNode.Service(1, 1, 1));
+    Transport transport = sim.env().transport();
+    CountingListener listener = new CountingListener();
+    transport.listen(listener);
+    transport.connect(id);
+    sim.run(event -> {}, (tick, input) -> {}, 1);
+    transport.send(id, Channel.CONTROL, ByteBuffer.wrap(Frames.mobClass(profile((short) 3))));
+    sim.run(event -> {}, (tick, input) -> {}, 1);
+
+    sim.transport().pause(id, true);
+    transport.send(id, Channel.REQUEST, requests(sim.env().run(), walk(5)));
+    sim.run(event -> {}, (tick, input) -> {}, 30);
+    assertEquals(0, node.servedRequests());
+    int heard = listener.frames;
+
+    sim.transport().pause(id, false);
+    sim.run(event -> {}, (tick, input) -> {}, 1);
+    assertEquals(1, node.servedRequests());
+    assertTrue(listener.frames > heard, "the answer never came");
   }
 
   /**
@@ -760,7 +946,12 @@ class HarnessGuardsTest {
 
   private static WorldOutput.PathResult answer(WorldEvent.PathRequested request) {
     return new WorldOutput.PathResult(
-        request.mobId(), request.target(), true, List.of(), 1.0f, request.tick());
+        request.mobId(),
+        request.target(),
+        true,
+        List.of(new WorldOutput.Node(request.target(), (byte) PathType.WALKABLE)),
+        1.0f,
+        request.tick());
   }
 
   /** A delta with one cell of {@code floor}, which the encoder refuses to build past the limit. */
@@ -782,6 +973,22 @@ class HarnessGuardsTest {
         new float[PathTypes.count()]);
   }
 
+  /** A node joined to a link of {@link #RUN}. */
+  private static ModeledNode linked(Simulation sim) {
+    ModeledNode node = sim.addNode(NodeId.of(0), ModeledNode.Service.MANUAL);
+    node.connect(Channel.WORLD, ByteBuffer.wrap(Frames.joinWorld(RUN, 1)));
+    node.connect(Channel.CONTROL, ByteBuffer.wrap(Frames.joinControl(RUN, 1)));
+    return node;
+  }
+
+  private static ByteBuffer requests(Frames.Request... batch) {
+    return requests(RUN, batch);
+  }
+
+  private static ByteBuffer requests(long run, Frames.Request... batch) {
+    return ByteBuffer.wrap(Frames.requests(run, 0, List.of(batch), 0, 0));
+  }
+
   /** A request of class 3 from {@link #ORIGIN} to {@link #FAR}. */
   private static Frames.Request walk(long requestId) {
     return new Frames.Request(
@@ -795,11 +1002,10 @@ class HarnessGuardsTest {
   }
 
   private static Scenario scenario(int capacity, int slowNodes) {
-    return Scenario.DEFAULT.with(Count.NODE_CAPACITY, capacity).with(Count.SLOW_NODES, slowNodes);
-  }
-
-  private static List<NodeId> nodes(int count) {
-    return IntStream.range(0, count).mapToObj(NodeId::of).toList();
+    return Scenario.DEFAULT
+        .with(Count.WORKERS, 1)
+        .with(Count.WORKER_CAPACITY, capacity)
+        .with(Count.SLOW_NODES, slowNodes);
   }
 
   private static int firstIndex(List<WorldEvent> events, Class<? extends WorldEvent> kind) {
@@ -835,6 +1041,28 @@ class HarnessGuardsTest {
       assertTrue(
           this.high >= high - margin,
           label + ": highest draw was " + this.high + ", ceiling is " + high);
+    }
+  }
+
+  private static final class CountingListener implements Transport.Listener {
+
+    private int frames;
+    private int connected;
+    private int disconnected;
+
+    @Override
+    public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
+      frames++;
+    }
+
+    @Override
+    public void onConnected(NodeId node) {
+      connected++;
+    }
+
+    @Override
+    public void onDisconnected(NodeId node) {
+      disconnected++;
     }
   }
 

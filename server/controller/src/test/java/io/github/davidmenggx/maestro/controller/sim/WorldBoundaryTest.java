@@ -161,7 +161,8 @@ class WorldBoundaryTest {
         run.chunkCount() + 2,
         run.sim.metrics().counter("offload.submitted", "job", "chunk"),
         run.describe());
-    assertEquals(run.regions.count(), run.sim.metrics().total("world.resnapshot"), run.describe());
+    assertEquals(
+        run.regions.regionCount(), run.sim.metrics().total("world.resnapshot"), run.describe());
   }
 
   @Test
@@ -222,7 +223,7 @@ class WorldBoundaryTest {
     assertEquals(1, run.controller.outstandingCount(), run.describe());
     NodeId owner = run.regions.owner(run.regions.regionAt(HERE.x(), HERE.z()));
 
-    run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST, 200));
+    run.controller.onFrame(owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, 200));
     // A datagram that is not a frame at all, as from a sender that is not a node.
     run.controller.onFrame(owner, Channel.REQUEST, ByteBuffer.wrap(new byte[] {9, 0, 0, 0, 1}));
     assertEquals(1, run.controller.outstandingCount(), run.describe());
@@ -230,11 +231,13 @@ class WorldBoundaryTest {
 
     // A well-formed answer from a node the request did not go to.
     NodeId other = run.regions.owner(run.regions.regionAt(THERE.x(), THERE.z()));
-    run.controller.onFrame(other, Channel.REQUEST, answer(FIRST_REQUEST, PathType.WALKABLE));
+    run.controller.onFrame(
+        other, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, PathType.WALKABLE));
     assertEquals(1, run.controller.outstandingCount(), run.describe());
     assertEquals(1, run.sim.metrics().total("path.response.misrouted"), run.describe());
 
-    run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST, PathType.WALKABLE));
+    run.controller.onFrame(
+        owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, PathType.WALKABLE));
     assertEquals(0, run.controller.outstandingCount(), run.describe());
     assertEquals(1, run.out.answered(), run.describe());
   }
@@ -248,7 +251,8 @@ class WorldBoundaryTest {
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 3, script).go();
     NodeId owner = run.regions.owner(run.regions.regionAt(HERE.x(), HERE.z()));
 
-    run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST, PathType.WALKABLE, 0));
+    run.controller.onFrame(
+        owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, PathType.WALKABLE, 0));
 
     assertEquals(0, run.controller.outstandingCount(), run.describe());
     assertEquals(0, run.out.answered(), run.describe());
@@ -270,11 +274,13 @@ class WorldBoundaryTest {
     assertEquals(1, run.out.dropped(DropReason.SUPERSEDED), run.describe());
     assertEquals(2, run.controller.outstandingCount(), run.describe());
 
-    run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST, PathType.WALKABLE));
+    run.controller.onFrame(
+        owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, PathType.WALKABLE));
     assertEquals(1, run.controller.outstandingCount(), run.describe());
     assertEquals(0, run.out.answered(), run.describe());
 
-    run.controller.onFrame(owner, Channel.REQUEST, answer(FIRST_REQUEST + 1, PathType.WALKABLE));
+    run.controller.onFrame(
+        owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST + 1, PathType.WALKABLE));
     assertEquals(0, run.controller.outstandingCount(), run.describe());
     assertEquals(1, run.out.answered(), run.describe());
     assertEquals(List.of(), run.controller.selfCheck(), run.describe());
@@ -325,11 +331,18 @@ class WorldBoundaryTest {
       script.add(new WorldEvent.MobSpawned(0, mob, HERE));
       script.add(new WorldEvent.PathRequested(5, mob, MOB_CLASS, HERE, THERE, SEARCH));
     }
-    Scenario oneAtATime = Scenario.DEFAULT.with(Scenario.Count.NODE_CAPACITY, 1);
+    // One worker serves exactly one request a tick, as admission assumes.
+    Scenario oneAtATime =
+        Scenario.DEFAULT
+            .with(Scenario.Count.WORKER_CAPACITY, 1)
+            .with(Scenario.Count.WORKERS, 1)
+            .with(Scenario.Count.COST_SPREAD_PERCENT, 0);
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, oneAtATime, script).go();
 
-    int admitted = ProbeController.MAX_TICKS_LATE - ProbeController.SEND_TICKS + 1;
+    // Each admitted request is answered once the ones ahead of it and itself are served,
+    // and the last within the budget.
+    int admitted = Controller.MAX_TICKS_LATE - Controller.SEND_TICKS;
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(admitted, run.out.answered(), run.describe());
     assertEquals(mobs - admitted, run.out.dropped(DropReason.QUEUE_DEPTH), run.describe());
@@ -449,7 +462,7 @@ class WorldBoundaryTest {
     SimRun run = SimRun.scripted(1L, plan, TICKS, script).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    assertEquals(ProbeController.MAX_RESENDS, run.sim.metrics().total("path.resent"));
+    assertEquals(Controller.MAX_RESENDS, run.sim.metrics().total("path.resent"));
     assertEquals(1, run.out.dropped(DropReason.TIMEOUT), run.describe());
     assertEquals(0, run.out.answered(), run.describe());
   }
@@ -467,22 +480,22 @@ class WorldBoundaryTest {
   }
 
   /** An answer to {@code requestId} whose one node has the type {@code type}. */
-  private static ByteBuffer answer(long requestId, int type) {
-    return answer(requestId, type, 1);
+  private static ByteBuffer answer(long run, long requestId, int type) {
+    return answer(run, requestId, type, 1);
   }
 
   /**
    * As above, searched at {@code worldSequence}. Each region of the default grid is one chunk,
    * which its first frame, sequence 1, carries.
    */
-  private static ByteBuffer answer(long requestId, int type, long worldSequence) {
+  private static ByteBuffer answer(long run, long requestId, int type, long worldSequence) {
     FlatBufferBuilder builder = new FlatBufferBuilder(128);
     PathResponse.startNodesVector(builder, 1);
     PathNode.createPathNode(builder, (short) HERE.x(), (short) HERE.y(), (short) HERE.z(), type);
     int nodes = builder.endVector();
     int body =
         PathResponse.createPathResponse(builder, requestId, true, nodes, 1.0f, worldSequence);
-    builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, body));
+    builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, body, run));
     return ByteBuffer.wrap(builder.sizedByteArray());
   }
 

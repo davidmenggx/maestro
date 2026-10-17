@@ -16,6 +16,7 @@ import maestro.fbs.CellRun;
 import maestro.fbs.ChunkSnapshot;
 import maestro.fbs.ControlFrame;
 import maestro.fbs.ControlMsg;
+import maestro.fbs.Join;
 import maestro.fbs.PathCancel;
 import maestro.fbs.PathNode;
 import maestro.fbs.PathRequest;
@@ -92,22 +93,15 @@ public final class Frames {
   public static final class ChunkRuns {
 
     private final int[] runsPerColumn = new int[COLUMNS_PER_CHUNK];
-    // Flat terrain has two runs per column, so most chunks end up this size.
-    private int[] packedRuns = new int[COLUMNS_PER_CHUNK * 2];
+    private int[] packedRuns;
     private int runCount;
-
-    private void add(int length, int cell) {
-      if (runCount == packedRuns.length) {
-        packedRuns = Arrays.copyOf(packedRuns, runCount * 2);
-      }
-      packedRuns[runCount++] = (uint16(length) << 16) | cell;
-    }
   }
 
   /**
    * Reads one chunk from the world. The world can only be read on the main thread, so this is
    * separate from the encoding, which runs on another thread. A section the source reports as
-   * uniform is not read block by block, so the cost follows terrain complexity, not world height.
+   * uniform is not read block by block, so the cost follows terrain complexity, not world height,
+   * and a section the source can read whole is read in one call.
    */
   public static ChunkRuns readChunk(WorldSource world, int chunkX, int chunkZ) {
     int minX = chunkX * Chunks.SIZE;
@@ -115,48 +109,111 @@ public final class Frames {
     int minY = world.minY();
     int height = world.height();
     int sections = height / WorldSource.SECTION_HEIGHT;
-    int[] uniform = new int[sections];
+    RunBuilder runs = new RunBuilder();
+    int[] sectionCells = null;
     for (int section = 0; section < sections; section++) {
-      int cell = world.uniformCell(chunkX, chunkZ, section);
-      uniform[section] = cell == WorldSource.NOT_UNIFORM ? cell : cell(cell >> 8, (byte) cell);
+      int bottom = section * WorldSource.SECTION_HEIGHT;
+      int uniform = world.uniformCell(chunkX, chunkZ, section);
+      if (uniform != WorldSource.NOT_UNIFORM) {
+        int cell = cell(uniform >> 8, (byte) uniform);
+        for (int column = 0; column < COLUMNS_PER_CHUNK; column++) {
+          runs.add(column, cell, WorldSource.SECTION_HEIGHT);
+        }
+        continue;
+      }
+      if (sectionCells == null) {
+        sectionCells = new int[COLUMNS_PER_CHUNK * WorldSource.SECTION_HEIGHT];
+      }
+      if (!world.readSection(chunkX, chunkZ, section, sectionCells)) {
+        readBlocks(world, minX, minY + bottom, minZ, WorldSource.SECTION_HEIGHT, runs);
+        continue;
+      }
+      for (int column = 0; column < COLUMNS_PER_CHUNK; column++) {
+        int end = (column + 1) * WorldSource.SECTION_HEIGHT;
+        for (int i = column * WorldSource.SECTION_HEIGHT; i < end; ) {
+          int read = sectionCells[i];
+          int length = 1;
+          while (i + length < end && sectionCells[i + length] == read) {
+            length++;
+          }
+          runs.add(column, cell(read >> 8, (byte) read), length);
+          i += length;
+        }
+      }
     }
-    ChunkRuns runs = new ChunkRuns();
+    int top = sections * WorldSource.SECTION_HEIGHT;
+    readBlocks(world, minX, minY + top, minZ, height - top, runs);
+    return runs.finish();
+  }
+
+  /** Reads {@code layers} blocks of every column from {@code y} up, one block at a time. */
+  private static void readBlocks(
+      WorldSource world, int minX, int y, int minZ, int layers, RunBuilder runs) {
     for (int dx = 0; dx < Chunks.SIZE; dx++) {
       for (int dz = 0; dz < Chunks.SIZE; dz++) {
         int x = minX + dx;
         int z = minZ + dz;
-        int closedRuns = 0;
-        int runLength = 0;
-        int runCell = 0;
-        for (int dy = 0; dy < height; ) {
-          int section = dy / WorldSource.SECTION_HEIGHT;
-          int cell;
-          int length;
-          if (section < sections && uniform[section] != WorldSource.NOT_UNIFORM) {
-            cell = uniform[section];
-            length = WorldSource.SECTION_HEIGHT;
-          } else {
-            int y = minY + dy;
-            cell = cell(world.floorAt(x, y, z), world.pathTypeAt(x, y, z));
-            length = 1;
-          }
-          dy += length;
-          if (runLength > 0 && cell == runCell) {
-            runLength += length;
-            continue;
-          }
-          if (runLength > 0) {
-            runs.add(runLength, runCell);
-            closedRuns++;
-          }
-          runCell = cell;
-          runLength = length;
+        int column = dx * Chunks.SIZE + dz;
+        for (int dy = 0; dy < layers; dy++) {
+          runs.add(column, cell(world.floorAt(x, y + dy, z), world.pathTypeAt(x, y + dy, z)), 1);
         }
-        runs.add(runLength, runCell);
-        runs.runsPerColumn[dx * Chunks.SIZE + dz] = closedRuns + 1;
       }
     }
-    return runs;
+  }
+
+  /**
+   * Run-length encodes a chunk read a section at a time, from the bottom up. Each column keeps its
+   * open run. Runs are kept in the order they close and put in column order at the end, which keeps
+   * each column's runs in height order.
+   */
+  private static final class RunBuilder {
+
+    private final ChunkRuns runs = new ChunkRuns();
+    private final int[] openCell = new int[COLUMNS_PER_CHUNK];
+    private final int[] openLength = new int[COLUMNS_PER_CHUNK];
+    // Each closed run as `(column << 32) | packed run`. Flat terrain has two runs per column, so
+    // most chunks fit the first size.
+    private long[] closed = new long[COLUMNS_PER_CHUNK * 2];
+    private int closedCount;
+
+    void add(int column, int cell, int length) {
+      if (openLength[column] > 0) {
+        if (openCell[column] == cell) {
+          openLength[column] += length;
+          return;
+        }
+        close(column);
+      }
+      openCell[column] = cell;
+      openLength[column] = length;
+    }
+
+    private void close(int column) {
+      if (closedCount == closed.length) {
+        closed = Arrays.copyOf(closed, closedCount * 2);
+      }
+      int run = (uint16(openLength[column]) << 16) | openCell[column];
+      closed[closedCount++] = ((long) column << 32) | (run & 0xFFFFFFFFL);
+      runs.runsPerColumn[column]++;
+    }
+
+    /** Closes every column's last run, even an empty one, and returns the runs by column. */
+    ChunkRuns finish() {
+      for (int column = 0; column < COLUMNS_PER_CHUNK; column++) {
+        close(column);
+      }
+      int[] next = new int[COLUMNS_PER_CHUNK];
+      for (int column = 1; column < COLUMNS_PER_CHUNK; column++) {
+        next[column] = next[column - 1] + runs.runsPerColumn[column - 1];
+      }
+      runs.packedRuns = new int[closedCount];
+      runs.runCount = closedCount;
+      for (int i = 0; i < closedCount; i++) {
+        long entry = closed[i];
+        runs.packedRuns[next[(int) (entry >>> 32)]++] = (int) entry;
+      }
+      return runs;
+    }
   }
 
   /** {@code chunkX} and {@code chunkZ} are indices within the area, not world coordinates. */
@@ -217,8 +274,38 @@ public final class Frames {
     return builder.sizedByteArray();
   }
 
-  /** At most {@link #MAX_REQUESTS_PER_FRAME} requests, so the frame fits one datagram. */
-  public static byte[] requests(List<Request> batch, int originX, int originZ) {
+  /** The first frame on a link's world connection. See {@link #joinControl}. */
+  public static byte[] joinWorld(long run, long link) {
+    FlatBufferBuilder builder = builder();
+    int join = join(builder, run, link);
+    builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.Join, join));
+    return builder.sizedByteArray();
+  }
+
+  /**
+   * The first frame on a link's control connection. {@code link} counts the controller's attempts
+   * to connect to the node, so the node pairs the two connections of one attempt.
+   */
+  public static byte[] joinControl(long run, long link) {
+    FlatBufferBuilder builder = builder();
+    int join = join(builder, run, link);
+    builder.finish(ControlFrame.createControlFrame(builder, ControlMsg.Join, join));
+    return builder.sizedByteArray();
+  }
+
+  private static int join(FlatBufferBuilder builder, long run, long link) {
+    if (run == 0 || link <= 0) {
+      throw new IllegalArgumentException("a link needs a run and a positive attempt: " + link);
+    }
+    return Join.createJoin(builder, run, link);
+  }
+
+  /**
+   * At most {@link #MAX_REQUESTS_PER_FRAME} requests, so the frame fits one datagram. {@code run}
+   * and {@code regionId} name the link and the area the requests are for.
+   */
+  public static byte[] requests(
+      long run, int regionId, List<Request> batch, int originX, int originZ) {
     if (batch.size() > MAX_REQUESTS_PER_FRAME) {
       throw new IllegalArgumentException(
           "a request frame carries at most " + MAX_REQUESTS_PER_FRAME);
@@ -244,7 +331,8 @@ public final class Frames {
     PathRequestBatch.addRequests(builder, requestsVector);
     int batchOffset = PathRequestBatch.endPathRequestBatch(builder);
     builder.finish(
-        RequestFrame.createRequestFrame(builder, RequestMsg.PathRequestBatch, batchOffset));
+        RequestFrame.createRequestFrame(
+            builder, RequestMsg.PathRequestBatch, batchOffset, run, regionId));
     return builder.sizedByteArray();
   }
 
@@ -252,7 +340,7 @@ public final class Frames {
    * Requests the controller no longer wants, at most {@link #MAX_CANCELS_PER_FRAME}, so the frame
    * fits one datagram.
    */
-  public static byte[] cancels(List<Long> requestIds) {
+  public static byte[] cancels(long run, List<Long> requestIds) {
     if (requestIds.size() > MAX_CANCELS_PER_FRAME) {
       throw new IllegalArgumentException("a cancel frame carries at most " + MAX_CANCELS_PER_FRAME);
     }
@@ -263,7 +351,7 @@ public final class Frames {
     }
     int vector = PathCancel.createRequestIdsVector(builder, ids);
     int cancel = PathCancel.createPathCancel(builder, vector);
-    builder.finish(RequestFrame.createRequestFrame(builder, RequestMsg.PathCancel, cancel));
+    builder.finish(RequestFrame.createRequestFrame(builder, RequestMsg.PathCancel, cancel, run, 0));
     return builder.sizedByteArray();
   }
 
@@ -328,6 +416,7 @@ public final class Frames {
    * this form so they compare directly with what a node returns.
    */
   public static byte[] response(
+      long run,
       long requestId,
       boolean reached,
       List<WorldOutput.Node> nodes,
@@ -355,7 +444,8 @@ public final class Frames {
     PathResponse.addCost(builder, cost);
     PathResponse.addWorldSequence(builder, worldSequence);
     int response = PathResponse.endPathResponse(builder);
-    builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, response));
+    builder.finish(
+        ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, response, run));
     return builder.sizedByteArray();
   }
 

@@ -173,6 +173,12 @@ class FuzzTest {
     long abandonedAnswers = 0;
     long answersBehindTheirChunk = 0;
     long canceledInQueue = 0;
+    long restarts = 0;
+    long lostToRestart = 0;
+    long foreignAnswers = 0;
+    long pausedRuns = 0;
+    long checkpoints = 0;
+    long deferredReads = 0;
 
     // This checks what the sampler reaches, not any one run, so it uses its own size
     // regardless of `maestro.dst.runs`. A few seeds cannot reach every outcome, and a
@@ -186,7 +192,11 @@ class FuzzTest {
       boolean held = run.fitsCapacity() && run.out.answered() > 0;
       heldToTheSlo += held ? 1 : 0;
       heldAtTheEdge +=
-          held && run.faults.maxLatencySteps() == FaultPlan.MAX_ONE_WAY_LATENCY_STEPS ? 1 : 0;
+          held
+                  && run.faults.maxLatencySteps()
+                      == FaultPlan.edgeLatency(run.scenario.maxCostSteps(run.topology.nodeCount()))
+              ? 1
+              : 0;
       abandonedAnswers += run.sim.metrics().total("path.response.abandoned");
       answersBehindTheirChunk += run.sim.metrics().total("path.response.behind");
       regionSizes.add(run.topology.regionSize());
@@ -201,7 +211,14 @@ class FuzzTest {
       overtakenProfiles += run.sim.metrics().total("path.profile.unknown");
       encodeRetries += run.sim.metrics().total("offload.retried");
       resends += run.sim.metrics().total("path.resent");
-      framesHeld += run.fleetCounter("transport.held", Channel.WORLD);
+      framesHeld += run.fleetCounter("transport.held.partition", Channel.WORLD);
+      restarts += run.sim.incarnations() - 1;
+      lostToRestart += run.out.lostToRestart();
+      foreignAnswers += run.sim.metrics().total("path.response.foreign");
+      pausedRuns +=
+          run.faults.faults().stream().anyMatch(fault -> fault instanceof FaultPlan.Paused) ? 1 : 0;
+      checkpoints += run.sim.checkpointsCompared();
+      deferredReads += run.sim.metrics().total("world.chunks.deferred");
       for (ModeledNode node : run.sim.nodes()) {
         nodesCompared += Invariants.caughtUp(run.controller, node) ? 1 : 0;
         canceledInQueue += node.canceledRequests();
@@ -232,5 +249,21 @@ class FuzzTest {
     assertTrue(abandonedAnswers > 0, "no node ever answered a request after it was abandoned");
     assertTrue(answersBehindTheirChunk > 0, "no node ever searched before its start chunk arrived");
     assertTrue(canceledInQueue > 0, "no cancel ever reached a request still waiting on its node");
+    assertTrue(restarts > 0, "the controller process never restarted");
+    assertTrue(lostToRestart > 0, "no request was open when its controller restarted");
+    assertTrue(foreignAnswers > 0, "no answer for an earlier controller run reached a new one");
+    assertTrue(pausedRuns > 0, "no node process was ever paused");
+    assertTrue(checkpoints > 0, "no node ever reached a mid-run checkpoint");
+    assertTrue(deferredReads > 0, "chunk reads never ran past one tick's budget");
+    System.out.println(
+        "coverage: "
+            + heldToTheSlo
+            + " of "
+            + seeds
+            + " seeds held to the SLO, "
+            + heldAtTheEdge
+            + " at the edge, "
+            + checkpoints
+            + " checkpoints compared");
   }
 }

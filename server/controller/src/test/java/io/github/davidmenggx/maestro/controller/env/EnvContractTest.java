@@ -38,7 +38,10 @@ class EnvContractTest {
         public void send(NodeId node, Channel channel, ByteBuffer frame) {}
 
         @Override
-        public void connect(NodeId node, String endpoint) {}
+        public void connect(NodeId node) {}
+
+        @Override
+        public void disconnect(NodeId node) {}
 
         @Override
         public void listen(Listener listener) {}
@@ -72,20 +75,25 @@ class EnvContractTest {
   }
 
   @Test
-  void anEnvironmentHasEverySeam() {
+  void anEnvironmentHasEverySeamAndARun() {
     Rng rng = SeededRng.of(1L);
-    new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS);
+    new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, 1);
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(null, rng, OFFLOAD, TRANSPORT, METRICS));
+        () -> new ControllerEnv(null, rng, OFFLOAD, TRANSPORT, METRICS, 1));
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(CLOCK, null, OFFLOAD, TRANSPORT, METRICS));
+        () -> new ControllerEnv(CLOCK, null, OFFLOAD, TRANSPORT, METRICS, 1));
     assertThrows(
-        NullPointerException.class, () -> new ControllerEnv(CLOCK, rng, null, TRANSPORT, METRICS));
+        NullPointerException.class,
+        () -> new ControllerEnv(CLOCK, rng, null, TRANSPORT, METRICS, 1));
     assertThrows(
-        NullPointerException.class, () -> new ControllerEnv(CLOCK, rng, OFFLOAD, null, METRICS));
+        NullPointerException.class, () -> new ControllerEnv(CLOCK, rng, OFFLOAD, null, METRICS, 1));
     assertThrows(
-        NullPointerException.class, () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, null));
+        NullPointerException.class,
+        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, null, 1));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, 0));
   }
 }

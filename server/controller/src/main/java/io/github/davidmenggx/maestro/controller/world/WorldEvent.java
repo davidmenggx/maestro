@@ -3,9 +3,8 @@ package io.github.davidmenggx.maestro.controller.world;
 import java.util.Objects;
 
 /**
- * Everything the controller learns about the world. Production emits these from mixins and the
- * simulator replays them from a trace or generator. Events arrive on the server main thread in tick
- * order.
+ * Everything the controller learns about the world, from the server or from the simulator's trace
+ * or generator. Events arrive on the server main thread in tick order.
  *
  * <p>Mob and player positions are reported only where the controller needs them. A request carries
  * its own start, so per-tick movement does not cross the boundary.
@@ -91,19 +90,41 @@ public sealed interface WorldEvent {
     /** Largest fall distance the wire carries. */
     public static final int MAX_FALL_DISTANCE = 0xFFFF;
 
+    /**
+     * Largest path length bound taken, the follow range attribute's maximum. How far a search reads
+     * is derived from it, so a larger bound would overflow that.
+     */
+    public static final float MAX_PATH_LENGTH = 2048f;
+
     public Search {
-      if (reachRange < 0 || reachRange > MAX_REACH_RANGE) {
-        throw new IllegalArgumentException("reach range out of range: " + reachRange);
+      if (!fits(reachRange, maxPathLength, maxVisitedNodes, maxFallDistance)) {
+        throw new IllegalArgumentException(
+            "not a search the wire carries: reach "
+                + reachRange
+                + ", length "
+                + maxPathLength
+                + ", visits "
+                + maxVisitedNodes
+                + ", fall "
+                + maxFallDistance);
       }
-      if (Float.isNaN(maxPathLength) || maxPathLength <= 0) {
-        throw new IllegalArgumentException("path length bound must be positive: " + maxPathLength);
-      }
-      if (maxVisitedNodes < 1 || maxVisitedNodes > MAX_VISITED_NODES) {
-        throw new IllegalArgumentException("visit budget out of range: " + maxVisitedNodes);
-      }
-      if (maxFallDistance < 0 || maxFallDistance > MAX_FALL_DISTANCE) {
-        throw new IllegalArgumentException("fall distance out of range: " + maxFallDistance);
-      }
+    }
+
+    /**
+     * Whether a search with these inputs may be made: each fits its wire field, and the path length
+     * bound is positive and at most {@link #MAX_PATH_LENGTH}, since how far the search reads is
+     * derived from it.
+     */
+    public static boolean fits(
+        int reachRange, float maxPathLength, int maxVisitedNodes, int maxFallDistance) {
+      return reachRange >= 0
+          && reachRange <= MAX_REACH_RANGE
+          && maxPathLength > 0
+          && maxPathLength <= MAX_PATH_LENGTH
+          && maxVisitedNodes >= 1
+          && maxVisitedNodes <= MAX_VISITED_NODES
+          && maxFallDistance >= 0
+          && maxFallDistance <= MAX_FALL_DISTANCE;
     }
   }
 
@@ -128,8 +149,8 @@ public sealed interface WorldEvent {
 
   /**
    * The mob no longer wants a path because it lost its target or stopped hunting. A request that
-   * has not left yet is never sent. One already sent is still served by its node, which nobody
-   * tells, so it keeps counting against the node until its answer is due.
+   * has not left yet is never sent. One already sent is canceled at its node, best effort, and
+   * still counts against the node until its answer is due.
    */
   record PathCanceled(long tick, int mobId) implements WorldEvent {
     public PathCanceled {
