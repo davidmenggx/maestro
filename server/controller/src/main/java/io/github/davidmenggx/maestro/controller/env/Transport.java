@@ -48,7 +48,7 @@ public interface Transport {
 
     /**
      * The link is gone (process death or reset), or a {@link #connect} attempt failed. Not the same
-     * as an unresponsive node, and not called for a link the controller closed itself.
+     * as an unresponsive node.
      */
     void onDisconnected(NodeId node);
   }
@@ -61,19 +61,12 @@ public interface Transport {
   void send(NodeId node, Channel channel, ByteBuffer frame);
 
   /**
-   * Opens a link to the node, replacing any it has. The transport knows each node's addresses, and
-   * opens both ordered channels with a {@code Join} naming the controller's run and this attempt.
+   * Opens a link to the node, replacing any it has. The transport knows each node's addresses.
    * Every attempt ends in exactly one {@link Listener#onConnected} or {@link
-   * Listener#onDisconnected}.
+   * Listener#onDisconnected}. The controller's first frame on each ordered channel of a new link is
+   * its {@code Join}, which the transport carries like any other frame.
    */
   void connect(NodeId node);
-
-  /**
-   * Closes the node's link, so nothing more is sent or received on it, as when the controller
-   * fences a node it gave up on. No callback reports it, and an attempt still pending ends in
-   * {@link Listener#onDisconnected}.
-   */
-  void disconnect(NodeId node);
 
   /** Installed once, before any {@link #connect}. */
   void listen(Listener listener);

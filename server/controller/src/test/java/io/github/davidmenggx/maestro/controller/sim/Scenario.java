@@ -19,8 +19,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
   /** A whole-number setting. */
   public enum Count {
     /**
-     * Requests one worker serves per tick on average, so a request costs at most a tick and a half
-     * and a node serves {@link #WORKERS} times this.
+     * Requests one worker serves per tick on average, so a node serves {@link #WORKERS} times this.
+     * A request on a normal node costs at most a tick and a half, and on a slow one four times
+     * that.
      */
     WORKER_CAPACITY(1, 12),
     /** Searches a node runs at once. */

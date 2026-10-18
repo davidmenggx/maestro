@@ -1,7 +1,10 @@
 package io.github.davidmenggx.maestro.controller.region;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import java.util.List;
@@ -9,51 +12,55 @@ import org.junit.jupiter.api.Test;
 
 class RegionMapTest {
 
-  private static final RegionGrid GRID = new RegionGrid(32, 3);
-
   @Test
-  void aGridIsWholeChunksWithItsCornerAtTheOrigin() {
-    assertThrows(IllegalArgumentException.class, () -> new RegionGrid(24, 2));
-    assertThrows(IllegalArgumentException.class, () -> new RegionGrid(16, 0));
+  void aRegionIsWholeChunksStartingAtAChunk() {
+    assertThrows(IllegalArgumentException.class, () -> new Region(1, 0, 0, 24));
+    assertThrows(IllegalArgumentException.class, () -> new Region(1, 8, 0, 16));
+    assertThrows(IllegalArgumentException.class, () -> new Region(0, 0, 0, 16));
+    assertThrows(
+        IllegalArgumentException.class, () -> new Region(1, Integer.MAX_VALUE - 15, 0, 32));
 
-    assertEquals(9, GRID.regionCount());
-    assertEquals(0, GRID.regionAt(0, 0));
-    assertEquals(1, GRID.regionAt(0, 32));
-    assertEquals(3, GRID.regionAt(32, 0));
-    assertEquals(8, GRID.regionAt(95, 95));
-    // Outside the grid on either side.
-    assertEquals(-1, GRID.regionAt(-1, 0));
-    assertEquals(-1, GRID.regionAt(0, 96));
-    assertEquals(64, GRID.minX(7));
-    assertEquals(32, GRID.minZ(7));
-    assertThrows(IllegalArgumentException.class, () -> GRID.minX(9));
+    Region region = new Region(1, -32, -16, 32);
+    assertTrue(region.contains(-32, -16));
+    assertTrue(region.contains(-1, 15));
+    assertFalse(region.contains(0, 0));
+    assertFalse(region.contains(-33, 0));
+    assertFalse(region.contains(-1, 16));
   }
 
   @Test
-  void aRegionsIdIsItsPlaceInTheGridWhicheverNodeHoldsIt() {
-    List<NodeId> owners = List.of(5, 3, 8, 0, 1, 2, 4, 6, 7).stream().map(NodeId::of).toList();
-    RegionMap regions = new RegionMap(GRID, owners);
+  void idsComeFromACounterAndRegionsNeverOverlap() {
+    RegionMap map = new RegionMap();
+    Region first = map.add(-256, -256, 256);
+    Region second = map.add(0, -256, 256);
+    assertEquals(1, first.id());
+    assertEquals(2, second.id());
+    // A refused region takes no id.
+    assertThrows(IllegalArgumentException.class, () -> map.add(-128, -128, 256));
+    assertEquals(3, map.add(0, 0, 256).id());
 
-    assertEquals(owners, regions.nodes());
-    assertEquals(NodeId.of(5), regions.owner(0));
-    assertEquals(0, regions.regionOf(NodeId.of(5)));
-    assertEquals(2, regions.regionOf(NodeId.of(8)));
-    assertEquals(-1, regions.regionOf(NodeId.of(9)));
-    assertEquals(GRID.regionAt(40, 70), regions.regionAt(40, 70));
-    assertThrows(IllegalArgumentException.class, () -> regions.owner(-1));
-    assertThrows(IllegalArgumentException.class, () -> regions.owner(9));
+    assertEquals(first, map.regionAt(-256, -1));
+    assertEquals(second, map.regionAt(255, -256));
+    assertNull(map.regionAt(-257, 0));
+    assertNull(map.regionAt(-1, 0));
+    assertEquals(List.of(first, second, map.region(3)), List.copyOf(map.regions()));
+    assertThrows(IllegalArgumentException.class, () -> map.region(4));
   }
 
   @Test
-  void everyRegionHasOneOwnerAndANodeHoldsOneRegion() {
-    assertThrows(
-        IllegalArgumentException.class,
-        () -> new RegionMap(new RegionGrid(16, 2), List.of(NodeId.of(0), NodeId.of(1))));
-    assertThrows(
-        IllegalArgumentException.class,
-        () ->
-            new RegionMap(
-                new RegionGrid(16, 2),
-                List.of(NodeId.of(0), NodeId.of(1), NodeId.of(2), NodeId.of(1))));
+  void aNodeHoldsOneRegionAndARegionMayHaveSeveralHolders() {
+    RegionMap map = new RegionMap();
+    Region region = map.add(0, 0, 16);
+    Region other = map.add(16, 0, 16);
+    map.assign(region.id(), NodeId.of(4));
+    map.assign(region.id(), NodeId.of(1));
+    map.assign(other.id(), NodeId.of(0));
+
+    assertEquals(List.of(NodeId.of(4), NodeId.of(1)), map.holders(region.id()));
+    assertEquals(List.of(NodeId.of(4), NodeId.of(1), NodeId.of(0)), map.nodes());
+    assertEquals(region.id(), map.regionOf(NodeId.of(1)));
+    assertEquals(RegionMap.NONE, map.regionOf(NodeId.of(9)));
+    assertThrows(IllegalArgumentException.class, () -> map.assign(other.id(), NodeId.of(4)));
+    assertThrows(IllegalArgumentException.class, () -> map.assign(7, NodeId.of(9)));
   }
 }

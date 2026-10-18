@@ -162,16 +162,16 @@ final class ParityCapture implements Searches.Observer {
     int firstChunk = Chunks.of(ORIGIN);
     for (int dx = 0; dx < AREA_CHUNKS; dx++) {
       for (int dz = 0; dz < AREA_CHUNKS; dz++) {
-        checkSections(firstChunk + dx, firstChunk + dz);
-        Frames.ChunkRuns runs = Frames.readChunk(world, firstChunk + dx, firstChunk + dz);
-        byte[] frame = Frames.chunkSnapshot(++sequence, dx, dz, runs);
+        byte[] frame =
+            Frames.chunkSnapshot(
+                ++sequence, dx, dz, readChunk(world, firstChunk + dx, firstChunk + dz));
         // The section shortcuts must give what reading every block gives.
         byte[] reference =
             Frames.chunkSnapshot(
                 sequence,
                 dx,
                 dz,
-                Frames.readChunk(new BlockByBlock(world), firstChunk + dx, firstChunk + dz));
+                readChunk(new BlockByBlock(world), firstChunk + dx, firstChunk + dz));
         if (!Arrays.equals(frame, reference)) {
           throw new IllegalStateException(
               "sections and blocks disagree in chunk " + dx + ", " + dz);
@@ -221,35 +221,13 @@ final class ParityCapture implements Searches.Observer {
     return new Summary(cases.size(), exact, reached, offStart, modelDiffered, deltas);
   }
 
-  /**
-   * Fails the capture unless every section of the chunk, read whole, gives the cells its blocks
-   * give when read one at a time.
-   */
-  private void checkSections(int chunkX, int chunkZ) {
-    int[] cells = new int[Chunks.SIZE * Chunks.SIZE * WorldSource.SECTION_HEIGHT];
-    for (int section = 0; section < world.height() / WorldSource.SECTION_HEIGHT; section++) {
-      if (!world.readSection(chunkX, chunkZ, section, cells)) {
-        throw new IllegalStateException("chunk " + chunkX + ", " + chunkZ + " is not loaded");
-      }
-      int minY = world.minY() + section * WorldSource.SECTION_HEIGHT;
-      for (int dx = 0; dx < Chunks.SIZE; dx++) {
-        for (int dz = 0; dz < Chunks.SIZE; dz++) {
-          for (int dy = 0; dy < WorldSource.SECTION_HEIGHT; dy++) {
-            int x = chunkX * Chunks.SIZE + dx;
-            int y = minY + dy;
-            int z = chunkZ * Chunks.SIZE + dz;
-            int block = (world.floorAt(x, y, z) << 8) | (world.pathTypeAt(x, y, z) & 0xFF);
-            int read = cells[(dx * Chunks.SIZE + dz) * WorldSource.SECTION_HEIGHT + dy];
-            if (read != block) {
-              throw new IllegalStateException(
-                  String.format(
-                      "the section read gives cell %x and the block read %x at %d, %d, %d",
-                      read, block, x, y, z));
-            }
-          }
-        }
-      }
+  /** The chunk's runs. The area is force-loaded, so an unreadable chunk fails the capture. */
+  private static Frames.ChunkRuns readChunk(WorldSource source, int chunkX, int chunkZ) {
+    Frames.ChunkRuns runs = Frames.readChunk(source, chunkX, chunkZ);
+    if (runs == null) {
+      throw new IllegalStateException("chunk " + chunkX + ", " + chunkZ + " is not loaded");
     }
+    return runs;
   }
 
   /**
@@ -578,6 +556,11 @@ final class ParityCapture implements Searches.Observer {
     @Override
     public int floorAt(int x, int y, int z) {
       return inner.floorAt(x, y, z);
+    }
+
+    @Override
+    public boolean readable(int chunkX, int chunkZ) {
+      return inner.readable(chunkX, chunkZ);
     }
   }
 

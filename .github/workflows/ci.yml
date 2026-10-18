@@ -39,7 +39,7 @@ jobs:
       - name: Cache C++ dependencies
         uses: actions/cache@v4
         with:
-          path: build/_deps
+          path: build/node/_deps
           key: cpp-deps-${{ runner.os }}-${{ hashFiles('node/cmake/Dependencies.cmake') }}
 
       # The OpenTelemetry C++ SDK builds gRPC from source and would dominate the
@@ -115,11 +115,12 @@ jobs:
             shard: 6
           - tier: shallow
             shard: 7
+        # Sized so a shard's sweep takes about 15 minutes on a hosted runner.
         include:
           - tier: shallow
-            seeds: 25000
+            seeds: 8000
           - tier: deep
-            seeds: 12500
+            seeds: 2500
           - tier: coverage
             shard: 0
             seeds: 2000

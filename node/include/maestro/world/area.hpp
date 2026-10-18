@@ -49,7 +49,7 @@ struct ColumnEdit {
 
 /// One full-height column, run-length encoded. Immutable, so versions of an
 /// area can share it.
-class Column {
+class Column : public std::enable_shared_from_this<Column> {
 public:
   /// `Runs` must be ordered, non-empty, and end at the area's height.
   explicit Column(std::vector<Run> Runs) : Runs(std::move(Runs)) {}
@@ -61,7 +61,8 @@ public:
   std::shared_ptr<const Column> with(int Offset, Cell Value) const;
 
   /// A copy with every cell in `Edits` replaced and equal neighbours merged.
-  /// `Edits` must be in strictly increasing `Offset` order.
+  /// `Edits` must be in strictly increasing `Offset` order. If no cell
+  /// changes, this column itself, which must then be owned by a `shared_ptr`.
   std::shared_ptr<const Column> with(std::span<const ColumnEdit> Edits) const;
 
   std::span<const Run> runs() const { return Runs; }
@@ -122,8 +123,9 @@ public:
                                         std::uint64_t Sequence) const;
 
   /// A version with `Edits` applied, a later edit to a cell winning over an
-  /// earlier one. Every edit must be inside the area. An edit in a chunk with
-  /// no state starts that chunk from air.
+  /// earlier one. Every edit must be inside the area. An edit that changes a
+  /// chunk with no state starts that chunk from air. Columns and chunks no
+  /// edit changes stay shared.
   std::shared_ptr<const Area> withCells(std::span<const CellEdit> Edits,
                                         std::uint64_t Sequence) const;
 

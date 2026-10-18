@@ -2,13 +2,18 @@ package io.github.davidmenggx.maestro.controller.sim;
 
 import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.wire.Frames;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import maestro.fbs.CellDelta;
+import maestro.fbs.CellRun;
+import maestro.fbs.ChunkSnapshot;
 import maestro.fbs.ConformanceCase;
 import maestro.fbs.ConformanceFixture;
 import maestro.fbs.ControlFrame;
@@ -20,6 +25,10 @@ import maestro.fbs.LinkPort;
 import maestro.fbs.PathType;
 import maestro.fbs.Step;
 import maestro.fbs.StepKind;
+import maestro.fbs.Vec2i;
+import maestro.fbs.WorldDelta;
+import maestro.fbs.WorldFrame;
+import maestro.fbs.WorldMsg;
 
 /**
  * The conformance cases both the C++ node and {@link ModeledNode} must pass: what a node does with
@@ -35,6 +44,7 @@ final class ConformanceScripts {
   private static final long OTHER_RUN = 8;
 
   private static final int REGION = 3;
+  private static final int COLUMNS = Chunks.SIZE * Chunks.SIZE;
   private static final int SIZE = 16;
   private static final short MOB_CLASS = 1;
 
@@ -111,10 +121,10 @@ final class ConformanceScripts {
             .heartbeat(heartbeat(0)));
 
     cases.add(
-        held("an answer is kept for 500 ms")
+        held("an answer is kept for 1000 ms")
             .datagram(requests(RUN, REGION, 10))
             .serve(0, answer(10, RUN, 1))
-            .advance(499)
+            .advance(999)
             .datagram(requests(RUN, REGION, 10), answer(10, RUN, 1))
             .advance(1)
             .datagram(requests(RUN, REGION, 10))
@@ -123,7 +133,7 @@ final class ConformanceScripts {
     cases.add(
         held("a cancel drops a waiting request and its later copies")
             .datagram(requests(RUN, REGION, 10, 11))
-            .datagram(Frames.cancels(RUN, List.of(10L)))
+            .datagram(Frames.cancels(RUN, REGION, List.of(10L)))
             .heartbeat(heartbeat(1))
             .serve(0, answer(11, RUN, 1))
             .datagram(requests(RUN, REGION, 10))
@@ -131,10 +141,10 @@ final class ConformanceScripts {
 
     cases.add(
         held("a cancel that arrives first drops the request until it expires")
-            .datagram(Frames.cancels(RUN, List.of(12L)))
+            .datagram(Frames.cancels(RUN, REGION, List.of(12L)))
             .datagram(requests(RUN, REGION, 12))
             .serve(0)
-            .advance(500)
+            .advance(1000)
             .datagram(requests(RUN, REGION, 12))
             .serve(0, answer(12, RUN, 1)));
 
@@ -142,13 +152,13 @@ final class ConformanceScripts {
         held("a cancel leaves an answered request alone")
             .datagram(requests(RUN, REGION, 10))
             .serve(0, answer(10, RUN, 1))
-            .datagram(Frames.cancels(RUN, List.of(10L)))
+            .datagram(Frames.cancels(RUN, REGION, List.of(10L)))
             .datagram(requests(RUN, REGION, 10), answer(10, RUN, 1)));
 
     cases.add(
         held("a canceled request is skipped and not counted by serve")
             .datagram(requests(RUN, REGION, 10, 11, 12))
-            .datagram(Frames.cancels(RUN, List.of(10L)))
+            .datagram(Frames.cancels(RUN, REGION, List.of(10L)))
             .serve(1, answer(11, RUN, 1))
             .heartbeat(heartbeat(1))
             .serve(1, answer(12, RUN, 1)));
@@ -156,12 +166,27 @@ final class ConformanceScripts {
     cases.add(
         held("a request queued again after its cancel expired is served once")
             .datagram(requests(RUN, REGION, 10))
-            .datagram(Frames.cancels(RUN, List.of(10L)))
-            .advance(500)
+            .datagram(Frames.cancels(RUN, REGION, List.of(10L)))
+            .advance(1000)
             .datagram(requests(RUN, REGION, 10))
             .heartbeat(heartbeat(1))
             .serve(0, answer(10, RUN, 1))
             .serve(0));
+
+    cases.add(
+        held("a request that waited past 1000 ms is dropped unanswered with its later copies")
+            .datagram(requests(RUN, REGION, 10, 11))
+            .advance(1000)
+            .serve(1, answer(10, RUN, 1))
+            .advance(1)
+            .heartbeat(heartbeat(1))
+            .serve(0)
+            .heartbeat(heartbeat(0))
+            .datagram(requests(RUN, REGION, 11))
+            .serve(0)
+            .advance(1000)
+            .datagram(requests(RUN, REGION, 11))
+            .serve(0, answer(11, RUN, 1)));
 
     cases.add(
         world("a request naming an unknown profile is refused at once and not remembered")
@@ -174,13 +199,13 @@ final class ConformanceScripts {
         held("a request frame of another run is dropped")
             .datagram(requests(OTHER_RUN, REGION, 10))
             .datagram(requests(RUN, REGION, 11))
-            .datagram(Frames.cancels(OTHER_RUN, List.of(11L)))
+            .datagram(Frames.cancels(OTHER_RUN, REGION, List.of(11L)))
             .serve(0, answer(11, RUN, 1)));
 
     cases.add(
         new Script("a datagram with no link is dropped")
             .datagram(requests(RUN, REGION, 10))
-            .datagram(Frames.cancels(RUN, List.of(10L))));
+            .datagram(Frames.cancels(RUN, REGION, List.of(10L))));
 
     cases.add(
         held("a request for another region is answered as if no area were held")
@@ -197,6 +222,39 @@ final class ConformanceScripts {
         held("a profile that breaks the contract drops the link and keeps the world").stream(
                 LinkPort.Control, brokenProfile(), linkDropped())
             .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(RUN, REGION, 1)));
+
+    cases.add(
+        held("a profile past 512 cells drops the link and keeps the world").stream(
+                LinkPort.Control, rawProfile(8.0f, 7.99f), linkDropped())
+            .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(RUN, REGION, 1)));
+
+    refusedWorldFrame(
+        cases,
+        "a chunk carrying a derived type",
+        rawChunk(2, 0, 0, COLUMNS, 32, PathType.WALKABLE, 0));
+    refusedWorldFrame(cases, "a chunk floor past 32", rawChunk(2, 0, 0, COLUMNS, 32, 0, 33));
+    refusedWorldFrame(
+        cases, "a chunk missing a column", rawChunk(2, 0, 0, COLUMNS - 1, 32, PathType.OPEN, 0));
+    refusedWorldFrame(
+        cases, "a column short of the height", rawChunk(2, 0, 0, COLUMNS, 31, PathType.OPEN, 0));
+    refusedWorldFrame(
+        cases, "a chunk outside the area", rawChunk(2, 1, 0, COLUMNS, 32, PathType.OPEN, 0));
+    refusedWorldFrame(
+        cases, "a delta cell outside the area", rawDelta(2, SIZE, 8, 0, PathType.BLOCKED, 16));
+    refusedWorldFrame(
+        cases, "a delta cell with a derived type", rawDelta(2, 1, 8, 1, PathType.WALKABLE, 0));
+    refusedWorldFrame(
+        cases, "a delta cell floor past 32", rawDelta(2, 1, 8, 1, PathType.BLOCKED, 33));
+    refusedWorldFrame(cases, "a world frame at sequence 0", delta(0));
+    refusedWorldFrame(
+        cases, "a fresh assignment behind the held sequence", assignment(RUN, 0, false));
+    refusedWorldFrame(cases, "a fresh assignment of another run", assignment(OTHER_RUN, 1, false));
+    refusedWorldFrame(cases, "a fresh assignment of run 0", assignment(0, 1, false));
+
+    cases.add(
+        new Script("a world frame before any assignment is refused")
+            .link(RUN, 1).stream(LinkPort.World, chunk(1), linkDropped())
+                .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(0, 0, 0)));
 
     cases.add(
         new Script("a refused world frame drops the world and the link")
@@ -295,6 +353,16 @@ final class ConformanceScripts {
     return builder.sizedByteArray();
   }
 
+  /**
+   * A world frame the node refuses, after it holds the area at sequence 1: it drops its world and
+   * its link, and reports nothing held on the next.
+   */
+  private static void refusedWorldFrame(List<Script> cases, String what, byte[] frame) {
+    cases.add(
+        world(what + " is refused").stream(LinkPort.World, frame, linkDropped())
+            .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(0, 0, 0)));
+  }
+
   /** A link of {@link #RUN} holding the area at sequence 1, with no profile. */
   private static Script world(String name) {
     return new Script(name)
@@ -342,12 +410,53 @@ final class ConformanceScripts {
 
   /** A profile no shape allows, which the encoder refuses to build. */
   private static byte[] brokenProfile() {
+    return rawProfile(0f, 1.8f);
+  }
+
+  /** A profile of any width and height. */
+  private static byte[] rawProfile(float width, float height) {
     FlatBufferBuilder builder = new FlatBufferBuilder(128);
     int malus = maestro.fbs.MobClass.createMalusVector(builder, new float[PathTypes.count()]);
     int body =
         maestro.fbs.MobClass.createMobClass(
-            builder, MOB_CLASS, 0f, 1.8f, malus, 0.6f, true, false, false, false);
+            builder, MOB_CLASS, width, height, malus, 0.6f, true, false, false, false);
     builder.finish(ControlFrame.createControlFrame(builder, ControlMsg.MobClass, body));
+    return builder.sizedByteArray();
+  }
+
+  /**
+   * A chunk of {@code columns} columns, each one run of {@code length} cells of one type and floor,
+   * which the encoder refuses to build when the cell or the shape is wrong.
+   */
+  private static byte[] rawChunk(
+      long sequence, int chunkX, int chunkZ, int columns, int length, int type, int floor) {
+    FlatBufferBuilder builder = new FlatBufferBuilder(4096);
+    int[] counts = new int[columns];
+    Arrays.fill(counts, 1);
+    int runCounts = ChunkSnapshot.createRunCountsVector(builder, counts);
+    ChunkSnapshot.startRunsVector(builder, columns);
+    for (int i = 0; i < columns; i++) {
+      CellRun.createCellRun(builder, length, type, floor);
+    }
+    int runs = builder.endVector();
+    ChunkSnapshot.startChunkSnapshot(builder);
+    ChunkSnapshot.addSequence(builder, sequence);
+    ChunkSnapshot.addChunkXz(builder, Vec2i.createVec2i(builder, chunkX, chunkZ));
+    ChunkSnapshot.addRunCounts(builder, runCounts);
+    ChunkSnapshot.addRuns(builder, runs);
+    int snapshot = ChunkSnapshot.endChunkSnapshot(builder);
+    builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.ChunkSnapshot, snapshot));
+    return builder.sizedByteArray();
+  }
+
+  /** A delta of one cell, which the encoder refuses to build when the cell is wrong. */
+  private static byte[] rawDelta(long sequence, int x, int y, int z, int type, int floor) {
+    FlatBufferBuilder builder = new FlatBufferBuilder(128);
+    WorldDelta.startCellsVector(builder, 1);
+    CellDelta.createCellDelta(builder, (short) x, (short) y, (short) z, type, floor);
+    int cells = builder.endVector();
+    int delta = WorldDelta.createWorldDelta(builder, sequence, cells);
+    builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.WorldDelta, delta));
     return builder.sizedByteArray();
   }
 
@@ -362,8 +471,7 @@ final class ConformanceScripts {
   private static byte[] rawJoinWorld(long run, long link) {
     FlatBufferBuilder builder = new FlatBufferBuilder(64);
     int join = Join.createJoin(builder, run, link);
-    builder.finish(
-        maestro.fbs.WorldFrame.createWorldFrame(builder, maestro.fbs.WorldMsg.Join, join));
+    builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.Join, join));
     return builder.sizedByteArray();
   }
 

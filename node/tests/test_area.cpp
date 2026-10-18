@@ -234,3 +234,78 @@ TEST(Area, TheLastEditToACellWinsHoweverTheEditsInterleave) {
     EXPECT_EQ(Held->column(1, 1), Before->column(1, 1));
   }
 }
+
+TEST(Column, AnEditThatChangesNothingReturnsTheSameColumn) {
+  const auto Ground = std::make_shared<const Column>(
+      std::vector<maestro::world::Run>{{4, Stone}, {48, Air}});
+  EXPECT_EQ(Ground->with(2, Stone), Ground);
+  const std::vector<ColumnEdit> Same = {{0, Stone}, {3, Stone}, {47, Air}};
+  EXPECT_EQ(Ground->with(Same), Ground);
+  const std::vector<ColumnEdit> OneDiffers = {{3, Stone}, {4, Water}};
+  EXPECT_NE(Ground->with(OneDiffers), Ground);
+}
+
+TEST(Area, EditsThatChangeNothingKeepEverythingShared) {
+  maestro::test::DenseWorld World(32, -16, 48);
+  World.fill(0, -16, 0, 15, -1, 31, Stone);
+  World.set(3, 0, 4, Water);
+  const auto Before = World.load();
+  const std::vector<CellEdit> Edits = {// Each cell set to what it holds.
+                                       {3, -1, 4, Stone},
+                                       {3, 0, 4, Water},
+                                       {3, 1, 4, Air},
+                                       // A cell changed, then changed back.
+                                       {5, 0, 5, Stone},
+                                       {5, 0, 5, Air},
+                                       // Air in a chunk of air.
+                                       {20, 0, 20, Air}};
+  // Air in a chunk that was cleared, which is not made from air for it.
+  const auto Cleared = Before->withChunk(1, 0, nullptr, Before->sequence() + 1);
+  const CellEdit ClearedEdit{20, 0, 3, Air};
+  std::vector<CellEdit> All = Edits;
+  All.push_back(ClearedEdit);
+
+  const auto After = Cleared->withCells(All, Cleared->sequence() + 1);
+  EXPECT_EQ(After->sequence(), Cleared->sequence() + 1);
+  EXPECT_EQ(After->column(3, 4), Before->column(3, 4));
+  EXPECT_EQ(After->column(5, 5), Before->column(5, 5));
+  EXPECT_EQ(After->column(20, 20), Before->column(20, 20));
+  EXPECT_EQ(After->column(20, 3), nullptr);
+  EXPECT_EQ(After->at(3, 0, 4), Water);
+  EXPECT_EQ(After->at(5, 0, 5), Air);
+}
+
+TEST(Area, TheLastOfSeveralEditsToOneCellWins) {
+  const auto Empty = std::make_shared<const Area>(SmallArea, 1, 0);
+  const std::vector<CellEdit> Edits = {{1, 0, 1, Stone},
+                                       {2, 0, 1, Stone},
+                                       {1, 0, 1, Water},
+                                       {2, 0, 1, Air},
+                                       {1, 0, 1, Stone}};
+  const auto After = Empty->withCells(Edits, 1);
+  EXPECT_EQ(After->at(1, 0, 1), Stone);
+  EXPECT_EQ(After->at(2, 0, 1), Air);
+  EXPECT_EQ(After->at(1, 1, 1), Air);
+}
+
+TEST(Area, EditsAcrossChunksEachLandInTheirOwn) {
+  maestro::test::DenseWorld World(48, -16, 48);
+  World.fill(0, -16, 0, 47, -1, 47, Stone);
+  const auto Before = World.load();
+  // Interleaved across chunks of the same row and of other rows, at chunk
+  // edges.
+  const std::vector<CellEdit> Edits = {{15, 0, 15, Water}, {16, 0, 15, Stone},
+                                       {15, 0, 16, Stone}, {47, 0, 47, Water},
+                                       {16, 0, 16, Water}, {0, 0, 47, Stone}};
+  const auto After = Before->withCells(Edits, Before->sequence() + 1);
+  for (const CellEdit &Edit : Edits) {
+    EXPECT_EQ(After->at(Edit.X, Edit.Y, Edit.Z), Edit.Value)
+        << Edit.X << " " << Edit.Z;
+    EXPECT_EQ(After->at(Edit.X, Edit.Y + 1, Edit.Z), Air);
+    EXPECT_EQ(Before->at(Edit.X, Edit.Y, Edit.Z), Air);
+  }
+  // Untouched neighbours in the edited chunks, and an untouched chunk.
+  EXPECT_EQ(After->column(14, 15), Before->column(14, 15));
+  EXPECT_EQ(After->column(17, 16), Before->column(17, 16));
+  EXPECT_EQ(After->column(40, 8), Before->column(40, 8));
+}

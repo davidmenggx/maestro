@@ -20,6 +20,9 @@ import java.util.Map;
  * tick, so the sweep covers how they interleave, such as a block change followed by its chunk
  * leaving. {@code quietAfter} stops all world activity so the end of a run can drain. By then every
  * request has been answered or dropped, so the invariants can require it.
+ *
+ * <p>As on a server, only the chunks around spawn and around each player start loaded, a small part
+ * of the regions, and mobs, block changes and requests happen in loaded chunks.
  */
 public final class SyntheticWorkload implements Workload {
 
@@ -36,6 +39,12 @@ public final class SyntheticWorkload implements Workload {
 
   /** How far outside the region grid a stray request can start. */
   private static final int MAX_STRAY_DISTANCE = 8;
+
+  /** Chunks loaded around the origin in every direction, as vanilla keeps spawn chunks. */
+  private static final int SPAWN_RADIUS = 2;
+
+  /** Chunks loaded around a player in every direction at the start. */
+  private static final int VIEW_RADIUS = 3;
 
   /**
    * `reachRange` values vanilla passes: 0 and 1 at nearly every call site, and 6 for the one POI
@@ -78,9 +87,6 @@ public final class SyntheticWorkload implements Workload {
     this::cancelPath,
     this::movePlayers
   };
-
-  /** Tries at finding a loaded chunk to spawn a mob in, before giving up for the tick. */
-  private static final int SPAWN_TRIES = 8;
 
   /** Every type a cell may carry, in enum order, so a given index always picks the same type. */
   private static final byte[] PER_BLOCK_TYPES = perBlockTypes();
@@ -135,19 +141,25 @@ public final class SyntheticWorkload implements Workload {
   }
 
   private void start(WorldInput input) {
-    loadEverything(input);
-    for (int i = 0; i < scenario.counts().get(Count.MOBS); i++) {
-      spawn(0, input);
-    }
+    loadAround(0, 0, SPAWN_RADIUS, input);
     for (int player = 1; player <= scenario.counts().get(Count.PLAYERS); player++) {
       movePlayer(0, player, input);
+      Pos pos = players.get(player);
+      loadAround(Chunks.of(pos.x()), Chunks.of(pos.z()), VIEW_RADIUS, input);
+    }
+    for (int i = 0; i < scenario.counts().get(Count.MOBS); i++) {
+      spawn(0, input);
     }
   }
 
   @Override
   public void replayState(long tick, WorldInput input) {
-    for (int chunkX = 0; chunkX < world.chunksPerSide(); chunkX++) {
-      for (int chunkZ = 0; chunkZ < world.chunksPerSide(); chunkZ++) {
+    for (int chunkX = world.minChunk();
+        chunkX < world.minChunk() + world.chunksPerSide();
+        chunkX++) {
+      for (int chunkZ = world.minChunk();
+          chunkZ < world.minChunk() + world.chunksPerSide();
+          chunkZ++) {
         if (world.chunkLoaded(chunkX, chunkZ)) {
           input.accept(new WorldEvent.ChunkLoaded(tick, chunkX, chunkZ));
         }
@@ -161,22 +173,31 @@ public final class SyntheticWorkload implements Workload {
     }
   }
 
-  private void loadEverything(WorldInput input) {
-    for (int chunkX = 0; chunkX < world.chunksPerSide(); chunkX++) {
-      for (int chunkZ = 0; chunkZ < world.chunksPerSide(); chunkZ++) {
-        world.loadChunk(chunkX, chunkZ);
-        input.accept(new WorldEvent.ChunkLoaded(0, chunkX, chunkZ));
+  /** Loads the chunks within {@code radius} of a chunk that lie in the world. */
+  private void loadAround(int centerX, int centerZ, int radius, WorldInput input) {
+    for (int chunkX = centerX - radius; chunkX <= centerX + radius; chunkX++) {
+      for (int chunkZ = centerZ - radius; chunkZ <= centerZ + radius; chunkZ++) {
+        if (world.contains(chunkX * Chunks.SIZE, chunkZ * Chunks.SIZE)
+            && !world.chunkLoaded(chunkX, chunkZ)) {
+          world.loadChunk(chunkX, chunkZ, 0);
+          input.accept(new WorldEvent.ChunkLoaded(0, chunkX, chunkZ));
+        }
       }
     }
   }
 
+  /**
+   * Unloads a loaded chunk or loads any chunk of the world, evenly, so chunks leave about as often
+   * as they arrive although few of the world's are loaded.
+   */
   private void churnChunks(long tick, WorldInput input) {
     if (rng.nextDouble() >= scenario.chances().get(Chance.CHUNK_CHURN)) {
       return;
     }
-    int chunkX = rng.nextInt(world.chunksPerSide());
-    int chunkZ = rng.nextInt(world.chunksPerSide());
-    if (world.chunkLoaded(chunkX, chunkZ)) {
+    if (rng.nextBoolean() && world.loadedCount() > 0) {
+      long key = world.loadedChunk(rng.nextInt(world.loadedCount()));
+      int chunkX = (int) (key >> 32);
+      int chunkZ = (int) key;
       // Mobs leave with their chunk, and as many appear in the chunks still loaded.
       int left = 0;
       Iterator<Map.Entry<Integer, Pos>> each = mobs.entrySet().iterator();
@@ -193,8 +214,12 @@ public final class SyntheticWorkload implements Workload {
       for (int i = 0; i < left; i++) {
         spawn(tick, input);
       }
-    } else {
-      world.loadChunk(chunkX, chunkZ);
+      return;
+    }
+    int chunkX = world.minChunk() + rng.nextInt(world.chunksPerSide());
+    int chunkZ = world.minChunk() + rng.nextInt(world.chunksPerSide());
+    if (!world.chunkLoaded(chunkX, chunkZ)) {
+      world.loadChunk(chunkX, chunkZ, tick);
       input.accept(new WorldEvent.ChunkLoaded(tick, chunkX, chunkZ));
     }
   }
@@ -205,13 +230,11 @@ public final class SyntheticWorkload implements Workload {
    */
   private void changeBlocks(long tick, WorldInput input) {
     int changes = rng.nextInt(scenario.counts().get(Count.BLOCK_CHANGES_PER_TICK) + 1);
-    for (int i = 0; i < changes; i++) {
-      int x = rng.nextInt(world.size());
-      int z = rng.nextInt(world.size());
-      if (!world.chunkLoaded(Chunks.of(x), Chunks.of(z))) {
-        // Minecraft cannot change a block in a chunk it does not hold.
-        continue;
-      }
+    for (int i = 0; i < changes && world.loadedCount() > 0; i++) {
+      // Minecraft cannot change a block in a chunk it does not hold.
+      long chunk = world.loadedChunk(rng.nextInt(world.loadedCount()));
+      int x = (int) (chunk >> 32) * Chunks.SIZE + rng.nextInt(Chunks.SIZE);
+      int z = (int) chunk * Chunks.SIZE + rng.nextInt(Chunks.SIZE);
       int y =
           Math.clamp(
               world.groundAt(x, z) + rng.nextInt(2 * BLOCK_CHANGE_SPREAD + 1) - BLOCK_CHANGE_SPREAD,
@@ -239,9 +262,9 @@ public final class SyntheticWorkload implements Workload {
    */
   private void moveMobs() {
     for (Map.Entry<Integer, Pos> mob : mobs.entrySet()) {
-      int x = Math.clamp(mob.getValue().x() + rng.nextInt(3) - 1, 0, world.size() - 1);
-      int z = Math.clamp(mob.getValue().z() + rng.nextInt(3) - 1, 0, world.size() - 1);
-      if (world.chunkLoaded(Chunks.of(x), Chunks.of(z))) {
+      int x = mob.getValue().x() + rng.nextInt(3) - 1;
+      int z = mob.getValue().z() + rng.nextInt(3) - 1;
+      if (world.contains(x, z) && world.chunkLoaded(Chunks.of(x), Chunks.of(z))) {
         mob.setValue(new Pos(x, world.groundAt(x, z) + 1, z));
       }
     }
@@ -329,17 +352,18 @@ public final class SyntheticWorkload implements Workload {
     input.accept(new WorldEvent.PlayerMoved(tick, player, pos));
   }
 
-  /** A mob appears in a loaded chunk, if one is found. */
+  /** A mob appears in a loaded chunk, if there is one. */
   private void spawn(long tick, WorldInput input) {
-    for (int i = 0; i < SPAWN_TRIES; i++) {
-      Pos pos = randomStanding();
-      if (world.chunkLoaded(Chunks.of(pos.x()), Chunks.of(pos.z()))) {
-        int mobId = nextMobId++;
-        mobs.put(mobId, pos);
-        input.accept(new WorldEvent.MobSpawned(tick, mobId, pos));
-        return;
-      }
+    if (world.loadedCount() == 0) {
+      return;
     }
+    long chunk = world.loadedChunk(rng.nextInt(world.loadedCount()));
+    int x = (int) (chunk >> 32) * Chunks.SIZE + rng.nextInt(Chunks.SIZE);
+    int z = (int) chunk * Chunks.SIZE + rng.nextInt(Chunks.SIZE);
+    Pos pos = new Pos(x, world.groundAt(x, z) + 1, z);
+    int mobId = nextMobId++;
+    mobs.put(mobId, pos);
+    input.accept(new WorldEvent.MobSpawned(tick, mobId, pos));
   }
 
   /**
@@ -367,15 +391,17 @@ public final class SyntheticWorkload implements Workload {
   }
 
   private Pos randomStanding() {
-    int x = rng.nextInt(world.size());
-    int z = rng.nextInt(world.size());
+    int x = world.min() + rng.nextInt(world.size());
+    int z = world.min() + rng.nextInt(world.size());
     return new Pos(x, world.groundAt(x, z) + 1, z);
   }
 
   private Pos outsideTheGrid() {
     int y = world.minY() + world.height() / 2;
+    int min = world.min();
+    int end = min + world.size();
     return rng.nextBoolean()
-        ? new Pos(-1 - rng.nextInt(MAX_STRAY_DISTANCE), y, rng.nextInt(world.size()))
-        : new Pos(rng.nextInt(world.size()), y, world.size() + rng.nextInt(MAX_STRAY_DISTANCE));
+        ? new Pos(min - 1 - rng.nextInt(MAX_STRAY_DISTANCE), y, min + rng.nextInt(world.size()))
+        : new Pos(min + rng.nextInt(world.size()), y, end + rng.nextInt(MAX_STRAY_DISTANCE));
   }
 }

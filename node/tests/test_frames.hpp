@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -37,6 +38,13 @@ Bytes requestFrame(const fbs::PathRequest &Wire, std::uint64_t Id,
 Bytes cancelFrame(const std::vector<std::uint64_t> &Ids,
                   std::uint64_t Run = TestRun,
                   std::uint32_t RegionId = TestRegion);
+
+/// Runs `Core`'s waiting jobs on the calling thread, oldest first, and
+/// delivers their answers: `Count` of them, or every one if `Count` is 0. A
+/// job dropped unsearched, because it was canceled or waited past `MaxWait`,
+/// is not counted. Returns how many ran.
+std::size_t serveWaiting(serve::NodeCore &Core, serve::Scratch &With,
+                         std::size_t Count = 0);
 
 /// `Frame` as a `T`, or null if it does not verify as one.
 template <typename T> const T *root(const Bytes &Frame) {

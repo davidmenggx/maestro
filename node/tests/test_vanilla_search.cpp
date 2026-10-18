@@ -605,13 +605,40 @@ TEST(Profile, RefusesAMobClassThatBreaksTheContract) {
   EXPECT_FALSE(Decode(world::PathTypeCount, 0.0F, 1.8F, 0.6F).has_value());
   EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, NAN, 0.6F).has_value());
   EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 1.8F, -1.0F).has_value());
-  // A footprint past vanilla's largest would make every search crawl.
-  EXPECT_TRUE(Decode(world::PathTypeCount, Profile::WidthLimit,
-                     Profile::HeightLimit, Profile::UpStepLimit)
+  EXPECT_TRUE(Decode(world::PathTypeCount, 0.6F, 1.8F, Profile::UpStepLimit)
                   .has_value());
-  EXPECT_FALSE(Decode(world::PathTypeCount, 2000.0F, 1.8F, 0.6F).has_value());
-  EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 300.0F, 0.6F).has_value());
   EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 1.8F, 20.0F).has_value());
   EXPECT_FALSE(Decode(world::PathTypeCount, INFINITY, 1.8F, 0.6F).has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, INFINITY, 0.6F).has_value());
+  EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, -1.0F, 0.6F).has_value());
   EXPECT_FALSE(Decode(world::PathTypeCount, 0.6F, 1.8F, NAN).has_value());
+}
+
+TEST(Profile, RefusesAFootprintOverTheLimit) {
+  const auto Fits = [](float Width, float Height) {
+    flatbuffers::FlatBufferBuilder Builder;
+    const std::vector<float> Malus(world::PathTypeCount, 0.0F);
+    Builder.Finish(fbs::CreateMobClass(Builder, 1, Width, Height,
+                                       Builder.CreateVector(Malus), 0.6F));
+    return Profile::decode(
+               *flatbuffers::GetRoot<fbs::MobClass>(Builder.GetBufferPointer()))
+        .has_value();
+  };
+  static_assert(Profile::FootprintLimit == 512);
+  // 8 by 8 by 8 cells, then 8 by 9 by 8.
+  EXPECT_TRUE(Fits(7.0F, 7.0F));
+  EXPECT_FALSE(Fits(7.0F, 8.0F));
+  // 22 by 1 by 22, then 23 by 1 by 23.
+  EXPECT_TRUE(Fits(21.9F, 0.5F));
+  EXPECT_FALSE(Fits(22.0F, 0.5F));
+  // 1 by 512 by 1, then 1 by 513 by 1.
+  EXPECT_TRUE(Fits(0.5F, 511.5F));
+  EXPECT_FALSE(Fits(0.5F, 512.0F));
+  // Added in `float`, the width just under 8 rounds up to 9, so the footprint
+  // is 9 by 7 by 9, not 8 by 7 by 8.
+  EXPECT_FALSE(Fits(std::nextafter(8.0F, 0.0F), 6.5F));
+  EXPECT_TRUE(Fits(std::nextafter(7.0F, 0.0F), 6.5F));
+  // Far past the `int` range.
+  EXPECT_FALSE(Fits(3.0e38F, 0.5F));
+  EXPECT_FALSE(Fits(0.5F, 3.0e38F));
 }

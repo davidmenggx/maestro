@@ -5,6 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.env.Offload.Lane;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -23,6 +26,7 @@ class PoolOffloadTest {
 
       offload.submit(
           "job",
+          Lane.WORLD,
           () -> {
             worked.countDown();
             return "done";
@@ -52,6 +56,7 @@ class PoolOffloadTest {
 
       offload.<String>submit(
           "boom",
+          Lane.WORLD,
           () -> {
             attempted.countDown();
             throw new IllegalStateException("expected");
@@ -79,6 +84,7 @@ class PoolOffloadTest {
 
       offload.<String>submit(
           "error",
+          Lane.WORLD,
           () -> {
             throw new StackOverflowError("expected");
           },
@@ -100,12 +106,13 @@ class PoolOffloadTest {
 
       offload.submit(
           "first",
+          Lane.WORLD,
           () -> "a",
           value -> {
             throw new IllegalStateException("expected");
           },
           () -> {});
-      offload.submit("second", () -> "b", value -> second.set(true), () -> {});
+      offload.submit("second", Lane.WORLD, () -> "b", value -> second.set(true), () -> {});
 
       for (int i = 0; i < 100 && !second.get(); i++) {
         offload.drain();
@@ -116,13 +123,52 @@ class PoolOffloadTest {
   }
 
   @Test
+  void aWorkerTakesQueuedRequestJobsBeforeQueuedWorldJobs() throws InterruptedException {
+    try (PoolOffload offload = new PoolOffload(1)) {
+      CountDownLatch running = new CountDownLatch(1);
+      CountDownLatch release = new CountDownLatch(1);
+      List<String> ran = new ArrayList<>();
+
+      // Holds the only worker, so every later job waits in the queue.
+      offload.submit(
+          "busy",
+          Lane.WORLD,
+          () -> {
+            running.countDown();
+            try {
+              release.await();
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            return "busy";
+          },
+          value -> {},
+          () -> {});
+      assertTrue(running.await(5, TimeUnit.SECONDS), "the first job never ran");
+      for (String name : List.of("world 1", "request 1", "world 2", "request 2")) {
+        Lane lane = name.startsWith("request") ? Lane.REQUESTS : Lane.WORLD;
+        offload.submit(name, lane, () -> name, ran::add, () -> {});
+      }
+      release.countDown();
+
+      for (int i = 0; i < 100 && ran.size() < 4; i++) {
+        offload.drain();
+        Thread.sleep(10);
+      }
+      // Completions are queued in the order the jobs ran.
+      assertEquals(List.of("request 1", "request 2", "world 1", "world 2"), ran);
+    }
+  }
+
+  @Test
   void aJobSubmittedAfterCloseFails() {
     PoolOffload offload = new PoolOffload(1);
     offload.close();
     AtomicBoolean completed = new AtomicBoolean();
     AtomicBoolean failed = new AtomicBoolean();
 
-    offload.submit("late", () -> "a", value -> completed.set(true), () -> failed.set(true));
+    offload.submit(
+        "late", Lane.WORLD, () -> "a", value -> completed.set(true), () -> failed.set(true));
     offload.drain();
 
     assertTrue(failed.get(), "a job the pool refused reported nothing");
@@ -140,6 +186,7 @@ class PoolOffloadTest {
     // Holds the only worker, so the second job waits in the queue.
     offload.submit(
         "busy",
+        Lane.WORLD,
         () -> {
           running.countDown();
           try {
@@ -153,7 +200,11 @@ class PoolOffloadTest {
         () -> {});
     assertTrue(running.await(5, TimeUnit.SECONDS), "the first job never ran");
     offload.submit(
-        "queued", () -> "b", value -> queuedCompleted.set(true), () -> queuedFailed.set(true));
+        "queued",
+        Lane.WORLD,
+        () -> "b",
+        value -> queuedCompleted.set(true),
+        () -> queuedFailed.set(true));
 
     offload.close();
     release.countDown();
@@ -174,9 +225,9 @@ class PoolOffloadTest {
     retry[0] =
         () -> {
           attempts.incrementAndGet();
-          offload.submit("retried", () -> "a", value -> {}, retry[0]);
+          offload.submit("retried", Lane.WORLD, () -> "a", value -> {}, retry[0]);
         };
-    offload.submit("retried", () -> "a", value -> {}, retry[0]);
+    offload.submit("retried", Lane.WORLD, () -> "a", value -> {}, retry[0]);
 
     offload.drain();
     assertEquals(1, attempts.get());

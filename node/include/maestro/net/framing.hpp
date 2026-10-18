@@ -18,14 +18,22 @@ inline constexpr std::size_t HeaderSize = 4;
 /// deltas that stay far below it.
 inline constexpr std::uint32_t MaxPayloadSize = 8u << 20;
 
+/// Largest first frame a connection may declare. It must be a `Join`, which
+/// is about 40 bytes.
+inline constexpr std::uint32_t MaxJoinSize = 256;
+
+/// Largest frame of a joined control connection. Its largest message, a
+/// `MobClass`, is about 200 bytes.
+inline constexpr std::uint32_t MaxControlPayloadSize = 64u << 10;
+
 /// What is at the front of a receive buffer.
 enum class HeaderStatus {
   /// Fewer than `HeaderSize` bytes have arrived.
   Incomplete,
   /// `Length` bytes of payload follow the header.
   Ready,
-  /// The declared length is over `MaxPayloadSize`. Drop the connection
-  /// instead of allocating.
+  /// The declared length is over the limit. Drop the connection instead of
+  /// allocating.
   TooLarge,
 };
 
@@ -39,7 +47,9 @@ struct Header {
 /// then the payload.
 std::vector<std::uint8_t> frame(std::span<const std::uint8_t> Payload);
 
-/// Reads the header at the front of `Buffer`.
-Header peekHeader(std::span<const std::uint8_t> Buffer) noexcept;
+/// Reads the header at the front of `Buffer`, whose payload may be at most
+/// `Limit` bytes.
+Header peekHeader(std::span<const std::uint8_t> Buffer,
+                  std::uint32_t Limit = MaxPayloadSize) noexcept;
 
 } // namespace maestro::net

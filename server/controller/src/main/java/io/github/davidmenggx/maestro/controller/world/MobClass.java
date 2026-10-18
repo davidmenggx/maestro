@@ -14,15 +14,16 @@ import java.util.Objects;
 public record MobClass(short classId, Shape shape, Abilities abilities, float[] malus) {
 
   /**
-   * Collision box, and the height the mob can step up without jumping. The bounds hold every land
-   * mob vanilla can make: the giant is 3.6 by 12 at scale 1, the scale attribute reaches 16, and
-   * the step height attribute reaches 10. The node refuses a profile outside them, since its search
-   * cost grows with the footprint.
+   * Collision box, and the height the mob can step up without jumping. A search's cost grows with
+   * the footprint, and admission assumes requests cost about the same, so a shape is at most {@link
+   * #MAX_FOOTPRINT} cells, and a larger mob's search stays on the server. The node refuses a
+   * profile past either bound. The step height attribute reaches 10.
    */
   public record Shape(float width, float height, float maxUpStep) {
 
-    public static final float MAX_WIDTH = 64.0f;
-    public static final float MAX_HEIGHT = 256.0f;
+    /** Largest {@link #footprint}, in cells. */
+    public static final int MAX_FOOTPRINT = 512;
+
     public static final float MAX_UP_STEP = 16.0f;
 
     public Shape {
@@ -32,14 +33,25 @@ public record MobClass(short classId, Shape shape, Abilities abilities, float[] 
       }
     }
 
-    /** Whether a shape with these values may be made. False for NaN. */
+    /** Whether a shape with these values may be made. False for NaN and infinity. */
     public static boolean fits(float width, float height, float maxUpStep) {
       return width > 0
-          && width <= MAX_WIDTH
           && height > 0
-          && height <= MAX_HEIGHT
+          && Float.isFinite(width)
+          && Float.isFinite(height)
+          && footprint(width, height) <= MAX_FOOTPRINT
           && maxUpStep >= 0
           && maxUpStep <= MAX_UP_STEP;
+    }
+
+    /**
+     * Cells the evaluator tests for a mob of this size at each node, {@code entityWidth *
+     * entityHeight * entityDepth} as {@code NodeEvaluator.prepare} sizes them. In double, so a huge
+     * width cannot overflow.
+     */
+    public static double footprint(float width, float height) {
+      double side = Math.floor(width + 1.0f);
+      return side * Math.floor(height + 1.0f) * side;
     }
   }
 

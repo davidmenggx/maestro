@@ -7,7 +7,8 @@ package io.github.davidmenggx.maestro.controller.world;
  * <p>Chunk residency is not queried here. It comes from {@link WorldEvent.ChunkLoaded} and {@link
  * WorldEvent.ChunkUnloaded}, so the controller already knows which chunks are readable and there is
  * no second source that could disagree. Cells are read only inside a loaded chunk. An unloaded
- * chunk is sent as cleared, and the node treats it as air.
+ * chunk is sent as cleared, and the node treats it as air. {@link #readable} only guards a read
+ * against a chunk that is still loaded but about to leave.
  */
 public interface WorldSource {
 
@@ -43,19 +44,28 @@ public interface WorldSource {
   int NOT_UNIFORM = -1;
 
   /**
-   * The cell, as {@code (floor << 8) | pathType}, shared by every block of one section of the
-   * chunk, or {@link #NOT_UNIFORM} if the blocks differ or the source cannot tell cheaply. Section
-   * {@code n} covers the {@link #SECTION_HEIGHT} blocks from {@code minY() + n * SECTION_HEIGHT}.
-   * Must agree with {@link #pathTypeAt} and {@link #floorAt} for every block in the section. It
-   * only saves reading them one at a time, so the default knows nothing.
+   * Whether the chunk's blocks can be read now without loading it. A chunk the controller holds as
+   * loaded may briefly not be, as when the server is unloading it before it reports the unload. A
+   * chunk that is not is read again later, and is not sent meanwhile.
+   */
+  default boolean readable(int chunkX, int chunkZ) {
+    return true;
+  }
+
+  /**
+   * The cell, as {@link Cells#pack packed}, shared by every block of one section of the chunk, or
+   * {@link #NOT_UNIFORM} if the blocks differ or the source cannot tell cheaply. Section {@code n}
+   * covers the {@link #SECTION_HEIGHT} blocks from {@code minY() + n * SECTION_HEIGHT}. Must agree
+   * with {@link #pathTypeAt} and {@link #floorAt} for every block in the section. It only saves
+   * reading them one at a time, so the default knows nothing.
    */
   default int uniformCell(int chunkX, int chunkZ, int section) {
     return NOT_UNIFORM;
   }
 
   /**
-   * Reads every block of one section as a cell, {@code (floor << 8) | pathType}, into {@code cells}
-   * at {@code (dx * Chunks.SIZE + dz) * SECTION_HEIGHT + dy}, and returns true, or returns false,
+   * Reads every block of one section as a {@link Cells#pack packed} cell into {@code cells} at
+   * {@code (dx * Chunks.SIZE + dz) * SECTION_HEIGHT + dy}, and returns true, or returns false,
    * leaving {@code cells} undefined, if this source reads blocks one at a time. Must agree with
    * {@link #pathTypeAt} and {@link #floorAt} for every block of the section.
    */

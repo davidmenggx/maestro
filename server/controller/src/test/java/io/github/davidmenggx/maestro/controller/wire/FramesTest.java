@@ -104,12 +104,13 @@ class FramesTest {
     for (int i = 0; i < Frames.MAX_CANCELS_PER_FRAME; i++) {
       ids.add(Long.MAX_VALUE - i);
     }
-    byte[] bytes = Frames.cancels(Long.MAX_VALUE, ids);
+    byte[] bytes = Frames.cancels(Long.MAX_VALUE, Integer.MAX_VALUE, ids);
     assertTrue(bytes.length <= Frames.MAX_REQUEST_FRAME_BYTES, bytes.length + " bytes");
 
     RequestFrame frame = RequestFrame.getRootAsRequestFrame(ByteBuffer.wrap(bytes));
     assertEquals(RequestMsg.PathCancel, frame.bodyType());
     assertEquals(Long.MAX_VALUE, frame.run());
+    assertEquals(0xFFFFFFFFL & Integer.MAX_VALUE, frame.regionId());
     PathCancel cancel = (PathCancel) frame.body(new PathCancel());
     assertEquals(ids.size(), cancel.requestIdsLength());
     for (int i = 0; i < ids.size(); i++) {
@@ -117,7 +118,49 @@ class FramesTest {
     }
 
     ids.add(1L);
-    assertThrows(IllegalArgumentException.class, () -> Frames.cancels(RUN, ids));
+    assertThrows(IllegalArgumentException.class, () -> Frames.cancels(RUN, 1, ids));
+  }
+
+  @Test
+  void aFullFrameFitsOneDatagramWhicheverFieldsAreZero() {
+    // A field left out at its default would give requests different layouts, each costing
+    // room, so every field is written.
+    List<Frames.Request> batch = new ArrayList<>();
+    for (int i = 0; i < Frames.MAX_REQUESTS_PER_FRAME; i++) {
+      WorldEvent.Search search = new WorldEvent.Search(i % 2, 16f, 256, i % 3 == 0 ? 0 : 3);
+      batch.add(
+          new Frames.Request(
+              Long.MAX_VALUE - i, (short) (i % 2), new Pos(i, 0, 0), new Pos(0, i % 2, 0), search));
+    }
+    byte[] mixed = Frames.requests(Long.MAX_VALUE, Integer.MAX_VALUE, batch, 0, 0);
+    assertTrue(mixed.length <= Frames.MAX_REQUEST_FRAME_BYTES, mixed.length + " bytes");
+
+    RequestFrame frame = RequestFrame.getRootAsRequestFrame(ByteBuffer.wrap(mixed));
+    PathRequestBatch decoded = (PathRequestBatch) frame.body(new PathRequestBatch());
+    PathRequest first = decoded.requests(0);
+    assertEquals(0, first.classId());
+    assertEquals(0, first.maxFallDistance());
+    // The builder writes defaults only while it builds a request frame.
+    byte[] cleared = Frames.chunkCleared(1, 0, 0);
+    assertTrue(cleared.length < 64, cleared.length + " bytes");
+  }
+
+  @Test
+  void theLongestAnswerFitsOneDatagram() {
+    // A path walks less than its length bound, a block or more per node.
+    int longest = (int) WorldEvent.Search.MAX_PATH_LENGTH + 1;
+    List<WorldOutput.Node> nodes = new ArrayList<>();
+    for (int i = 0; i < longest; i++) {
+      nodes.add(new WorldOutput.Node(new Pos(i % 1000, i / 1000, 0), (byte) PathType.WALKABLE));
+    }
+    byte[] answer =
+        Frames.response(Long.MAX_VALUE, Long.MAX_VALUE, true, nodes, 1e9f, Long.MAX_VALUE, 0, 0);
+    assertTrue(answer.length <= Frames.MAX_DATAGRAM_BYTES, answer.length + " bytes");
+
+    Reply.Answer read = (Reply.Answer) Frames.readResponse(ByteBuffer.wrap(answer), Long.MAX_VALUE);
+    assertEquals(longest, read.nodes().size());
+    assertEquals(nodes.get(longest - 1).pos(), read.nodes().get(longest - 1).pos());
+    assertTrue(Frames.readResponse(ByteBuffer.wrap(answer), 1) instanceof Reply.Foreign);
   }
 
   @Test
@@ -144,6 +187,59 @@ class FramesTest {
     assertThrows(IllegalArgumentException.class, () -> Frames.readChunk(tooTall, 0, 0));
     WorldSource negative = source(0, 32, (x, y, z) -> -1);
     assertThrows(IllegalArgumentException.class, () -> Frames.readChunk(negative, 0, 0));
+  }
+
+  @Test
+  void aChunkTheWorldCannotReadNowIsNotRead() {
+    WorldSource leaving =
+        new WorldSource() {
+          @Override
+          public MobClass mobClass(short classId) {
+            return null;
+          }
+
+          @Override
+          public int minY() {
+            return 0;
+          }
+
+          @Override
+          public int height() {
+            return 32;
+          }
+
+          @Override
+          public byte pathTypeAt(int x, int y, int z) {
+            throw new AssertionError("a block was read");
+          }
+
+          @Override
+          public int floorAt(int x, int y, int z) {
+            throw new AssertionError("a block was read");
+          }
+
+          @Override
+          public boolean readable(int chunkX, int chunkZ) {
+            return false;
+          }
+        };
+    assertEquals(null, Frames.readChunk(leaving, 0, 0));
+  }
+
+  @Test
+  void aChunkReadKeepsNothingOfTheChunkReadBeforeIt() {
+    // Reads reuse their buffers, so each result must stand alone.
+    WorldSource ground = source(0, 32, (x, y, z) -> y < 8 ? 16 : 0);
+    WorldSource striped = source(0, 32, (x, y, z) -> y % 2 == 0 ? 16 : 0);
+    byte[] alone = Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(ground, 0, 0));
+    Frames.ChunkRuns first = Frames.readChunk(ground, 0, 0);
+    Frames.readChunk(striped, 0, 0);
+    assertArrayEquals(alone, Frames.chunkSnapshot(1, 0, 0, first));
+    // A read that fails partway leaves nothing behind either.
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> Frames.readChunk(source(0, 32, (x, y, z) -> y < 20 ? 16 : -1), 0, 0));
+    assertArrayEquals(alone, Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(ground, 0, 0)));
   }
 
   @Test

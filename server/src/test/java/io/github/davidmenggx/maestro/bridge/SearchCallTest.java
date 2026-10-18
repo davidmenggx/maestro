@@ -1,8 +1,10 @@
 package io.github.davidmenggx.maestro.bridge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.world.MobClass;
 import net.minecraft.SharedConstants;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.entity.EntityType;
@@ -22,28 +24,28 @@ class SearchCallTest {
     assertEquals(1 * 2 * 1, footprint(EntityType.ZOMBIE));
     assertEquals(2 * 3 * 2, footprint(EntityType.IRON_GOLEM));
     assertEquals(2 * 3 * 2, footprint(EntityType.RAVAGER));
-    // Each side is the size plus one, rounded down, so a whole size adds a whole cell.
-    assertEquals(2 * 2 * 2, SearchCall.footprint(1.0f, 1.0f));
-    assertEquals(1 * 1 * 1, SearchCall.footprint(0.99f, 0.5f));
   }
 
   @Test
   void everyLandMobAtItsDefaultSizeIsOffloaded() {
     // The giant is the largest, at 4 by 13 by 4 cells.
     assertEquals(4 * 13 * 4, footprint(EntityType.GIANT));
-    assertTrue(footprint(EntityType.GIANT) <= SearchCall.MAX_FOOTPRINT);
+    assertTrue(fits(EntityType.GIANT.getWidth(), EntityType.GIANT.getHeight()));
   }
 
   @Test
   void aMobLargerThanTheBoundStaysVanilla() {
-    assertEquals(SearchCall.MAX_FOOTPRINT, SearchCall.footprint(7.0f, 7.0f));
-    assertTrue(SearchCall.footprint(7.0f, 8.0f) > SearchCall.MAX_FOOTPRINT);
     // A zombie at the largest scale, and a giant at twice its size.
-    assertTrue(SearchCall.footprint(0.6f * 16, 1.95f * 16) > SearchCall.MAX_FOOTPRINT);
-    assertTrue(SearchCall.footprint(3.6f * 2, 12.0f * 2) > SearchCall.MAX_FOOTPRINT);
+    assertFalse(fits(EntityType.ZOMBIE.getWidth() * 16, EntityType.ZOMBIE.getHeight() * 16));
+    assertFalse(fits(EntityType.GIANT.getWidth() * 2, EntityType.GIANT.getHeight() * 2));
   }
 
-  private static long footprint(EntityType<?> type) {
-    return SearchCall.footprint(type.getWidth(), type.getHeight());
+  private static double footprint(EntityType<?> type) {
+    return MobClass.Shape.footprint(type.getWidth(), type.getHeight());
+  }
+
+  /** Whether {@link SearchCall#read} takes a mob of this size, at the default step height. */
+  private static boolean fits(float width, float height) {
+    return MobClass.Shape.fits(width, height, 0.6f);
   }
 }

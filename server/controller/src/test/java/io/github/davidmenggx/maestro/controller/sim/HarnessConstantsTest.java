@@ -48,7 +48,7 @@ class HarnessConstantsTest {
     // Answers later than the admission bound are abandoned, so an SLO at or past it
     // could never fail.
     assertTrue(
-        SimRun.TICK_BUDGET < Controller.MAX_TICKS_LATE,
+        SimRun.TICK_BUDGET < RequestTracker.MAX_TICKS_LATE,
         "the SLO budget is no tighter than what admission control already guarantees");
   }
 
@@ -57,9 +57,16 @@ class HarnessConstantsTest {
     assertTrue(Topology.MAX_HEIGHT >= Topology.MIN_HEIGHT, "height range is inverted");
     assertTrue(
         Topology.MAX_RELIEF <= Topology.MIN_HEIGHT / 4, "a sampled hill can outgrow its column");
-    for (int size : Topology.regionSizes()) {
-      assertEquals(0, size % Chunks.SIZE, "region size " + size + " is not chunk aligned");
-    }
+    assertEquals(0, Topology.REGION_SIZE % Chunks.SIZE, "regions are not chunk aligned");
+    // Four pathfinding horizons of about 64 blocks, the smallest region the spec allows.
+    assertTrue(Topology.REGION_SIZE >= 4 * 64, "regions are smaller than the spec allows");
+  }
+
+  @Test
+  void theNodeKeepsAnswersLongerThanTheControllerWaits() {
+    long waitSteps = (long) RequestTracker.MAX_TICKS_LATE * Simulation.STEPS_PER_TICK;
+    assertTrue(ModeledNode.RETENTION_STEPS > waitSteps, "a resend can miss its kept answer");
+    assertTrue(ModeledNode.MAX_WAIT_STEPS > waitSteps, "a node drops a request still awaited");
   }
 
   @Test

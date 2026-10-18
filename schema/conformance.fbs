@@ -8,14 +8,15 @@ namespace maestro.fbs;
 // only, since the model does not run A*.
 //
 // A replay starts with a node that holds nothing, has no workers, keeps
-// answers and cancels for 500 ms, and runs the vanilla search. Time starts at
-// 0 and moves only with `Advance`.
+// answers and cancels for 1000 ms, drops a request that waited more than
+// 1000 ms, and runs the vanilla search. Time starts at 0 and moves only with
+// `Advance`.
 
 enum LinkPort : ubyte { World, Control }
 
 enum StepKind : ubyte {
-  // A new connection on `port`, whose first frame is `frame`. It becomes the
-  // port's current connection.
+  // A new connection on `port`, whose first frame is `frame`. Unless the node
+  // refuses it, it becomes the port's current connection.
   Connect,
   // `frame` on the current connection of `port`.
   Stream,
@@ -26,8 +27,8 @@ enum StepKind : ubyte {
   // `millis` pass.
   Advance,
   // The node runs `count` waiting requests to completion, oldest first, or
-  // every waiting request if `count` is 0. A canceled request is skipped and
-  // not counted.
+  // every waiting request if `count` is 0. A canceled request, or one that
+  // waited too long, is skipped and not counted.
   Serve,
   // The node's heartbeat timer fires.
   Heartbeat

@@ -29,7 +29,8 @@ import java.util.Set;
  * interval of it has.
  *
  * <p>Each controller process gets its own {@link Session}. A restarted controller's links are gone
- * and its old session sends nothing, but datagrams still in flight reach the new process.
+ * and its old session sends nothing, but datagrams still in flight reach the new process. The first
+ * frame the node reads on each ordered connection is the one it joins the link with.
  */
 public final class SimTransport {
 
@@ -43,9 +44,6 @@ public final class SimTransport {
 
   /** A frame that reached a paused node, kept until it resumes. */
   private record Arrived(Transport.Channel channel, byte[] bytes, int sentEpoch) {}
-
-  /** Largest UDP payload over IPv4. */
-  static final int MAX_DATAGRAM_BYTES = 65_507;
 
   /** UDP payload that fits one Ethernet frame. A larger datagram travels as several fragments. */
   static final int FRAGMENT_BYTES = 1_472;
@@ -63,7 +61,9 @@ public final class SimTransport {
   /** Counts each node's connect attempts and link changes. A frame is valid only in its own. */
   private final Map<NodeId, Integer> epoch = new LinkedHashMap<>();
 
-  /** Ordered links whose first frame, the `Join`, the node has handled in this epoch. */
+  /**
+   * Ordered links whose first frame, which should be a `Join`, the node has handled in this epoch.
+   */
   private final Set<Link> opened = new LinkedHashSet<>();
 
   private final Map<Link, Long> lastDelivery = new LinkedHashMap<>();
@@ -80,17 +80,14 @@ public final class SimTransport {
   }
 
   /**
-   * The transport of one controller process, which names its run in every link it opens. Once a
-   * newer session starts, this one sends nothing and hears nothing.
+   * The transport of one controller process. Once a newer session starts, this one sends nothing
+   * and hears nothing.
    */
   public final class Session implements Transport {
 
-    private final long run;
     private Listener listener;
 
-    private Session(long run) {
-      this.run = run;
-    }
+    private Session() {}
 
     @Override
     public void listen(Listener listener) {
@@ -133,29 +130,8 @@ public final class SimTransport {
               return;
             }
             connected.add(node);
-            // Each connection opens with a `Join`, which the node reads before anything else.
-            transmit(
-                node,
-                Channel.WORLD,
-                ByteBuffer.wrap(Frames.joinWorld(run, attempt)),
-                Direction.TO_NODE);
-            transmit(
-                node,
-                Channel.CONTROL,
-                ByteBuffer.wrap(Frames.joinControl(run, attempt)),
-                Direction.TO_NODE);
             listener.onConnected(node);
           });
-    }
-
-    @Override
-    public void disconnect(NodeId node) {
-      if (session != this) {
-        return;
-      }
-      sim.metrics().count("transport.disconnect", 1, "node", node.toString());
-      bumpEpoch(node);
-      closeLink(node);
     }
 
     /** Runs {@code callback} on the listener later, if this session is still the live one. */
@@ -176,12 +152,12 @@ public final class SimTransport {
   }
 
   /** Starts the transport of a new controller process. The old one's links are gone. */
-  Session restart(long run) {
+  Session restart() {
     for (NodeId node : List.copyOf(connected)) {
       bumpEpoch(node);
       closeLink(node);
     }
-    session = new Session(run);
+    session = new Session();
     return session;
   }
 
@@ -347,7 +323,7 @@ public final class SimTransport {
 
     // The receiving side would refuse it: a node drops a stream frame past its limit, and a
     // socket will not send a datagram past the protocol's.
-    if (bytes.length > (channel.ordered() ? Frames.MAX_FRAME_BYTES : MAX_DATAGRAM_BYTES)) {
+    if (bytes.length > (channel.ordered() ? Frames.MAX_FRAME_BYTES : Frames.MAX_DATAGRAM_BYTES)) {
       sim.metrics().count("transport.oversize", 1, "node", nodeLabel, "channel", channel.name());
       return;
     }

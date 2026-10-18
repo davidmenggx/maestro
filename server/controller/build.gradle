@@ -32,7 +32,7 @@ tasks.withType(JavaCompile).configureEach {
   options.release = 25
 }
 
-def fuzzTiers = [shallow: "20000", deep: "6000", coverage: "2000"]
+def fuzzTiers = [shallow: "5000", deep: "1500", coverage: "2000"]
 
 // Forwarded to the forked test JVM, which does not inherit the Gradle JVM's
 // properties. `make fuzz SEED=n` replays a seed reported by a failing run.

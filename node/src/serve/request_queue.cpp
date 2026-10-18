@@ -15,6 +15,7 @@ Admission RequestQueue::admit(Job Next, Clock::time_point Now, Answer &Cached) {
     if (!Open.try_emplace(Next.RequestId, State::Waiting).second)
       return Admission::Duplicate;
     Next.Generation = Generation;
+    Next.Admitted = Now;
     Queue.push_back(std::move(Next));
     ++WaitingCount;
   }

@@ -31,12 +31,25 @@ using ConnectionId = std::uint64_t;
 
 struct NodeOptions {
   /// How long an answer or a cancel is kept for later copies of its request:
-  /// the 10 ticks after which the controller gives up on a request.
-  Clock::duration Retention = std::chrono::milliseconds(500);
+  /// twice the 10 ticks after which the controller gives up on a request, so a
+  /// resend still finds its answer when the server's ticks run long.
+  Clock::duration Retention = std::chrono::milliseconds(1000);
+  /// How long a job may wait between its admission and a worker taking it.
+  /// One that waited longer is not searched, since its answer would come too
+  /// late, and is settled as a canceled request is.
+  Clock::duration MaxWait = std::chrono::milliseconds(1000);
   /// How long a new connection may wait before its first frame.
   Clock::duration JoinTimeout = std::chrono::seconds(5);
   fbs::Pathfinder Search = fbs::Pathfinder::VANILLA;
 };
+
+/// Largest answer the node sends: the largest UDP payload over IPv4.
+inline constexpr std::size_t MaxAnswerSize = 65507;
+
+/// A copy of `Frame` to send as an answer, or null if it is larger than
+/// `MaxAnswerSize`, which no valid request's answer is, since its path is
+/// shorter than its `maxPathLength`.
+Answer answerOf(std::span<const std::uint8_t> Frame);
 
 /// What one thread reuses from job to job.
 struct Scratch {
@@ -46,6 +59,14 @@ struct Scratch {
   std::unique_ptr<search::Search> Search;
   flatbuffers::FlatBufferBuilder Builder;
   search::Result Path;
+};
+
+/// What `NodeCore::run` did with a job.
+struct Outcome {
+  /// False if the job waited past `MaxWait` and was dropped unsearched.
+  bool Searched = false;
+  /// The answer to pass to `deliver`, or null if there is none to send.
+  Answer Result = nullptr;
 };
 
 /// Every protocol decision of a compute node, with no sockets, threads or
@@ -64,13 +85,16 @@ struct Scratch {
 /// A link starts with a `Hello` on its control connection. Losing it forgets
 /// every profile and request, since the next link may come from another
 /// controller run, whose ids mean other things. The world state stays, so the
-/// next link can resume it. A world frame the store refuses drops the world
-/// state too, and the link with it, so the controller reconnects and sends the
-/// area again.
+/// next link can resume it. A world frame the store refuses, or an assignment
+/// of another run than the link's, drops the world state too, and the link
+/// with it, so the controller reconnects and sends the area again.
 ///
-/// Every member but `queue` and `run` must be called from one thread, the
-/// event thread, which is also the thread `Output` is called on. `queue` and
-/// `run` may be called from any thread.
+/// A job is answered only if it is searched and its answer fits a datagram.
+/// Otherwise it settles with no answer, and a later copy is dropped.
+///
+/// Every member but `queue`, `run` and `searchKind` must be called from one
+/// thread, the event thread, which is also the thread `Output` is called on.
+/// `queue`, `run` and `searchKind` may be called from any thread.
 class NodeCore {
 public:
   class Output {
@@ -117,18 +141,13 @@ public:
   /// opening.
   void expirePending();
 
-  /// Runs `Count` waiting jobs on the event thread, oldest first, or every
-  /// waiting job if `Count` is 0, and sends their answers. Returns how many
-  /// ran.
-  std::size_t serveWaiting(std::size_t Count);
-
   RequestQueue &queue() { return Queue; }
 
   const world::WorldStore &store() const { return Store; }
 
-  /// Searches for `Next`, which `queue().take` returned, and settles it.
-  /// Returns the answer to `deliver`, or null if there is none to send.
-  Answer run(const Job &Next, Scratch &With);
+  /// Searches for `Next`, which `queue().take` returned, unless it waited past
+  /// `MaxWait`, and settles it.
+  Outcome run(const Job &Next, Scratch &With);
 
   /// Sends `Result`, the answer to `Finished`, unless the link it came on has
   /// been dropped since.
@@ -183,8 +202,6 @@ private:
       Profiles;
   /// Scratch for frames built on the event thread.
   flatbuffers::FlatBufferBuilder Builder;
-  /// For `serveWaiting`.
-  Scratch Inline;
 };
 
 } // namespace maestro::serve

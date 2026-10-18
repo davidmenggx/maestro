@@ -15,6 +15,7 @@ public final class SimMetrics implements Metrics {
 
   private final Map<String, Long> counters = new TreeMap<>();
   private final Map<String, List<Double>> distributions = new TreeMap<>();
+  private final Map<String, Long> gauges = new TreeMap<>();
 
   @Override
   public void count(String name, long delta, String... labels) {
@@ -26,9 +27,15 @@ public final class SimMetrics implements Metrics {
     distributions.computeIfAbsent(key(name, labels), k -> new ArrayList<>()).add(value);
   }
 
-  /** No invariant reads a gauge, so none is kept. */
   @Override
-  public void gauge(String name, long value, String... labels) {}
+  public void gauge(String name, long value, String... labels) {
+    gauges.put(key(name, labels), value);
+  }
+
+  /** The last value the gauge was set to, or 0 if it never was. */
+  public long gauge(String name, String... labels) {
+    return gauges.getOrDefault(key(name, labels), 0L);
+  }
 
   public long counter(String name, String... labels) {
     return counters.getOrDefault(key(name, labels), 0L);

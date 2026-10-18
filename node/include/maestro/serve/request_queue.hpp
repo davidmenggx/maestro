@@ -33,8 +33,9 @@ struct Job {
   /// The controller run and the region its request frame named.
   std::uint64_t Run = 0;
   std::uint32_t RegionId = 0;
-  /// Set by `RequestQueue::admit`.
+  /// Both set by `RequestQueue::admit`.
   std::uint64_t Generation = 0;
+  Clock::time_point Admitted{};
 };
 
 /// What `RequestQueue::admit` did with a request.

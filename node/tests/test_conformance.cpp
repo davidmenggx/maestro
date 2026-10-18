@@ -6,6 +6,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <sstream>
 #include <string>
@@ -80,20 +81,25 @@ std::string join(const std::vector<std::string> &Effects) {
   return Out.str();
 }
 
-/// A node with no workers, driven one step at a time, which describes
-/// everything it does in reply.
+/// `Ids` as text, for a report.
+std::string list(const std::set<ConnectionId> &Ids) {
+  std::string Out = "{";
+  for (const ConnectionId Id : Ids)
+    Out += (Out.size() > 1 ? ", " : "") + std::to_string(Id);
+  return Out + "}";
+}
+
+/// A node with no workers and default options, driven one step at a time,
+/// which describes everything it does in reply.
 class Replay final : public serve::NodeCore::Output {
 public:
-  Replay()
-      : Core(
-            serve::NodeOptions{.Retention = std::chrono::milliseconds(500),
-                               .Search = fbs::Pathfinder::VANILLA},
-            [this] { return Time; }, *this) {}
+  Replay() : Core(serve::NodeOptions{}, [this] { return Time; }, *this) {}
 
   /// Runs `Step` and returns what the node did.
   std::vector<std::string> run(const fbs::Step &Step) {
     Effects.clear();
     Opened.reset();
+    Refused = false;
     // Copied out of the fixture, so it is aligned as a frame off the wire.
     const Bytes Frame = Step.frame()
                             ? Bytes(Step.frame()->begin(), Step.frame()->end())
@@ -105,10 +111,14 @@ public:
     switch (Step.kind()) {
     case fbs::StepKind::Connect:
       Opened = ++Last;
-      Connection = *Opened;
       PortOf[*Opened] = On;
       Core.connected(On, *Opened);
       Core.received(*Opened, Frame);
+      // A refused connection never joined, so the port keeps its connection.
+      if (!Refused) {
+        Connection = *Opened;
+        Joined.insert(*Opened);
+      }
       break;
     case fbs::StepKind::Stream:
       if (Connection)
@@ -117,10 +127,13 @@ public:
         Effects.push_back("(the script streams on a port with no connection)");
       break;
     case fbs::StepKind::Disconnect:
-      if (Connection)
+      if (Connection) {
+        // Closed by the controller, so not one the node closes.
+        Joined.erase(*Connection);
         Core.disconnected(*Connection);
-      else
+      } else {
         Effects.push_back("(the script closes a port with no connection)");
+      }
       Connection.reset();
       break;
     case fbs::StepKind::Datagram:
@@ -130,7 +143,7 @@ public:
       Time += std::chrono::milliseconds(Step.millis());
       break;
     case fbs::StepKind::Serve:
-      Core.serveWaiting(Step.count());
+      serveWaiting(Core, With, Step.count());
       break;
     case fbs::StepKind::Heartbeat:
       Core.heartbeat();
@@ -138,10 +151,13 @@ public:
     default:
       Effects.push_back("(a step of unknown kind)");
     }
-    if (Unexplained > 0)
-      Effects.push_back("closed " + std::to_string(Unexplained) +
+    if (!Closed.empty()) {
+      Effects.push_back("closed " + std::to_string(Closed.size()) +
                         " connections without dropping the link");
-    Unexplained = 0;
+      for (const ConnectionId Id : Closed)
+        Joined.erase(Id);
+      Closed.clear();
+    }
     return Effects;
   }
 
@@ -164,10 +180,12 @@ private:
   }
 
   void close(ConnectionId Which) override {
-    if (Opened && Which == *Opened)
+    if (Opened && Which == *Opened) {
       Effects.push_back("Refused");
-    else
-      ++Unexplained;
+      Refused = true;
+    } else {
+      Closed.insert(Which);
+    }
   }
 
   void sendTo(const asio::ip::udp::endpoint &To,
@@ -189,22 +207,33 @@ private:
   }
 
   void linkDropped(std::string_view) override {
-    // The link's connections were closed as part of the drop.
-    Unexplained = 0;
-    Effects.push_back("LinkDropped");
+    // The drop closes exactly the link's joined connections.
+    if (Closed == Joined)
+      Effects.push_back("LinkDropped");
+    else
+      Effects.push_back("LinkDropped after closing " + list(Closed) +
+                        " instead of " + list(Joined));
+    Closed.clear();
+    Joined.clear();
   }
 
   const asio::ip::udp::endpoint Address{asio::ip::make_address("127.0.0.1"),
                                         40000};
   serve::Clock::time_point Time{};
   serve::NodeCore Core;
+  serve::Scratch With{fbs::Pathfinder::VANILLA};
+  /// The connection each port's steps act on.
   std::array<std::optional<ConnectionId>, 2> Current;
   std::map<ConnectionId, Port> PortOf;
   ConnectionId Last = 0;
-  /// The connection the current step opened.
+  /// The connection the current step opened, and whether the node refused it.
   std::optional<ConnectionId> Opened;
-  /// Connections closed since the last link drop, other than `Opened`.
-  int Unexplained = 0;
+  bool Refused = false;
+  /// Connections that joined and that neither side has closed since.
+  std::set<ConnectionId> Joined;
+  /// Connections the node closed since the last link drop, other than
+  /// `Opened`.
+  std::set<ConnectionId> Closed;
   std::vector<std::string> Effects;
 };
 
@@ -314,33 +343,50 @@ TEST(Conformance, TheReplayChecksEveryKindOfStepAndEffect) {
     for (int Z = 0; Z < 2; ++Z)
       Steps.step(StepKind::Stream, LinkPort::World,
                  Flat.chunk(1 + X * 2 + Z, X, Z));
+  const auto Answered = [](std::uint64_t RequestId) {
+    return Script::Effect{.Kind = EffectKind::Answer,
+                          .Run = TestRun,
+                          .Sequence = 4,
+                          .RequestId = RequestId};
+  };
   Steps
       .step(StepKind::Datagram, LinkPort::World, requestFrame({1}),
             {{.Kind = EffectKind::UnknownProfile,
               .Run = TestRun,
               .RequestId = 1}})
       .step(StepKind::Stream, LinkPort::Control, mobClassFrame())
-      .step(StepKind::Datagram, LinkPort::World, requestFrame({2, 3}))
+      .step(StepKind::Datagram, LinkPort::World, requestFrame({2, 3, 4}))
+      .step(StepKind::Datagram, LinkPort::World, cancelFrame({2}))
       .step(StepKind::Heartbeat, LinkPort::World, {},
             {{.Kind = EffectKind::Heartbeat, .Depth = 2}})
-      .step(StepKind::Serve, LinkPort::World, {},
-            {{.Kind = EffectKind::Answer,
-              .Run = TestRun,
-              .Sequence = 4,
-              .RequestId = 2}},
-            0, 1)
-      .step(StepKind::Advance, LinkPort::World, {}, {}, 499)
-      .step(StepKind::Datagram, LinkPort::World, requestFrame({2}),
-            {{.Kind = EffectKind::Answer,
-              .Run = TestRun,
-              .Sequence = 4,
-              .RequestId = 2}})
+      // 2 was canceled, so it is skipped and not counted.
+      .step(StepKind::Serve, LinkPort::World, {}, {Answered(3)}, 0, 1)
+      .step(StepKind::Advance, LinkPort::World, {}, {}, 999)
+      .step(StepKind::Datagram, LinkPort::World, requestFrame({3}),
+            {Answered(3)})
+      .step(StepKind::Datagram, LinkPort::World, requestFrame({5}))
+      .step(StepKind::Advance, LinkPort::World, {}, {}, 2)
+      // 4 waited past the longest wait, so it is skipped and not counted.
+      .step(StepKind::Serve, LinkPort::World, {}, {Answered(5)}, 0, 1)
+      .step(StepKind::Datagram, LinkPort::World, requestFrame({4}))
+      .step(StepKind::Heartbeat, LinkPort::World, {},
+            {{.Kind = EffectKind::Heartbeat, .Depth = 0}})
       .step(StepKind::Connect, LinkPort::Control,
             joinFrame(Port::Control, TestRun, 1), {{EffectKind::Refused}})
+      // The refused connection never became the port's.
+      .step(StepKind::Disconnect, LinkPort::Control, {},
+            {{EffectKind::LinkDropped}})
       .step(StepKind::Connect, LinkPort::Control,
             joinFrame(Port::Control, TestRun, 2),
-            {{EffectKind::LinkDropped},
-             {EffectKind::Hello, TestRun, TestRegion, 4}})
+            {{EffectKind::Hello, TestRun, TestRegion, 4}})
+      .step(StepKind::Connect, LinkPort::World,
+            joinFrame(Port::World, TestRun, 2))
+      // A fresh assignment behind the stream held.
+      .step(StepKind::Stream, LinkPort::World,
+            Flat.assignment(false, TestRun, TestRegion, 3),
+            {{EffectKind::LinkDropped}})
+      .step(StepKind::Connect, LinkPort::Control,
+            joinFrame(Port::Control, TestRun, 3), {{EffectKind::Hello}})
       .step(StepKind::Serve, LinkPort::World, {})
       .step(StepKind::Disconnect, LinkPort::Control, {},
             {{EffectKind::LinkDropped}});

@@ -20,28 +20,29 @@ namespace {
 using asio::ip::tcp;
 using asio::ip::udp;
 
-serve::NodeOptions nodeOptions(const ServerOptions &Opts) {
-  return {.Retention = Opts.Retention,
-          .JoinTimeout = Opts.JoinTimeout,
-          .Search = Opts.Search};
-}
+/// How long an acceptor rests after a failed accept, such as one out of file
+/// descriptors, which would fail again at once.
+constexpr std::chrono::milliseconds AcceptBackoff{100};
 
 } // namespace
 
 /// One TCP connection carrying length-prefixed frames. Lives on the I/O
 /// thread. `OnClose` runs when the peer or the network ends the connection,
-/// not when `close` does. `OnSilent` runs if no frame arrives within the
-/// timeout `start` is given.
+/// or when the peer declares a frame over its limit, not when `close` does.
+/// `OnSilent` runs if no frame arrives within the timeout `start` is given.
 class Server::Stream : public std::enable_shared_from_this<Stream> {
 public:
   using FrameHandler = std::function<void(std::span<const std::uint8_t>)>;
   using Handler = std::function<void()>;
 
-  explicit Stream(tcp::socket Socket)
-      : Socket(std::move(Socket)), Deadline(this->Socket.get_executor()) {}
+  /// The first frame may declare at most `FirstLimit` bytes, and every later
+  /// one `LaterLimit`.
+  Stream(tcp::socket Socket, std::uint32_t FirstLimit, std::uint32_t LaterLimit)
+      : Socket(std::move(Socket)), Deadline(this->Socket.get_executor()),
+        Limit(FirstLimit), LaterLimit(LaterLimit) {}
 
   void start(FrameHandler OnFrame, Handler OnClose,
-             std::chrono::milliseconds Timeout, Handler OnSilent) {
+             serve::Clock::duration Timeout, Handler OnSilent) {
     this->OnFrame = std::move(OnFrame);
     this->OnClose = std::move(OnClose);
     Deadline.expires_after(Timeout);
@@ -78,7 +79,7 @@ private:
         [Self = shared_from_this()](asio::error_code Error, std::size_t) {
           if (Error)
             return Self->fail();
-          const auto Peeked = peekHeader(Self->Header);
+          const auto Peeked = peekHeader(Self->Header, Self->Limit);
           if (Peeked.Status != HeaderStatus::Ready)
             return Self->fail();
           Self->Body.resize(Peeked.Length);
@@ -93,6 +94,7 @@ private:
           if (Error)
             return Self->fail();
           Self->Deadline.cancel();
+          Self->Limit = Self->LaterLimit;
           Self->OnFrame(Self->Body);
           // The handler may have closed this connection.
           if (Self->open())
@@ -123,6 +125,9 @@ private:
 
   tcp::socket Socket;
   asio::steady_timer Deadline;
+  /// The limit on the next frame's payload, and on every one after the first.
+  std::uint32_t Limit;
+  const std::uint32_t LaterLimit;
   std::array<std::uint8_t, HeaderSize> Header{};
   std::vector<std::uint8_t> Body;
   std::deque<std::vector<std::uint8_t>> Outbox;
@@ -135,10 +140,10 @@ Server::Server(asio::io_context &Io, const ServerOptions &Opts)
       WorldAcceptor(Io, {asio::ip::make_address(Opts.Bind), Opts.WorldPort}),
       ControlAcceptor(Io,
                       {asio::ip::make_address(Opts.Bind), Opts.ControlPort}),
+      WorldBackoff(Io), ControlBackoff(Io),
       Requests(Io, {asio::ip::make_address(Opts.Bind), Opts.RequestPort}),
-      Heartbeat(Io),
-      Core(
-          nodeOptions(Opts), [] { return serve::Clock::now(); }, *this),
+      Heartbeat(Io), Core(
+                         Opts.Node, [] { return serve::Clock::now(); }, *this),
       Pool(Core, Opts.Workers,
            [this](const serve::Job &Finished, serve::Answer Result) {
              asio::post(this->Io, [this, Finished, Result = std::move(Result)] {
@@ -151,13 +156,11 @@ Server::Server(asio::io_context &Io, const ServerOptions &Opts)
   // A full send buffer drops the answer, as the network might, instead of
   // stalling the I/O thread.
   Requests.non_blocking(true);
-  accept(WorldAcceptor, serve::Port::World);
-  accept(ControlAcceptor, serve::Port::Control);
+  accept(WorldAcceptor, WorldBackoff, serve::Port::World);
+  accept(ControlAcceptor, ControlBackoff, serve::Port::Control);
   receiveRequests();
   scheduleHeartbeat();
 }
-
-Server::~Server() { Pool.stop(); }
 
 void Server::stop() {
   asio::post(Io, [this] { shutdown(); });
@@ -168,6 +171,8 @@ void Server::shutdown() {
   asio::error_code Ignored;
   WorldAcceptor.close(Ignored);
   ControlAcceptor.close(Ignored);
+  WorldBackoff.cancel();
+  ControlBackoff.cancel();
   Requests.close(Ignored);
   Heartbeat.cancel();
   for (auto &[Id, Connection] : Connections)
@@ -176,22 +181,33 @@ void Server::shutdown() {
   Pool.stop();
 }
 
-void Server::accept(tcp::acceptor &Acceptor, serve::Port On) {
-  Acceptor.async_accept(
-      [this, &Acceptor, On](asio::error_code Error, tcp::socket Socket) {
-        if (!Acceptor.is_open())
-          return;
-        if (!Error)
-          open(std::move(Socket), On);
-        accept(Acceptor, On);
-      });
+void Server::accept(tcp::acceptor &Acceptor, asio::steady_timer &Backoff,
+                    serve::Port On) {
+  Acceptor.async_accept([this, &Acceptor, &Backoff, On](asio::error_code Error,
+                                                        tcp::socket Socket) {
+    if (!Acceptor.is_open())
+      return;
+    if (!Error) {
+      open(std::move(Socket), On);
+      return accept(Acceptor, Backoff, On);
+    }
+    std::clog << "maestro-node: accept failed: " << Error.message() << '\n';
+    Backoff.expires_after(AcceptBackoff);
+    Backoff.async_wait([this, &Acceptor, &Backoff, On](asio::error_code Error) {
+      if (!Error && Acceptor.is_open())
+        accept(Acceptor, Backoff, On);
+    });
+  });
 }
 
 void Server::open(tcp::socket Socket, serve::Port On) {
   asio::error_code Ignored;
   Socket.set_option(tcp::no_delay(true), Ignored);
   const serve::ConnectionId Id = ++LastConnection;
-  auto Connection = std::make_shared<Stream>(std::move(Socket));
+  // Until its `Join`, a connection may not make the node allocate much.
+  auto Connection = std::make_shared<Stream>(
+      std::move(Socket), MaxJoinSize,
+      On == serve::Port::World ? MaxPayloadSize : MaxControlPayloadSize);
   Connections.emplace(Id, Connection);
   Core.connected(On, Id);
   Connection->start(
@@ -202,7 +218,7 @@ void Server::open(tcp::socket Socket, serve::Port On) {
         Connections.erase(Id);
         Core.disconnected(Id);
       },
-      Opts.JoinTimeout, [this] { Core.expirePending(); });
+      Opts.Node.JoinTimeout, [this] { Core.expirePending(); });
 }
 
 void Server::receiveRequests() {
@@ -245,9 +261,12 @@ void Server::close(serve::ConnectionId Which) {
 
 void Server::sendTo(const udp::endpoint &To,
                     std::span<const std::uint8_t> Datagram) {
-  asio::error_code Ignored;
+  asio::error_code Error;
   Requests.send_to(asio::buffer(Datagram.data(), Datagram.size()), To, 0,
-                   Ignored);
+                   Error);
+  if (Error)
+    std::clog << "maestro-node: a datagram to " << To
+              << " was not sent: " << Error.message() << '\n';
 }
 
 void Server::linkDropped(std::string_view Reason) {

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <compare>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -22,20 +23,22 @@ int columnIndex(int X, int Z) {
   return (X % ChunkSize) * ChunkSize + Z % ChunkSize;
 }
 
-/// Orders the indices below `Count` by `Key`, whose values are below
-/// `Ends.size()`, into `Out`, keeping their order within a key. Afterwards the
-/// indices of key `K` end at `Ends[K]` and begin where those of `K - 1` end.
-template <typename KeyOf>
-void groupBy(std::uint32_t Count, std::uint32_t *Out,
-             std::vector<std::uint32_t> &Ends, KeyOf Key) {
-  for (std::uint32_t I = 0; I < Count; ++I)
-    ++Ends[Key(I)];
-  std::uint32_t Begin = 0;
-  for (std::uint32_t &Slot : Ends)
-    Begin += std::exchange(Slot, Begin);
-  for (std::uint32_t I = 0; I < Count; ++I)
-    Out[Ends[Key(I)]++] = I;
-}
+/// One edit of a delta, keyed so that sorted, the edits of one chunk are
+/// adjacent, within it those of one column, and a cell's last edit comes last.
+struct EditKey {
+  /// `ChunkX * chunksPerSide + ChunkZ`.
+  std::uint32_t Chunk;
+  /// The column within the chunk, then the offset, which fits 16 bits as the
+  /// height does.
+  std::uint32_t Cell;
+  /// The edit's place in the delta.
+  std::uint32_t Index;
+
+  std::uint32_t column() const { return Cell >> 16; }
+  int offset() const { return static_cast<int>(Cell & 0xFFFF); }
+
+  friend auto operator<=>(const EditKey &, const EditKey &) = default;
+};
 
 } // namespace
 
@@ -54,6 +57,10 @@ std::shared_ptr<const Column> Column::with(int Offset, Cell Value) const {
 
 std::shared_ptr<const Column>
 Column::with(std::span<const ColumnEdit> Edits) const {
+  if (std::ranges::all_of(Edits, [this](const ColumnEdit &Edit) {
+        return at(Edit.Offset) == Edit.Value;
+      }))
+    return shared_from_this();
   std::vector<Run> Out;
   Out.reserve(Runs.size() + 2 * Edits.size());
   auto Edit = Edits.begin();
@@ -133,74 +140,67 @@ std::shared_ptr<const Area> Area::withCells(std::span<const CellEdit> Edits,
   Next->Sequence = Sequence;
   const int PerSide = Geo.chunksPerSide();
 
-  // The edits by chunk, so every row and chunk is copied once.
-  std::vector<std::uint32_t> ByChunk(Edits.size());
-  std::vector<std::uint32_t> ChunkEnds(static_cast<std::size_t>(PerSide) *
-                                       PerSide);
-  groupBy(static_cast<std::uint32_t>(Edits.size()), ByChunk.data(), ChunkEnds,
-          [&](std::uint32_t I) {
-            assert(Geo.contains(Edits[I].X, Edits[I].Y, Edits[I].Z) &&
-                   "edit outside the area");
-            return Edits[I].X / ChunkSize * PerSide + Edits[I].Z / ChunkSize;
-          });
+  std::vector<EditKey> Keys;
+  Keys.reserve(Edits.size());
+  for (std::size_t I = 0; I < Edits.size(); ++I) {
+    const CellEdit &Edit = Edits[I];
+    assert(Geo.contains(Edit.X, Edit.Y, Edit.Z) && "edit outside the area");
+    const auto Column = static_cast<std::uint32_t>(columnIndex(Edit.X, Edit.Z));
+    const auto Offset = static_cast<std::uint32_t>(Edit.Y - Geo.MinY);
+    Keys.push_back({static_cast<std::uint32_t>(Edit.X / ChunkSize * PerSide +
+                                               Edit.Z / ChunkSize),
+                    Column << 16 | Offset, static_cast<std::uint32_t>(I)});
+  }
+  std::sort(Keys.begin(), Keys.end());
 
-  // Rows already copied for this version, by `ChunkX`.
-  std::vector<ChunkRow *> CopiedRows(static_cast<std::size_t>(PerSide));
-  std::vector<std::uint64_t> Keys;
+  // The row copied for this version, if any. A row's chunks are adjacent.
+  ChunkRow *Row = nullptr;
+  int RowX = -1;
   std::vector<ColumnEdit> ColumnEdits;
-  std::uint32_t ChunkBegin = 0;
-  for (std::size_t ChunkIndex = 0; ChunkIndex < ChunkEnds.size();
-       ++ChunkIndex) {
-    const std::span<const std::uint32_t> InChunk(
-        ByChunk.data() + ChunkBegin, ChunkEnds[ChunkIndex] - ChunkBegin);
-    ChunkBegin = ChunkEnds[ChunkIndex];
-    if (InChunk.empty())
-      continue;
-
+  for (std::size_t Begin = 0; Begin < Keys.size();) {
+    const std::uint32_t ChunkIndex = Keys[Begin].Chunk;
     const int ChunkX = static_cast<int>(ChunkIndex) / PerSide;
     const int ChunkZ = static_cast<int>(ChunkIndex) % PerSide;
-    ChunkRow *&Row = CopiedRows[ChunkX];
-    if (!Row) {
-      auto Copy = copyRow(ChunkX);
-      Row = Copy.get();
-      Next->Rows[ChunkX] = std::move(Copy);
-    }
-    // A cleared chunk becomes air, so an edit to it still applies.
-    ChunkPtr &Slot = (*Row)[ChunkZ];
-    auto Content = std::make_shared<Chunk>();
-    if (Slot)
-      *Content = *Slot;
-    else
-      Content->fill(AirColumn);
-
-    // Each edit keyed by its column, then its offset, which fits 16 bits as
-    // the height does, then its place in the delta. Sorted, the edits of one
-    // column are adjacent and a cell's last edit comes last.
-    Keys.clear();
-    for (const std::uint32_t I : InChunk) {
-      const auto Column =
-          static_cast<std::uint64_t>(columnIndex(Edits[I].X, Edits[I].Z));
-      const auto Offset = static_cast<std::uint64_t>(Edits[I].Y - Geo.MinY);
-      Keys.push_back((Column << 16 | Offset) << 32 | I);
-    }
-    std::sort(Keys.begin(), Keys.end());
-    for (std::size_t Begin = 0; Begin < Keys.size();) {
-      const std::uint64_t Column = Keys[Begin] >> 48;
+    // Null for a chunk with no state, which reads as air, so an edit to it
+    // still applies.
+    const Chunk *Old = Rows[ChunkX] ? (*Rows[ChunkX])[ChunkZ].get() : nullptr;
+    // Copied once a column changes.
+    std::shared_ptr<Chunk> Content;
+    while (Begin < Keys.size() && Keys[Begin].Chunk == ChunkIndex) {
+      const std::uint32_t Column = Keys[Begin].column();
       ColumnEdits.clear();
-      std::size_t End = Begin;
-      for (; End < Keys.size() && Keys[End] >> 48 == Column; ++End) {
-        const auto Offset = static_cast<int>(Keys[End] >> 32 & 0xFFFF);
-        const Cell Value = Edits[Keys[End] & 0xFFFFFFFF].Value;
+      for (; Begin < Keys.size() && Keys[Begin].Chunk == ChunkIndex &&
+             Keys[Begin].column() == Column;
+           ++Begin) {
+        const int Offset = Keys[Begin].offset();
+        const Cell Value = Edits[Keys[Begin].Index].Value;
         if (!ColumnEdits.empty() && ColumnEdits.back().Offset == Offset)
           ColumnEdits.back().Value = Value;
         else
           ColumnEdits.push_back({Offset, Value});
       }
-      ColumnPtr &Target = (*Content)[Column];
-      Target = Target->with(ColumnEdits);
-      Begin = End;
+      const ColumnPtr &Base = Old ? (*Old)[Column] : AirColumn;
+      ColumnPtr Edited = Base->with(ColumnEdits);
+      if (Edited == Base)
+        continue;
+      if (!Content) {
+        Content = std::make_shared<Chunk>();
+        if (Old)
+          *Content = *Old;
+        else
+          Content->fill(AirColumn);
+      }
+      (*Content)[Column] = std::move(Edited);
     }
-    Slot = std::move(Content);
+    if (!Content)
+      continue;
+    if (RowX != ChunkX) {
+      auto Copy = copyRow(ChunkX);
+      Row = Copy.get();
+      Next->Rows[ChunkX] = std::move(Copy);
+      RowX = ChunkX;
+    }
+    (*Row)[ChunkZ] = std::move(Content);
   }
   return Next;
 }

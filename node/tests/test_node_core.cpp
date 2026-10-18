@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -98,7 +99,7 @@ protected:
   }
 
   std::vector<Event> serve(std::size_t Count = 0) {
-    Core.serveWaiting(Count);
+    serveWaiting(Core, With, Count);
     return Out.take();
   }
 
@@ -141,6 +142,7 @@ protected:
   serve::Clock::time_point Time{};
   Recorder Out;
   serve::NodeCore Core;
+  serve::Scratch With{fbs::Pathfinder::VANILLA};
   std::vector<Event> Answers;
 };
 
@@ -382,12 +384,10 @@ TEST_F(NodeCoreTest, ARequestForAnotherAreaIsAnsweredAsIfNoneWereHeld) {
   EXPECT_EQ(Answer->nodes()->size(), 0u);
   EXPECT_EQ(Answer->cost(), 0.0F);
 
-  // An area of another run, under a link of this one.
-  DenseWorld Flat(32, 0, 24);
-  ASSERT_TRUE(
-      receive(WorldId, Flat.assignment(false, TestRun + 1, TestRegion, 4))
-          .empty());
-  Answer = answer(requestFrame({2}));
+  // The area of an earlier run, held into a link of a new one.
+  ASSERT_TRUE(drops(join(Port::Control, 10, 1, TestRun + 1)));
+  ASSERT_TRUE(receive(10, mobClassFrame()).empty());
+  Answer = answer(requestFrame({2}, TestClass, TestRun + 1));
   ASSERT_NE(Answer, nullptr);
   EXPECT_EQ(Answer->world_sequence(), 0u);
   EXPECT_EQ(Answer->nodes()->size(), 0u);
@@ -415,6 +415,46 @@ TEST_F(NodeCoreTest, ARefusedWorldFrameDropsTheWorldAndTheLink) {
   EXPECT_EQ(Core.store().pin(), nullptr);
 }
 
+TEST_F(NodeCoreTest, AMalformedWorldFrameDropsTheWorldAndTheLink) {
+  startLink();
+  const auto Done = receive(WorldId, Bytes{1, 2, 3, 4, 5, 6, 7, 8});
+  ASSERT_EQ(Done.size(), 3u);
+  EXPECT_TRUE(closes(Done, WorldId));
+  EXPECT_TRUE(closes(Done, ControlId));
+  EXPECT_EQ(Done[2].What, Event::Drop);
+  EXPECT_EQ(Core.store().pin(), nullptr);
+}
+
+TEST_F(NodeCoreTest, AnAssignmentOfAnotherRunDropsTheWorldAndTheLink) {
+  // The store alone would take a fresh assignment of another run.
+  DenseWorld Flat(32, 0, 24);
+  std::uint64_t Link = 0;
+  for (const bool Resume : {false, true}) {
+    for (const std::uint64_t Run : {TestRun + 1, std::uint64_t{0}}) {
+      const ConnectionId World = 10 + ++Link;
+      ASSERT_TRUE(join(Port::World, World, Link).empty());
+      ASSERT_TRUE(
+          receive(World, Flat.assignment(false, TestRun, TestRegion)).empty());
+      ASSERT_TRUE(receive(World, Flat.chunk(1, 0, 0)).empty());
+
+      const auto Done =
+          receive(World, Flat.assignment(Resume, Run, TestRegion, 1));
+      ASSERT_EQ(Done.size(), 2u) << Resume << " " << Run;
+      EXPECT_TRUE(closes(Done, World));
+      EXPECT_EQ(Done[1].What, Event::Drop);
+      EXPECT_EQ(Core.store().pin(), nullptr);
+    }
+  }
+}
+
+TEST_F(NodeCoreTest, AFreshAssignmentBehindTheStreamHeldDropsTheLink) {
+  startLink();
+  DenseWorld Flat(32, 0, 24);
+  EXPECT_TRUE(
+      drops(receive(WorldId, Flat.assignment(false, TestRun, TestRegion, 3))));
+  EXPECT_EQ(Core.store().pin(), nullptr);
+}
+
 TEST_F(NodeCoreTest, AMalformedControlFrameDropsTheLink) {
   startLink();
   EXPECT_TRUE(drops(receive(ControlId, Bytes{1, 2, 3, 4, 5, 6, 7, 8})));
@@ -439,7 +479,7 @@ TEST_F(NodeCoreTest, ACopyIsAnsweredFromTheCacheUntilTheRetentionEnds) {
   ASSERT_NE(answer(requestFrame({1})), nullptr);
   const Bytes First = Answers[0].Frame;
 
-  Time += milliseconds(499);
+  Time += milliseconds(999);
   const auto Cached = datagram(requestFrame({1}));
   ASSERT_EQ(Cached.size(), 1u);
   EXPECT_EQ(Cached[0].Frame, First);
@@ -452,20 +492,84 @@ TEST_F(NodeCoreTest, ACopyIsAnsweredFromTheCacheUntilTheRetentionEnds) {
 TEST_F(NodeCoreTest, AnAnswerOfADroppedLinkIsNotSent) {
   startLink();
   ASSERT_TRUE(datagram(requestFrame({1, 2})).empty());
-  serve::Scratch With(fbs::Pathfinder::VANILLA);
+  serve::Scratch Own(fbs::Pathfinder::VANILLA);
 
   // Finished before the drop, delivered after it.
   const std::optional<serve::Job> Early = Core.queue().tryTake();
   ASSERT_TRUE(Early);
-  const serve::Answer Result = Core.run(*Early, With);
-  ASSERT_NE(Result, nullptr);
+  const serve::Outcome Done = Core.run(*Early, Own);
+  ASSERT_NE(Done.Result, nullptr);
   // Running when the link drops.
   const std::optional<serve::Job> Late = Core.queue().tryTake();
   ASSERT_TRUE(Late);
 
   Core.disconnected(ControlId);
   Out.take();
-  Core.deliver(*Early, Result);
-  EXPECT_EQ(Core.run(*Late, With), nullptr);
+  Core.deliver(*Early, Done.Result);
+  EXPECT_EQ(Core.run(*Late, Own).Result, nullptr);
   EXPECT_TRUE(Out.take().empty());
+}
+
+TEST_F(NodeCoreTest, AJobThatWaitedPastMaxWaitIsDroppedUnanswered) {
+  startLink();
+  ASSERT_TRUE(datagram(requestFrame({1})).empty());
+  Time += milliseconds(500);
+  ASSERT_TRUE(datagram(requestFrame({2, 3})).empty());
+  Time += milliseconds(501);
+
+  // 1 waited 1001 ms and is not counted, so the one job run is 2.
+  EXPECT_EQ(serveWaiting(Core, With, 1), 1u);
+  auto Done = Out.take();
+  ASSERT_EQ(Done.size(), 1u);
+  EXPECT_EQ(responseIn(Done[0])->body_as_PathResponse()->request_id(), 2u);
+  EXPECT_EQ(Core.queue().depth(), 1u);
+
+  // A copy of 1 is dropped as a copy of a canceled request is, until the
+  // retention ends.
+  Time += milliseconds(999);
+  EXPECT_TRUE(datagram(requestFrame({1})).empty());
+  EXPECT_EQ(Core.queue().depth(), 1u);
+  Time += milliseconds(1);
+  EXPECT_TRUE(datagram(requestFrame({1})).empty());
+  EXPECT_EQ(Core.queue().depth(), 2u);
+}
+
+TEST_F(NodeCoreTest, AJobThatWaitedExactlyMaxWaitIsSearched) {
+  startLink();
+  ASSERT_TRUE(datagram(requestFrame({1})).empty());
+  Time += serve::NodeOptions{}.MaxWait;
+  const auto Done = serve();
+  ASSERT_EQ(Done.size(), 1u);
+  EXPECT_EQ(responseIn(Done[0])->body_as_PathResponse()->request_id(), 1u);
+}
+
+TEST_F(NodeCoreTest, RunReportsAJobDroppedUnsearched) {
+  startLink();
+  ASSERT_TRUE(datagram(requestFrame({1})).empty());
+  Time += milliseconds(1001);
+  const std::optional<serve::Job> Next = Core.queue().tryTake();
+  ASSERT_TRUE(Next);
+  const serve::Outcome Done = Core.run(*Next, With);
+  EXPECT_FALSE(Done.Searched);
+  EXPECT_EQ(Done.Result, nullptr);
+  EXPECT_EQ(Core.queue().depth(), 0u);
+  EXPECT_TRUE(Out.take().empty());
+}
+
+TEST(NodeCore, AnAnswerLargerThanADatagramIsNotSent) {
+  const Bytes Largest(serve::MaxAnswerSize, 7);
+  const serve::Answer Kept = serve::answerOf(Largest);
+  ASSERT_NE(Kept, nullptr);
+  EXPECT_EQ(*Kept, Largest);
+  const Bytes Over(serve::MaxAnswerSize + 1, 7);
+  EXPECT_EQ(serve::answerOf(Over), nullptr);
+}
+
+TEST(NodeCore, RefusesASearchThisBuildLacks) {
+  Recorder Out;
+  EXPECT_THROW(
+      serve::NodeCore(
+          serve::NodeOptions{.Search = static_cast<fbs::Pathfinder>(99)},
+          [] { return serve::Clock::time_point{}; }, Out),
+      std::invalid_argument);
 }

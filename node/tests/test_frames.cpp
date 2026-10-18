@@ -1,5 +1,7 @@
 #include "test_frames.hpp"
 
+#include <optional>
+
 #include "maestro/search/profile.hpp"
 
 namespace maestro::test {
@@ -77,6 +79,23 @@ Bytes cancelFrame(const std::vector<std::uint64_t> &Ids, std::uint64_t Run,
   Builder.Finish(fbs::CreateRequestFrame(Builder, fbs::RequestMsg::PathCancel,
                                          Body.Union(), Run, RegionId));
   return finish(Builder);
+}
+
+std::size_t serveWaiting(serve::NodeCore &Core, serve::Scratch &With,
+                         std::size_t Count) {
+  std::size_t Ran = 0;
+  while (Count == 0 || Ran < Count) {
+    const std::optional<serve::Job> Next = Core.queue().tryTake();
+    if (!Next)
+      break;
+    const serve::Outcome Done = Core.run(*Next, With);
+    if (!Done.Searched)
+      continue;
+    ++Ran;
+    if (Done.Result)
+      Core.deliver(*Next, Done.Result);
+  }
+  return Ran;
 }
 
 } // namespace maestro::test

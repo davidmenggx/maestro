@@ -1,7 +1,15 @@
 package io.github.davidmenggx.maestro.bridge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.wire.Frames;
+import io.github.davidmenggx.maestro.controller.world.Cells;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
+import io.github.davidmenggx.maestro.controller.world.ProfileTable;
 import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import java.util.HashMap;
 import java.util.Map;
@@ -11,6 +19,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.DoorBlock;
@@ -20,11 +30,15 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.SlabType;
+import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.ProtoChunk;
 import net.minecraft.world.level.chunk.Strategy;
+import net.minecraft.world.level.chunk.UpgradeData;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.pathfinder.PathType;
+import net.minecraft.world.ticks.ProtoChunkTicks;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -34,6 +48,14 @@ class LevelWorldSourceTest {
   private static final int MIN_X = 32;
   private static final int MIN_Y = -48;
   private static final int MIN_Z = -16;
+  private static final int CHUNK_X = Chunks.of(MIN_X);
+  private static final int CHUNK_Z = Chunks.of(MIN_Z);
+
+  /** A world one section high, the section {@link OneSection} holds. */
+  private static final LevelHeightAccessor HEIGHTS = LevelHeightAccessor.create(MIN_Y, SIZE);
+
+  private static final byte OPEN = (byte) PathType.OPEN.ordinal();
+  private static final byte BLOCKED = (byte) PathType.BLOCKED.ordinal();
 
   @BeforeAll
   static void bootstrap() {
@@ -90,23 +112,22 @@ class LevelWorldSourceTest {
       for (int dz = 0; dz < SIZE; dz++) {
         for (int dy = 0; dy < SIZE; dy++) {
           BlockPos pos = new BlockPos(MIN_X + dx, MIN_Y + dy, MIN_Z + dz);
-          int expected =
-              (BlockCells.floor(world, pos) << 8) | (BlockCells.pathType(world, pos) & 0xFF);
+          int expected = Cells.pack(BlockCells.floor(world, pos), BlockCells.pathType(world, pos));
           assertEquals(expected, cells[index(dx, dy, dz)], world.getBlockState(pos) + " at " + pos);
         }
       }
     }
     // So a cell is not always the state's.
-    assertEquals(16, cells[index(3, 4, 5)] >> 8);
-    assertEquals(8, cells[index(9, 4, 5)] >> 8);
+    assertEquals(16, Cells.floorOf(cells[index(3, 4, 5)]));
+    assertEquals(8, Cells.floorOf(cells[index(9, 4, 5)]));
   }
 
   @Test
   void aSectionIsUniformOnlyIfItsPaletteHoldsOneStateWhoseCellIsTheState() {
-    assertEquals(PathType.OPEN.ordinal(), uniformCell(new OneSection()));
+    assertEquals(Cells.pack(0, OPEN), uniformCell(new OneSection()));
 
     OneSection stone = new OneSection(Blocks.STONE.defaultBlockState());
-    assertEquals((16 << 8) | PathType.BLOCKED.ordinal(), uniformCell(stone));
+    assertEquals(Cells.pack(16, BLOCKED), uniformCell(stone));
     // The palette keeps a state after its last block is gone.
     stone.set(7, 7, 7, Blocks.DIRT.defaultBlockState());
     assertEquals(WorldSource.NOT_UNIFORM, uniformCell(stone));
@@ -118,14 +139,69 @@ class LevelWorldSourceTest {
         uniformCell(new OneSection(Blocks.MOVING_PISTON.defaultBlockState())));
   }
 
+  @Test
+  void aChunkThatIsNotLoadedIsNotReadableAndReadsAsAir() {
+    LevelWorldSource source =
+        new LevelWorldSource(HEIGHTS, (chunkX, chunkZ) -> null, new ProfileTable());
+
+    assertFalse(source.readable(CHUNK_X, CHUNK_Z));
+    assertNull(Frames.readChunk(source, CHUNK_X, CHUNK_Z));
+    assertEquals(Cells.pack(0, OPEN), source.uniformCell(CHUNK_X, CHUNK_Z, 0));
+    assertFalse(source.readSection(CHUNK_X, CHUNK_Z, 0, new int[SIZE * SIZE * SIZE]));
+    assertEquals(OPEN, source.pathTypeAt(MIN_X, MIN_Y, MIN_Z));
+    assertEquals(0, source.floorAt(MIN_X, MIN_Y, MIN_Z));
+  }
+
+  @Test
+  void aLoadedChunkIsReadThroughTheChunk() {
+    OneSection world = new OneSection(Blocks.STONE.defaultBlockState());
+    world.set(1, 2, 3, Blocks.WHITE_CARPET.defaultBlockState());
+    world.moving(
+        9, 4, 5, Blocks.STONE_SLAB.defaultBlockState().setValue(SlabBlock.TYPE, SlabType.BOTTOM));
+    ChunkAccess chunk = world.chunk();
+    LevelWorldSource source =
+        new LevelWorldSource(
+            HEIGHTS,
+            (chunkX, chunkZ) -> chunkX == CHUNK_X && chunkZ == CHUNK_Z ? chunk : null,
+            new ProfileTable());
+
+    assertTrue(source.readable(CHUNK_X, CHUNK_Z));
+    assertFalse(source.readable(CHUNK_X + 1, CHUNK_Z));
+    assertEquals(BLOCKED, source.pathTypeAt(MIN_X, MIN_Y, MIN_Z));
+    assertEquals(16, source.floorAt(MIN_X, MIN_Y, MIN_Z));
+    assertEquals(OPEN, source.pathTypeAt(MIN_X + 1, MIN_Y + 2, MIN_Z + 3));
+    assertEquals(1, source.floorAt(MIN_X + 1, MIN_Y + 2, MIN_Z + 3));
+    // The moving piston's block entity is read from the chunk too.
+    assertEquals(8, source.floorAt(MIN_X + 9, MIN_Y + 4, MIN_Z + 5));
+    // The next chunk is not loaded.
+    assertEquals(OPEN, source.pathTypeAt(MIN_X + SIZE, MIN_Y, MIN_Z));
+    assertEquals(0, source.floorAt(MIN_X + SIZE, MIN_Y, MIN_Z));
+
+    int[] cells = new int[SIZE * SIZE * WorldSource.SECTION_HEIGHT];
+    assertTrue(source.readSection(CHUNK_X, CHUNK_Z, 0, cells));
+    for (int dx = 0; dx < SIZE; dx++) {
+      for (int dz = 0; dz < SIZE; dz++) {
+        for (int dy = 0; dy < SIZE; dy++) {
+          int x = MIN_X + dx;
+          int y = MIN_Y + dy;
+          int z = MIN_Z + dz;
+          assertEquals(
+              Cells.pack(source.floorAt(x, y, z), source.pathTypeAt(x, y, z)),
+              cells[index(dx, dy, dz)]);
+        }
+      }
+    }
+    assertNotNull(Frames.readChunk(source, CHUNK_X, CHUNK_Z));
+  }
+
   private static int[] read(OneSection world) {
     int[] cells = new int[SIZE * SIZE * WorldSource.SECTION_HEIGHT];
-    new LevelWorldSource.Sections(world).read(world.section, MIN_X, MIN_Y, MIN_Z, cells);
+    new LevelWorldSource.Sections().read(world, world.section, MIN_X, MIN_Y, MIN_Z, cells);
     return cells;
   }
 
   private static int uniformCell(OneSection world) {
-    return new LevelWorldSource.Sections(world).uniformCell(world.section, MIN_X, MIN_Y, MIN_Z);
+    return new LevelWorldSource.Sections().uniformCell(world, world.section, MIN_X, MIN_Y, MIN_Z);
   }
 
   private static int index(int dx, int dy, int dz) {
@@ -162,6 +238,22 @@ class LevelWorldSourceTest {
       BlockPos pos = new BlockPos(MIN_X + dx, MIN_Y + dy, MIN_Z + dz);
       blockEntities.put(
           pos, new PistonMovingBlockEntity(pos, piston, moved, Direction.NORTH, true, false));
+    }
+
+    /** A chunk holding this section and its block entities. */
+    ChunkAccess chunk() {
+      ProtoChunk chunk =
+          new ProtoChunk(
+              new ChunkPos(CHUNK_X, CHUNK_Z),
+              UpgradeData.EMPTY,
+              new LevelChunkSection[] {section},
+              new ProtoChunkTicks<>(),
+              new ProtoChunkTicks<>(),
+              HEIGHTS,
+              null,
+              null);
+      blockEntities.values().forEach(chunk::setBlockEntity);
+      return chunk;
     }
 
     @Override

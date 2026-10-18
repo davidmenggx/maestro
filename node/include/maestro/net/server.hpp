@@ -31,12 +31,7 @@ struct ServerOptions {
   unsigned Workers = 1;
   /// The node's own heartbeat interval: 20 ticks.
   std::chrono::milliseconds HeartbeatInterval{1000};
-  /// How long an answer or a cancel is kept for later copies of its request:
-  /// the 10 ticks after which the controller gives up on a request.
-  std::chrono::milliseconds Retention{500};
-  /// How long a new connection may wait before its first frame.
-  std::chrono::milliseconds JoinTimeout{5000};
-  fbs::Pathfinder Search = fbs::Pathfinder::VANILLA;
+  serve::NodeOptions Node;
 };
 
 /// The network side of a compute node: two TCP acceptors, one for the world
@@ -57,8 +52,6 @@ public:
   Server(const Server &) = delete;
   Server &operator=(const Server &) = delete;
 
-  ~Server() override;
-
   std::uint16_t worldPort() const { return WorldPort; }
   std::uint16_t controlPort() const { return ControlPort; }
   std::uint16_t requestPort() const { return RequestPort; }
@@ -70,7 +63,8 @@ public:
 private:
   class Stream;
 
-  void accept(asio::ip::tcp::acceptor &Acceptor, serve::Port On);
+  void accept(asio::ip::tcp::acceptor &Acceptor, asio::steady_timer &Backoff,
+              serve::Port On);
   void open(asio::ip::tcp::socket Socket, serve::Port On);
   void receiveRequests();
   void scheduleHeartbeat();
@@ -87,6 +81,9 @@ private:
   const ServerOptions Opts;
   asio::ip::tcp::acceptor WorldAcceptor;
   asio::ip::tcp::acceptor ControlAcceptor;
+  /// Each paces its acceptor after a failed accept.
+  asio::steady_timer WorldBackoff;
+  asio::steady_timer ControlBackoff;
   asio::ip::udp::socket Requests;
   asio::steady_timer Heartbeat;
   std::uint16_t WorldPort = 0;
@@ -103,7 +100,8 @@ private:
   asio::ip::udp::endpoint Sender;
 
   serve::NodeCore Core;
-  /// Last, so it stops before anything its threads use is destroyed.
+  /// Last, so it is destroyed first, and `~Workers` stops its threads before
+  /// anything they use is destroyed.
   serve::Workers Pool;
 };
 

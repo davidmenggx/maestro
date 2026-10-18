@@ -1,5 +1,6 @@
 #include "maestro/serve/node_core.hpp"
 
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -11,10 +12,9 @@ namespace maestro::serve {
 
 namespace {
 
+/// Why the store refused a frame.
 const char *describe(world::ApplyStatus Status) {
   switch (Status) {
-  case world::ApplyStatus::Applied:
-    return "applied";
   case world::ApplyStatus::Malformed:
     return "malformed";
   case world::ApplyStatus::Unassigned:
@@ -23,8 +23,11 @@ const char *describe(world::ApplyStatus Status) {
     return "out of sequence";
   case world::ApplyStatus::CannotResume:
     return "resume of a stream not held";
+  case world::ApplyStatus::Behind:
+    return "a fresh assignment behind the stream held";
+  default:
+    return "refused";
   }
-  return "refused";
 }
 
 template <typename T> const T *verified(std::span<const std::uint8_t> Frame) {
@@ -52,9 +55,18 @@ std::unique_ptr<search::Search> checkedSearch(fbs::Pathfinder Kind) {
 
 Scratch::Scratch(fbs::Pathfinder Kind) : Search(checkedSearch(Kind)) {}
 
+Answer answerOf(std::span<const std::uint8_t> Frame) {
+  if (Frame.size() > MaxAnswerSize)
+    return nullptr;
+  return std::make_shared<const std::vector<std::uint8_t>>(Frame.begin(),
+                                                           Frame.end());
+}
+
 NodeCore::NodeCore(const NodeOptions &Opts, TimeSource Now, Output &Out)
-    : Opts(Opts), Now(std::move(Now)), Out(Out), Queue(Opts.Retention),
-      Inline(Opts.Search) {}
+    : Opts(Opts), Now(std::move(Now)), Out(Out), Queue(Opts.Retention) {
+  // Each worker makes its own search, so a missing one is reported here.
+  checkedSearch(Opts.Search);
+}
 
 void NodeCore::connected(Port On, ConnectionId Id) {
   Waiting.insert_or_assign(Id, Pending{On, Now()});
@@ -105,14 +117,25 @@ void NodeCore::join(Port On, ConnectionId Id, Token Named) {
 }
 
 void NodeCore::onWorldFrame(std::span<const std::uint8_t> Frame) {
+  const auto *Root = verified<fbs::WorldFrame>(Frame);
   // A `Join` after the first frame is not part of the stream.
-  if (const auto *Root = verified<fbs::WorldFrame>(Frame);
-      Root && Root->body_type() == fbs::WorldMsg::Join)
+  if (Root && Root->body_type() == fbs::WorldMsg::Join)
     return;
-  const world::ApplyStatus Status = Store.apply(Frame);
-  if (Status != world::ApplyStatus::Applied)
-    dropLink(std::string("refused a world frame: ") + describe(Status) +
-             ", so all world state was dropped");
+  const char *Refused = nullptr;
+  if (!Root) {
+    Refused = describe(world::ApplyStatus::Malformed);
+  } else if (const auto *Assignment = Root->body_as_RegionAssignment();
+             Assignment && Assignment->run() != Current.Run) {
+    Refused = "an assignment of another run than the link's";
+  } else if (const world::ApplyStatus Status = Store.apply(*Root);
+             Status != world::ApplyStatus::Applied) {
+    Refused = describe(Status);
+  }
+  if (!Refused)
+    return;
+  Store.clear();
+  dropLink(std::string("refused a world frame: ") + Refused +
+           ", so all world state was dropped");
 }
 
 void NodeCore::onControlFrame(std::span<const std::uint8_t> Frame) {
@@ -214,19 +237,12 @@ void NodeCore::expirePending() {
   }
 }
 
-std::size_t NodeCore::serveWaiting(std::size_t Count) {
-  std::size_t Ran = 0;
-  for (; Count == 0 || Ran < Count; ++Ran) {
-    const std::optional<Job> Next = Queue.tryTake();
-    if (!Next)
-      break;
-    if (const Answer Result = run(*Next, Inline))
-      deliver(*Next, Result);
+Outcome NodeCore::run(const Job &Next, Scratch &With) {
+  if (const Clock::time_point Taken = Now();
+      Taken - Next.Admitted > Opts.MaxWait) {
+    Queue.settle(Next, nullptr, Taken);
+    return {};
   }
-  return Ran;
-}
-
-Answer NodeCore::run(const Job &Next, Scratch &With) {
   const auto Held = Store.pin();
   std::uint64_t Sequence = 0;
   if (Held && Held->run() == Next.Run && Held->regionId() == Next.RegionId) {
@@ -241,13 +257,19 @@ Answer NodeCore::run(const Job &Next, Scratch &With) {
   }
   Answer Result;
   if (search::encodeResponse(With.Builder, Next.Run, Next.RequestId, With.Path,
-                             Sequence))
-    Result = std::make_shared<const std::vector<std::uint8_t>>(
-        With.Builder.GetBufferPointer(),
-        With.Builder.GetBufferPointer() + With.Builder.GetSize());
+                             Sequence)) {
+    Result =
+        answerOf({With.Builder.GetBufferPointer(), With.Builder.GetSize()});
+    if (!Result)
+      // One write, so lines from several workers do not interleave.
+      std::clog << "maestro-node: the answer to request " +
+                       std::to_string(Next.RequestId) + " is " +
+                       std::to_string(With.Builder.GetSize()) +
+                       " bytes, too large for a datagram, so it was dropped\n";
+  }
   if (!Queue.settle(Next, Result, Now()))
-    return nullptr;
-  return Result;
+    return {.Searched = true};
+  return {.Searched = true, .Result = std::move(Result)};
 }
 
 void NodeCore::deliver(const Job &Finished, const Answer &Result) {

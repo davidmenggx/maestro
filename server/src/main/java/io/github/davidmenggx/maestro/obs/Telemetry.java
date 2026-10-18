@@ -24,8 +24,8 @@ public final class Telemetry {
 
   /**
    * Held so the JUL level set below is not garbage collected. OpenTelemetry logs export failures
-   * through JUL, which would otherwise log on every cycle when no collector is running (the normal
-   * case in development).
+   * through JUL at {@code SEVERE}, which would otherwise log on every cycle when no collector is
+   * running (the normal case in development), so the exporter's logging is turned off.
    */
   private static final Logger EXPORTER_LOGGER = Logger.getLogger("io.opentelemetry.exporter");
 
@@ -37,7 +37,7 @@ public final class Telemetry {
     if (sdk != null) {
       return;
     }
-    EXPORTER_LOGGER.setLevel(Level.SEVERE);
+    EXPORTER_LOGGER.setLevel(Level.OFF);
 
     Resource resource =
         Resource.getDefault()

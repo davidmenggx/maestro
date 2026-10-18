@@ -44,8 +44,11 @@ public final class Simulation {
     }
   }
 
-  /** One position of one region's stream in one controller run. */
-  private record StreamPosition(long run, long region) {}
+  /** One region's stream in one controller run. */
+  private record Stream(long run, long region) {}
+
+  /** One holder's copy of a region's stream. */
+  private record HeldStream(NodeId node, long run, long region) {}
 
   private record Checkpoint(long run, long region, long sequence) {}
 
@@ -57,10 +60,16 @@ public final class Simulation {
   private final Map<NodeId, ModeledNode> nodes = new LinkedHashMap<>();
   private final Map<Long, List<FaultPlan.Fault>> faultsByTick = new LinkedHashMap<>();
 
-  /** Highest world sequence a fleet node applied, per region stream. */
-  private final Map<StreamPosition, Long> appliedByRegion = new LinkedHashMap<>();
+  /** Highest world sequence any fleet node applied, per region stream. */
+  private final Map<Stream, Long> appliedByRegion = new LinkedHashMap<>();
 
-  /** What a region's holder must hold once it applies a sequence, from {@link #checkpoint}. */
+  /** Highest world sequence each holder applied, per region stream. */
+  private final Map<HeldStream, Long> appliedByHolder = new LinkedHashMap<>();
+
+  /**
+   * What each holder of a region must hold once it applies a sequence, from {@link #checkpoint}.
+   * Kept for the whole run, since every holder of the region reaches it.
+   */
   private final Map<Checkpoint, Long> checkpoints = new LinkedHashMap<>();
 
   private final List<String> streamViolations = new ArrayList<>();
@@ -157,19 +166,19 @@ public final class Simulation {
             clock,
             controllerRng.derive("process-" + incarnation),
             new SimOffload(incarnation),
-            transport.restart(run),
+            transport.restart(),
             metrics,
             run);
   }
 
   /**
-   * Records that a fleet node applied {@code sequence} of a region's world stream. The sequence of
-   * a region only rises, whichever node holds it and however often it is sent again, and a node at
-   * a checkpoint holds what the world held when the checkpoint was taken.
+   * Records that a fleet node applied {@code sequence} of a region's world stream. The sequence a
+   * holder applies only rises, however often the region is sent to it again, and a holder at a
+   * checkpoint holds what the world held when the checkpoint was taken.
    */
   void applied(ModeledNode node, long run, long region, long sequence) {
-    StreamPosition stream = new StreamPosition(run, region);
-    long highest = appliedByRegion.getOrDefault(stream, 0L);
+    HeldStream held = new HeldStream(node.id(), run, region);
+    long highest = appliedByHolder.getOrDefault(held, 0L);
     if (sequence <= highest) {
       streamViolations.add(
           node.id()
@@ -180,8 +189,9 @@ public final class Simulation {
               + " after "
               + highest);
     }
-    appliedByRegion.put(stream, Math.max(highest, sequence));
-    Long expected = checkpoints.remove(new Checkpoint(run, region, sequence));
+    appliedByHolder.put(held, Math.max(highest, sequence));
+    appliedByRegion.merge(new Stream(run, region), sequence, Math::max);
+    Long expected = checkpoints.get(new Checkpoint(run, region, sequence));
     if (expected != null) {
       checkpointsCompared++;
       if (node.stateDigest() != expected) {
@@ -204,7 +214,9 @@ public final class Simulation {
    * behind a frame a node already applied, so it has no gap a node could have needed.
    */
   void assigned(ModeledNode node, long run, long region, long sequence) {
-    long highest = appliedByRegion.getOrDefault(new StreamPosition(run, region), 0L);
+    long highest = appliedByRegion.getOrDefault(new Stream(run, region), 0L);
+    // The holder's own copy starts over here too.
+    appliedByHolder.put(new HeldStream(node.id(), run, region), sequence);
     if (sequence < highest) {
       streamViolations.add(
           node.id()
@@ -314,7 +326,8 @@ public final class Simulation {
     }
   }
 
-  private void deliver(WorldInput controller, WorldEvent event) {
+  /** Hands an event to the controller, folding it into the run digest. */
+  void deliver(WorldInput controller, WorldEvent event) {
     digest.mix(now).mix(event.toString());
     controller.accept(event);
   }
@@ -343,10 +356,12 @@ public final class Simulation {
   }
 
   /**
-   * Work runs immediately, but its completion waits for the end of the tick it finishes in, because
-   * production drains finished jobs there. A result therefore never reaches the controller inside
-   * the call that submitted it. A job that the fault plan fails reports its failure at the same
-   * point. A job of a controller process that has since restarted reports nothing.
+   * Work runs when it finishes, and its completion waits for the end of the tick it finishes in,
+   * because production drains finished jobs there. A result therefore never reaches the controller
+   * inside the call that submitted it, and work that reads controller state changed after it was
+   * submitted is caught. Work that throws, or that the fault plan fails, reports its failure at the
+   * same point. A job of a controller process that has since restarted reports nothing. The lane
+   * orders only a production worker's queue, which this model does not have.
    */
   private final class SimOffload implements Offload {
 
@@ -366,7 +381,7 @@ public final class Simulation {
 
     @Override
     public <T> void submit(
-        String name, Supplier<T> work, Consumer<T> completion, Runnable failure) {
+        String name, Lane lane, Supplier<T> work, Consumer<T> completion, Runnable failure) {
       long ready = now + MIN_WORK_STEPS + offloadRng.nextInt(MAX_WORK_STEPS - MIN_WORK_STEPS + 1);
       long drainAt = (ready / STEPS_PER_TICK) * STEPS_PER_TICK + STEPS_PER_TICK - 1;
       metrics.count("offload.submitted", 1, "job", name);
@@ -378,8 +393,22 @@ public final class Simulation {
         scheduleAt(drainAt, "offload-failed:" + name, () -> live(failure));
         return;
       }
-      T result = work.get();
-      scheduleAt(drainAt, "offload:" + name, () -> live(() -> completion.accept(result)));
+      scheduleAt(
+          drainAt,
+          "offload:" + name,
+          () ->
+              live(
+                  () -> {
+                    T result;
+                    try {
+                      result = work.get();
+                    } catch (RuntimeException e) {
+                      metrics.count("offload.threw", 1, "job", name);
+                      failure.run();
+                      return;
+                    }
+                    completion.accept(result);
+                  }));
     }
 
     private void live(Runnable action) {

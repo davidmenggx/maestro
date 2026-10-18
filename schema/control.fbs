@@ -17,7 +17,10 @@ namespace maestro.fbs;
 // it drops its state and every resident chunk is sent again.
 // `sequence` is the stream position the assignment stands at, so the next
 // frame is `sequence + 1`. A fresh area is all air as of `sequence`, and a
-// resume repeats the `last_sequence` the node reported.
+// resume repeats the `last_sequence` the node reported. `run` is the link's
+// run, and a fresh assignment of the region a node holds never stands behind
+// the sequence the node holds; the node refuses either as a frame it cannot
+// apply.
 table RegionAssignment {
   run:ulong;
   region_id:uint;
@@ -44,7 +47,8 @@ table Join {
 // The node's reply to the `Join` on a control connection: the search it runs,
 // the region it still holds, the controller run that region came from, and its
 // last applied world sequence. `last_sequence` is 0 if the node holds no
-// state, as after a restart. The controller replies with a `RegionAssignment`
+// state, as after a restart, and then `run` and `region_id` are 0 too. Region
+// ids start at 1. The controller replies with a `RegionAssignment`
 // saying whether the stream resumes.
 table Hello {
   run:ulong;

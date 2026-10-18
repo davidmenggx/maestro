@@ -8,21 +8,23 @@ import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import maestro.fbs.PathType;
 
 /**
  * Terrain owned by the simulated server: a square superflat world with mild hills, matching the
- * fuzz-test world shape. Stored in flat arrays because it is dense and small, so every read is O(1)
+ * fuzz-test world shape, covering the {@link Topology}'s grid on both sides of the origin. A
+ * column's terrain is a hash of the run's terrain seed and its position, made for a whole chunk the
+ * first time the chunk is read, so only the part of the world a run touches is made, and every read
+ * is O(1). Block changes are few, so they are kept in a map that is only looked up, never iterated,
  * and no iteration order can affect a run.
  *
  * <p>Vertical extent, floor and hill relief come from the {@link Topology}, so a sweep covers
  * negative floors and columns that encode into more than a couple of runs.
  */
 public final class SimWorld implements WorldSource {
-
-  /** Marks a cell whose type still comes from the terrain rule, not a block change. */
-  private static final byte NO_OVERRIDE = -1;
 
   /** A bottom slab, so a column's top block can differ from the ones below it only in floor. */
   private static final int SLAB_FLOOR = Cells.FULL_FLOOR / 2;
@@ -40,18 +42,53 @@ public final class SimWorld implements WorldSource {
   /** Fraction of ordinals a profile forbids, which vanilla represents as a negative malus. */
   private static final double IMPASSABLE_CHANCE = 0.15;
 
+  private static final long NOT_LOADED = -1;
+
   private final Topology topology;
+  private final int min;
   private final int size;
   private final int chunksPerSide;
-  private final int[] ground;
-  private final boolean[] slabTopped;
-  private final byte[] overrides;
-  private final byte[] overrideFloors;
+  private final int sections;
+  private final long terrainSeed;
+  private final int lowestGround;
 
-  /** Cells with an override, per chunk section, so a section without any can be summarized. */
+  /**
+   * Each chunk's columns once made, by chunk index then column {@code dx * Chunks.SIZE + dz}, as
+   * {@code ground << 1 | slabTopped}.
+   */
+  private final int[][] terrainByChunk;
+
+  /** Changed blocks as {@link Cells#pack packed} cells, by {@link #blockKey}. */
+  private final Map<Long, Integer> overrides = new HashMap<>();
+
+  /** Changed blocks per chunk section, so a section without any can be summarized. */
   private final int[] overridesPerSection;
 
-  private final boolean[] loadedChunks;
+  /** Changed blocks per column, so a block in a column without any is not looked up. */
+  private final int[] overridesPerColumn;
+
+  /** The tick each chunk was last loaded at, or {@link #NOT_LOADED}. */
+  private final long[] loadedSince;
+
+  /**
+   * Indices of the loaded chunks, the first {@link #loadedCount} of them, in no meaningful but a
+   * deterministic order, so a workload can draw one in O(1).
+   */
+  private final int[] loaded;
+
+  /** Where each chunk index sits in {@link #loaded}, or -1. */
+  private final int[] loadedAt;
+
+  /** Bumped whenever a chunk's cells change, so a digest of them can be kept until then. */
+  private final int[] chunkVersions;
+
+  private final long[] chunkHashes;
+  private final int[] hashedVersions;
+  private final byte[] hashCells;
+  private final byte[] hashFloors;
+
+  private int loadedCount;
+  private int mostLoaded;
   private final List<MobClass> mobClasses;
 
   public SimWorld(Topology topology, int mobClassCount, Rng rng) {
@@ -59,22 +96,28 @@ public final class SimWorld implements WorldSource {
       throw new IllegalArgumentException("a world has at least one mob profile: " + mobClassCount);
     }
     this.topology = topology;
+    this.min = topology.min();
     this.size = topology.extent();
     this.chunksPerSide = topology.chunksPerSide();
-    this.ground = new int[size * size];
-    this.slabTopped = new boolean[size * size];
-    this.overrides = new byte[size * size * topology.height()];
-    this.overrideFloors = new byte[overrides.length];
-    this.overridesPerSection =
-        new int[chunksPerSide * chunksPerSide * (topology.height() / SECTION_HEIGHT)];
-    this.loadedChunks = new boolean[chunksPerSide * chunksPerSide];
-    Arrays.fill(overrides, NO_OVERRIDE);
+    this.sections = topology.height() / SECTION_HEIGHT;
+    this.overridesPerColumn = new int[size * size];
+    this.terrainByChunk = new int[chunksPerSide * chunksPerSide][];
+    int chunks = chunksPerSide * chunksPerSide;
+    this.overridesPerSection = new int[chunks * sections];
+    this.loadedSince = new long[chunks];
+    this.loaded = new int[chunks];
+    this.loadedAt = new int[chunks];
+    this.chunkVersions = new int[chunks];
+    this.chunkHashes = new long[chunks];
+    this.hashedVersions = new int[chunks];
+    this.hashCells = new byte[Chunks.SIZE * Chunks.SIZE * topology.height()];
+    this.hashFloors = new byte[hashCells.length];
+    Arrays.fill(loadedSince, NOT_LOADED);
+    Arrays.fill(loadedAt, -1);
+    Arrays.fill(hashedVersions, -1);
 
-    int lowestGround = topology.minY() + topology.height() / 2;
-    for (int i = 0; i < ground.length; i++) {
-      ground[i] = lowestGround + rng.nextInt(topology.relief() + 1);
-      slabTopped[i] = rng.nextInt(4) == 0;
-    }
+    this.lowestGround = topology.minY() + topology.height() / 2;
+    this.terrainSeed = rng.nextLong();
 
     List<MobClass> profiles = new ArrayList<>(mobClassCount);
     for (int i = 0; i < mobClassCount; i++) {
@@ -94,30 +137,115 @@ public final class SimWorld implements WorldSource {
     return mobClasses.size();
   }
 
+  /** Lowest x and z in the world. */
+  public int min() {
+    return min;
+  }
+
   /** Size along both axes, in blocks. */
   public int size() {
     return size;
+  }
+
+  /** Lowest chunk x and z in the world. */
+  public int minChunk() {
+    return Chunks.of(min);
   }
 
   public int chunksPerSide() {
     return chunksPerSide;
   }
 
+  public boolean contains(int x, int z) {
+    return x >= min && x - min < size && z >= min && z - min < size;
+  }
+
   /** Highest solid block in the column. Mobs stand at {@code groundAt + 1}. */
   public int groundAt(int x, int z) {
-    return ground[x * size + z];
+    return terrainAt(x, z) >> 1;
+  }
+
+  /**
+   * The column's terrain as {@code ground << 1 | slabTopped}, where the top block is a bottom slab
+   * in one column of four.
+   */
+  private int terrainAt(int x, int z) {
+    int chunkX = Chunks.of(x);
+    int chunkZ = Chunks.of(z);
+    int[] columns = terrainByChunk[chunkIndex(chunkX, chunkZ)];
+    if (columns == null) {
+      columns = new int[Chunks.SIZE * Chunks.SIZE];
+      for (int dx = 0; dx < Chunks.SIZE; dx++) {
+        for (int dz = 0; dz < Chunks.SIZE; dz++) {
+          long bits = terrain(chunkX * Chunks.SIZE + dx, chunkZ * Chunks.SIZE + dz);
+          int ground = lowestGround + (int) Long.remainderUnsigned(bits, topology.relief() + 1);
+          columns[dx * Chunks.SIZE + dz] = ground << 1 | ((bits >>> 62) == 0 ? 1 : 0);
+        }
+      }
+      terrainByChunk[chunkIndex(chunkX, chunkZ)] = columns;
+    }
+    return columns[Math.floorMod(x, Chunks.SIZE) * Chunks.SIZE + Math.floorMod(z, Chunks.SIZE)];
+  }
+
+  /** The column's terrain bits: the splitmix64 finalizer over the seed and the position. */
+  private long terrain(int x, int z) {
+    long bits = terrainSeed ^ ((long) x << 32) ^ (z & 0xFFFFFFFFL);
+    bits = (bits ^ (bits >>> 30)) * 0xBF58476D1CE4E5B9L;
+    bits = (bits ^ (bits >>> 27)) * 0x94D049BB133111EBL;
+    return bits ^ (bits >>> 31);
   }
 
   public boolean chunkLoaded(int chunkX, int chunkZ) {
-    return loadedChunks[chunkIndex(chunkX, chunkZ)];
+    return loadedSince[chunkIndex(chunkX, chunkZ)] != NOT_LOADED;
   }
 
-  public void loadChunk(int chunkX, int chunkZ) {
-    loadedChunks[chunkIndex(chunkX, chunkZ)] = true;
+  /** The tick the chunk was last loaded at, or -1 if it is not loaded. */
+  public long loadedSince(int chunkX, int chunkZ) {
+    return loadedSince[chunkIndex(chunkX, chunkZ)];
+  }
+
+  public void loadChunk(int chunkX, int chunkZ, long tick) {
+    int index = chunkIndex(chunkX, chunkZ);
+    if (loadedSince[index] != NOT_LOADED) {
+      return;
+    }
+    loadedSince[index] = tick;
+    chunkVersions[index]++;
+    loaded[loadedCount] = index;
+    loadedAt[index] = loadedCount++;
+    mostLoaded = Math.max(mostLoaded, loadedCount);
   }
 
   public void unloadChunk(int chunkX, int chunkZ) {
-    loadedChunks[chunkIndex(chunkX, chunkZ)] = false;
+    int index = chunkIndex(chunkX, chunkZ);
+    if (loadedSince[index] == NOT_LOADED) {
+      return;
+    }
+    loadedSince[index] = NOT_LOADED;
+    chunkVersions[index]++;
+    int at = loadedAt[index];
+    int last = loaded[--loadedCount];
+    loaded[at] = last;
+    loadedAt[last] = at;
+    loadedAt[index] = -1;
+  }
+
+  public int loadedCount() {
+    return loadedCount;
+  }
+
+  /** The most chunks loaded at once so far. */
+  public int mostLoaded() {
+    return mostLoaded;
+  }
+
+  /** The {@code n}th loaded chunk, as a {@link Chunks#key}. */
+  public long loadedChunk(int n) {
+    if (n < 0 || n >= loadedCount) {
+      throw new IllegalArgumentException("no loaded chunk " + n + " of " + loadedCount);
+    }
+    int index = loaded[n];
+    return Chunks.key(minChunk() + index / chunksPerSide, minChunk() + index % chunksPerSide);
   }
 
   /** Applies a block change. The workload emits the matching event. */
@@ -131,13 +259,34 @@ public final class SimWorld implements WorldSource {
     if (floor < 0 || floor > Cells.MAX_FLOOR) {
       throw new IllegalArgumentException("floor out of range: " + floor);
     }
-    int index = index(x, y, z);
     int section = (y - topology.minY()) / SECTION_HEIGHT;
-    if (overrides[index] == NO_OVERRIDE && section < topology.height() / SECTION_HEIGHT) {
-      overridesPerSection[sectionIndex(Chunks.of(x), Chunks.of(z), section)]++;
+    if (overrides.put(blockKey(x, y, z), Cells.pack(floor, pathType)) == null) {
+      overridesPerColumn[column(x, z)]++;
+      if (section < sections) {
+        overridesPerSection[sectionIndex(Chunks.of(x), Chunks.of(z), section)]++;
+      }
     }
-    overrides[index] = pathType;
-    overrideFloors[index] = (byte) floor;
+    chunkVersions[chunkIndex(Chunks.of(x), Chunks.of(z))]++;
+  }
+
+  /**
+   * The {@link ModeledNode.AreaDigest#chunkHash} of the chunk as a node holds it once it has every
+   * frame: its blocks if it is loaded, and air if not. Kept until the chunk changes, since every
+   * checkpoint reads every chunk of a region.
+   */
+  public long chunkHash(int chunkX, int chunkZ) {
+    int index = chunkIndex(chunkX, chunkZ);
+    if (hashedVersions[index] == chunkVersions[index]) {
+      return chunkHashes[index];
+    }
+    long hash = ModeledNode.AreaDigest.AIR;
+    if (chunkLoaded(chunkX, chunkZ)) {
+      fillChunk(chunkX, chunkZ, hashCells, hashFloors);
+      hash = ModeledNode.AreaDigest.chunkHash(hashCells, hashFloors);
+    }
+    chunkHashes[index] = hash;
+    hashedVersions[index] = chunkVersions[index];
+    return hash;
   }
 
   /**
@@ -163,30 +312,65 @@ public final class SimWorld implements WorldSource {
 
   @Override
   public byte pathTypeAt(int x, int y, int z) {
-    if (!inside(x, y, z) || !loadedChunks[chunkIndex(Chunks.of(x), Chunks.of(z))]) {
-      return (byte) PathType.BLOCKED;
-    }
-    byte override = overrides[index(x, y, z)];
-    if (override != NO_OVERRIDE) {
-      return override;
-    }
-    return y <= ground[x * size + z] ? (byte) PathType.BLOCKED : (byte) PathType.OPEN;
+    return Cells.typeOf(cellAt(x, y, z));
   }
 
   @Override
   public int floorAt(int x, int y, int z) {
-    if (!inside(x, y, z) || !loadedChunks[chunkIndex(Chunks.of(x), Chunks.of(z))]) {
-      return Cells.FULL_FLOOR;
+    return Cells.floorOf(cellAt(x, y, z));
+  }
+
+  /** The block as a packed cell. Outside the world or a loaded chunk, a full solid block. */
+  public int cellAt(int x, int y, int z) {
+    if (!inside(x, y, z) || !chunkLoaded(Chunks.of(x), Chunks.of(z))) {
+      return Cells.pack(Cells.FULL_FLOOR, (byte) PathType.BLOCKED);
     }
-    int index = index(x, y, z);
-    if (overrides[index] != NO_OVERRIDE) {
-      return overrideFloors[index] & 0xFF;
+    if (overridesPerColumn[column(x, z)] > 0) {
+      Integer override = overrides.get(blockKey(x, y, z));
+      if (override != null) {
+        return override;
+      }
     }
-    int column = x * size + z;
-    if (y > ground[column]) {
-      return 0;
+    int terrain = terrainAt(x, z);
+    int ground = terrain >> 1;
+    if (y > ground) {
+      return Cells.pack(0, (byte) PathType.OPEN);
     }
-    return y == ground[column] && slabTopped[column] ? SLAB_FLOOR : Cells.FULL_FLOOR;
+    int floor = y == ground && (terrain & 1) != 0 ? SLAB_FLOOR : Cells.FULL_FLOOR;
+    return Cells.pack(floor, (byte) PathType.BLOCKED);
+  }
+
+  /**
+   * Every block of a loaded chunk, as {@link #cellAt} gives it, indexed {@code (dx * Chunks.SIZE +
+   * dz) * height + dy}. Each column is filled as terrain in three runs, then a changed block in it
+   * is written over its run.
+   */
+  private void fillChunk(int chunkX, int chunkZ, byte[] cells, byte[] floors) {
+    int height = topology.height();
+    for (int dx = 0; dx < Chunks.SIZE; dx++) {
+      for (int dz = 0; dz < Chunks.SIZE; dz++) {
+        int x = chunkX * Chunks.SIZE + dx;
+        int z = chunkZ * Chunks.SIZE + dz;
+        int base = (dx * Chunks.SIZE + dz) * height;
+        int terrain = terrainAt(x, z);
+        int top = (terrain >> 1) - minY();
+        Arrays.fill(cells, base, base + top + 1, (byte) PathType.BLOCKED);
+        Arrays.fill(floors, base, base + top, (byte) Cells.FULL_FLOOR);
+        floors[base + top] = (byte) ((terrain & 1) != 0 ? SLAB_FLOOR : Cells.FULL_FLOOR);
+        Arrays.fill(cells, base + top + 1, base + height, (byte) PathType.OPEN);
+        Arrays.fill(floors, base + top + 1, base + height, (byte) 0);
+        if (overridesPerColumn[column(x, z)] == 0) {
+          continue;
+        }
+        for (int dy = 0; dy < height; dy++) {
+          Integer override = overrides.get(blockKey(x, minY() + dy, z));
+          if (override != null) {
+            cells[base + dy] = Cells.typeOf(override);
+            floors[base + dy] = (byte) Cells.floorOf(override);
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -206,16 +390,17 @@ public final class SimWorld implements WorldSource {
     boolean solid = true;
     for (int x = chunkX * Chunks.SIZE; x < (chunkX + 1) * Chunks.SIZE; x++) {
       for (int z = chunkZ * Chunks.SIZE; z < (chunkZ + 1) * Chunks.SIZE; z++) {
-        int column = x * size + z;
-        air &= ground[column] < low;
+        int terrain = terrainAt(x, z);
+        int ground = terrain >> 1;
+        air &= ground < low;
         // The top block may be a slab, which differs from the blocks below it.
-        solid &= ground[column] > high || (ground[column] == high && !slabTopped[column]);
+        solid &= ground > high || (ground == high && (terrain & 1) == 0);
       }
     }
     if (air) {
-      return PathType.OPEN;
+      return Cells.pack(0, (byte) PathType.OPEN);
     }
-    return solid ? (Cells.FULL_FLOOR << 8) | PathType.BLOCKED : NOT_UNIFORM;
+    return solid ? Cells.pack(Cells.FULL_FLOOR, (byte) PathType.BLOCKED) : NOT_UNIFORM;
   }
 
   /**
@@ -233,8 +418,7 @@ public final class SimWorld implements WorldSource {
         int x = chunkX * Chunks.SIZE + dx;
         int z = chunkZ * Chunks.SIZE + dz;
         for (int dy = 0; dy < SECTION_HEIGHT; dy++) {
-          cells[(dx * Chunks.SIZE + dz) * SECTION_HEIGHT + dy] =
-              (floorAt(x, low + dy, z) << 8) | (pathTypeAt(x, low + dy, z) & 0xFF);
+          cells[(dx * Chunks.SIZE + dz) * SECTION_HEIGHT + dy] = cellAt(x, low + dy, z);
         }
       }
     }
@@ -263,26 +447,32 @@ public final class SimWorld implements WorldSource {
   }
 
   private boolean inside(int x, int y, int z) {
-    return x >= 0
-        && x < size
-        && z >= 0
-        && z < size
-        && y >= topology.minY()
-        && y < topology.minY() + topology.height();
+    return contains(x, z) && y >= topology.minY() && y < topology.minY() + topology.height();
+  }
+
+  private int column(int x, int z) {
+    return (x - min) * size + (z - min);
   }
 
   private int chunkIndex(int chunkX, int chunkZ) {
-    if (chunkX < 0 || chunkX >= chunksPerSide || chunkZ < 0 || chunkZ >= chunksPerSide) {
+    int dx = chunkX - minChunk();
+    int dz = chunkZ - minChunk();
+    if (dx < 0 || dx >= chunksPerSide || dz < 0 || dz >= chunksPerSide) {
       throw new IllegalArgumentException("chunk outside the world: " + chunkX + "," + chunkZ);
     }
-    return chunkX * chunksPerSide + chunkZ;
+    return dx * chunksPerSide + dz;
   }
 
   private int sectionIndex(int chunkX, int chunkZ, int section) {
-    return chunkIndex(chunkX, chunkZ) * (topology.height() / SECTION_HEIGHT) + section;
+    return chunkIndex(chunkX, chunkZ) * sections + section;
   }
 
-  private int index(int x, int y, int z) {
-    return (x * size + z) * topology.height() + (y - topology.minY());
+  /**
+   * A block position as one key: x in the high half, y and z in the low, so the key's hash code,
+   * which folds the halves together, spreads. Y fits 12 bits and z 20 in any world a topology
+   * makes.
+   */
+  private static long blockKey(int x, int y, int z) {
+    return ((long) x << 32) | ((long) (y & 0xFFF) << 20) | (z & 0xFFFFF);
   }
 }

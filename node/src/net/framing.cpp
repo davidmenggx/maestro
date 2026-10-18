@@ -17,15 +17,15 @@ std::vector<std::uint8_t> frame(std::span<const std::uint8_t> Payload) {
   return Out;
 }
 
-Header peekHeader(std::span<const std::uint8_t> Buffer) noexcept {
+Header peekHeader(std::span<const std::uint8_t> Buffer,
+                  std::uint32_t Limit) noexcept {
   if (Buffer.size() < HeaderSize)
     return {};
 
   std::uint32_t Len = 0;
   for (std::size_t I = 0; I < HeaderSize; ++I)
     Len |= static_cast<std::uint32_t>(Buffer[I]) << (8 * I);
-  return {Len > MaxPayloadSize ? HeaderStatus::TooLarge : HeaderStatus::Ready,
-          Len};
+  return {Len > Limit ? HeaderStatus::TooLarge : HeaderStatus::Ready, Len};
 }
 
 } // namespace maestro::net

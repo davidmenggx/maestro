@@ -26,7 +26,7 @@ class SimulationTest {
    * must last several times the replay window before the stream moves past the resume point. If the
    * margin is too short, the resume count below becomes non-zero.
    */
-  private static final long AWAY_TICKS = 4L * Controller.RETENTION_FRAMES;
+  private static final long AWAY_TICKS = 4L * WorldStreams.RETENTION_FRAMES;
 
   /** Quiet ticks after the partition ends, for the new snapshot to arrive and the run to settle. */
   private static final long TAIL_TICKS = 50;
@@ -67,7 +67,8 @@ class SimulationTest {
         run.sim.metrics().counter("offload.submitted", "job", "chunk"),
         run.describe());
     assertTrue(
-        run.sim.metrics().counter("offload.submitted", "job", "delta") > run.regions.regionCount(),
+        run.sim.metrics().counter("offload.submitted", "job", "delta")
+            > run.regions.regions().size(),
         run.describe());
     for (ModeledNode node : run.sim.nodes()) {
       assertTrue(node.hasState(), run.describe());
@@ -83,6 +84,8 @@ class SimulationTest {
     assertTrue(run.out.answered() > 0, run.describe());
     assertEquals(
         List.of(), Invariants.checkSlo(run.out.latencies(), run.out.sloMisses()), run.describe());
+    // The run drains, so nothing counts against a node at its end.
+    assertEquals(0, run.sim.metrics().gauge("controller.outstanding"), run.describe());
   }
 
   /**
@@ -152,10 +155,12 @@ class SimulationTest {
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(0, run.sim.metrics().total("path.profile.unknown"), run.describe());
     assertTrue(run.out.dropped(DropReason.CLASS_UNREGISTERED) > 0, run.describe());
+    // A node is told a profile only once a request for it names one.
     for (ModeledNode node : run.sim.nodes()) {
-      assertTrue(node.knownClassCount() > 0, run.describe());
+      assertTrue(node.servedRequests() == 0 || node.knownClassCount() > 0, run.describe());
       assertTrue(node.knownClassCount() <= run.world.mobClassCount(), run.describe());
     }
+    assertTrue(run.sim.nodes().stream().anyMatch(node -> node.knownClassCount() > 0));
   }
 
   @Test
@@ -402,7 +407,7 @@ class SimulationTest {
     assertEquals(2, run.sim.incarnations(), run.describe());
     // Every node still holds the old run's area, which the new run cannot resume.
     assertEquals(
-        2L * run.regions.regionCount(),
+        2L * run.regions.nodes().size(),
         run.sim.metrics().total("world.resnapshot"),
         run.describe());
     assertEquals(0, run.sim.metrics().total("world.resume"), run.describe());
@@ -410,6 +415,26 @@ class SimulationTest {
     for (ModeledNode node : run.sim.nodes()) {
       assertTrue(Invariants.caughtUp(run.controller, node), node.id() + " " + run.describe());
     }
+  }
+
+  /**
+   * After a world frame is given up on, the stream starts over and its holders hold the region as
+   * air until its chunks arrive again, so an answer searched meanwhile must not be accepted. The
+   * controller sees that from the chunk's residency, not from the sequence it had at admission.
+   */
+  @Test
+  void anAnswerSearchedAfterTheStreamStartedOverIsNotAccepted() {
+    long behind = 0;
+    for (long seed = 1; seed <= 10; seed++) {
+      FaultPlan plan = FaultPlan.reliable().withOffloadFailureRate(0.6);
+      SimRun run = SimRun.of(seed, plan, TICKS, Scenario.DEFAULT.with(Chance.REQUEST, 0.3)).go();
+      assertEquals(List.of(), run.violations(), run.describe());
+      if (run.sim.metrics().total("world.restarted") > 0) {
+        behind += run.sim.metrics().total("path.response.behind");
+      }
+      assertEquals(0, run.out.answeredOverAir(), run.describe());
+    }
+    assertTrue(behind > 0, "no answer was ever searched while its stream started over");
   }
 
   @Test
@@ -427,9 +452,15 @@ class SimulationTest {
 
   @Test
   void aRegionSentInFullIsReadOverSeveralTicks() {
-    // Nine regions of four chunks each, more than one tick's read budget.
-    Topology wide = Topology.DEFAULT.withRegionSize(32).withRegionsPerSide(3);
-    SimRun run = SimRun.of(5L, FaultPlan.reliable(), TICKS, wide, Scenario.DEFAULT).go();
+    // The spawn chunks and three players' views, many times one tick's read budget.
+    SimRun run =
+        SimRun.of(
+                5L,
+                FaultPlan.reliable(),
+                TICKS,
+                Topology.DEFAULT.withRegionsPerSide(3),
+                Scenario.DEFAULT.with(Count.PLAYERS, 3))
+            .go();
 
     assertEquals(List.of(), run.violations(), run.describe());
     assertTrue(run.sim.metrics().total("world.chunks.deferred") > 0, run.describe());

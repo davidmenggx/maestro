@@ -92,7 +92,8 @@ public sealed interface WorldEvent {
 
     /**
      * Largest path length bound taken, the follow range attribute's maximum. How far a search reads
-     * is derived from it, so a larger bound would overflow that.
+     * is derived from it, so a larger bound would overflow that. A path walks less than this far,
+     * one block or more per node, which also bounds the size of an answer.
      */
     public static final float MAX_PATH_LENGTH = 2048f;
 

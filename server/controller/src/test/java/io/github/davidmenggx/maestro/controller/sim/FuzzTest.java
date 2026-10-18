@@ -154,7 +154,7 @@ class FuzzTest {
   @Tag(COVERAGE)
   void theSweepReachesEveryOutcomeItClaimsTo() {
     Set<DropReason> drops = EnumSet.noneOf(DropReason.class);
-    Set<Integer> regionSizes = new LinkedHashSet<>();
+    Set<Integer> replicated = new LinkedHashSet<>();
     Set<Integer> gridWidths = new LinkedHashSet<>();
     long resumes = 0;
     long resnapshots = 0;
@@ -199,7 +199,7 @@ class FuzzTest {
               : 0;
       abandonedAnswers += run.sim.metrics().total("path.response.abandoned");
       answersBehindTheirChunk += run.sim.metrics().total("path.response.behind");
-      regionSizes.add(run.topology.regionSize());
+      replicated.add(run.topology.replicated());
       gridWidths.add(run.topology.regionsPerSide());
       deepWorlds += run.topology.minY() < 0 ? 1 : 0;
       slowFleets += run.scenario.counts().get(Count.SLOW_NODES) > 0 ? 1 : 0;
@@ -225,12 +225,8 @@ class FuzzTest {
       }
     }
 
-    // Nothing sheds load yet.
-    assertEquals(
-        EnumSet.complementOf(EnumSet.of(DropReason.SHED)),
-        drops,
-        "a drop reason the sweep never reaches");
-    assertTrue(regionSizes.size() > 1, "region size never varied");
+    assertEquals(EnumSet.allOf(DropReason.class), drops, "a drop reason the sweep never reaches");
+    assertTrue(replicated.size() > 1, "no run varied how many regions have two holders");
     assertTrue(gridWidths.size() > 1, "the region grid never changed shape");
     assertTrue(deepWorlds > 0, "no run put the world floor below zero");
     assertTrue(slowFleets > 0, "no run gave the fleet a node slower than the rest");

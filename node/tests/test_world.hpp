@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "maestro/world/area.hpp"
+#include "maestro/world/world_store.hpp"
 
 namespace maestro::test {
 
@@ -62,5 +63,11 @@ private:
 Frame clearedChunk(std::uint64_t Sequence, int ChunkX, int ChunkZ);
 
 Frame delta(std::uint64_t Sequence, std::span<const world::CellEdit> Edits);
+
+/// Verifies `Bytes` as a `WorldFrame` and applies it to `Store`. Bytes that
+/// fail verification are `Malformed` and drop what `Store` holds, as the node
+/// treats them.
+world::ApplyStatus applyBytes(world::WorldStore &Store,
+                              std::span<const std::uint8_t> Bytes);
 
 } // namespace maestro::test

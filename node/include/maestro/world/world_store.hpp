@@ -3,7 +3,6 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <span>
 
 #include "maestro/world/area.hpp"
 
@@ -11,6 +10,7 @@ namespace maestro::fbs {
 struct ChunkSnapshot;
 struct RegionAssignment;
 struct WorldDelta;
+struct WorldFrame;
 } // namespace maestro::fbs
 
 namespace maestro::world {
@@ -25,21 +25,27 @@ enum class ApplyStatus {
   OutOfSequence,
   /// Asked to resume a stream this node does not hold.
   CannotResume,
+  /// A fresh assignment of the stream held, behind the last frame applied.
+  Behind,
 };
 
 /// The node's view of its assigned area, built from the ordered world stream.
 /// Each applied frame publishes a new immutable `Area`. Readers pin a version,
 /// so they never block on or see a half-applied frame.
 ///
-/// `apply` belongs to the one thread that consumes the world stream. `pin` may
-/// be called from any thread.
+/// `apply` and `clear` belong to the one thread that consumes the world
+/// stream. `pin` may be called from any thread.
 class WorldStore {
 public:
-  /// Applies one encoded `WorldFrame`. Any result but `Applied` drops all held
-  /// state, because the node and controller no longer agree on the stream.
-  /// The caller then reconnects, its `Hello` reports nothing held, and the
-  /// controller sends the whole area again.
-  ApplyStatus apply(std::span<const std::uint8_t> Frame);
+  /// Applies `Frame`, which has passed verification. Any result but `Applied`
+  /// drops all held state, because the node and controller no longer agree on
+  /// the stream. The node then drops its link, the controller reconnects, the
+  /// next `Hello` reports nothing held, and the controller sends the whole
+  /// area again.
+  ApplyStatus apply(const fbs::WorldFrame &Frame);
+
+  /// Drops all held state.
+  void clear() { Current.store(nullptr); }
 
   /// The current version, or null if nothing is held. `Hello` reports `run`,
   /// `regionId` and `sequence` from one pinned version, so they always
@@ -47,7 +53,7 @@ public:
   std::shared_ptr<const Area> pin() const { return Current.load(); }
 
 private:
-  ApplyStatus applyFrame(std::span<const std::uint8_t> Frame);
+  ApplyStatus applyFrame(const fbs::WorldFrame &Frame);
   ApplyStatus assign(const fbs::RegionAssignment &Assignment);
   ApplyStatus applyChunk(const fbs::ChunkSnapshot &Snapshot);
   ApplyStatus applyDelta(const fbs::WorldDelta &Delta);

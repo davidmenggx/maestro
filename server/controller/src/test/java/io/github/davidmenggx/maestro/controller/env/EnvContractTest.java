@@ -29,7 +29,7 @@ class EnvContractTest {
       new Offload() {
         @Override
         public <T> void submit(
-            String name, Supplier<T> work, Consumer<T> completion, Runnable failure) {}
+            String name, Lane lane, Supplier<T> work, Consumer<T> completion, Runnable failure) {}
       };
 
   private static final Transport TRANSPORT =
@@ -39,9 +39,6 @@ class EnvContractTest {
 
         @Override
         public void connect(NodeId node) {}
-
-        @Override
-        public void disconnect(NodeId node) {}
 
         @Override
         public void listen(Listener listener) {}

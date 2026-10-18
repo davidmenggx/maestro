@@ -9,6 +9,8 @@ import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput;
 import io.github.davidmenggx.maestro.controller.world.WorldSource;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import maestro.fbs.CellDelta;
@@ -16,6 +18,10 @@ import maestro.fbs.CellRun;
 import maestro.fbs.ChunkSnapshot;
 import maestro.fbs.ControlFrame;
 import maestro.fbs.ControlMsg;
+import maestro.fbs.ControlReplyFrame;
+import maestro.fbs.ControlReplyMsg;
+import maestro.fbs.Heartbeat;
+import maestro.fbs.Hello;
 import maestro.fbs.Join;
 import maestro.fbs.PathCancel;
 import maestro.fbs.PathNode;
@@ -27,6 +33,7 @@ import maestro.fbs.RequestFrame;
 import maestro.fbs.RequestMsg;
 import maestro.fbs.ResponseFrame;
 import maestro.fbs.ResponseMsg;
+import maestro.fbs.UnknownProfile;
 import maestro.fbs.Vec2i;
 import maestro.fbs.Vec3s;
 import maestro.fbs.WorldDelta;
@@ -34,9 +41,10 @@ import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 
 /**
- * Every frame payload the controller puts on the wire, encoded with the generated bindings, so the
- * encoding is in one place. Positions are given in world coordinates with the corner {@code
- * (originX, originZ)} of the receiving node's area, and leave as the wire's relative positions.
+ * Every frame payload the controller puts on the wire, and every reply it reads, encoded and
+ * decoded with the generated bindings, so the wire format is in one place. Positions are given in
+ * world coordinates with the corner {@code (originX, originZ)} of the receiving node's area, and
+ * leave as the wire's relative positions.
  *
  * <p>The generated setters take an {@code int} and cast it to the field's width without checking,
  * so any value not already range-checked at the boundary must go through {@link #int16} or {@link
@@ -51,12 +59,22 @@ public final class Frames {
   private static final ThreadLocal<FlatBufferBuilder> BUILDER =
       ThreadLocal.withInitial(() -> new FlatBufferBuilder(4096));
 
+  /** The buffers a chunk is read through, reused by each thread from chunk to chunk. */
+  private static final ThreadLocal<RunBuilder> CHUNK_SCRATCH =
+      ThreadLocal.withInitial(RunBuilder::new);
+
   /**
    * Largest payload the node reads from its world and control streams. Must match the node's {@code
    * net::MaxPayloadSize}. A chunk at the tallest world Minecraft allows, with every block in a run
    * of its own, is about 4 MiB.
    */
   public static final int MAX_FRAME_BYTES = 8 << 20;
+
+  /**
+   * Largest UDP payload over IPv4. An answer always fits: its path is shorter than {@link
+   * WorldEvent.Search#MAX_PATH_LENGTH} blocks, so it has at most 2049 nodes of 8 bytes.
+   */
+  public static final int MAX_DATAGRAM_BYTES = 65_507;
 
   /**
    * Largest request frame. A request frame is one UDP datagram, and this fits the 1232 bytes of
@@ -66,8 +84,8 @@ public final class Frames {
   public static final int MAX_REQUEST_FRAME_BYTES = 1200;
 
   /**
-   * Requests in one frame. A full frame of the largest requests fits {@link
-   * #MAX_REQUEST_FRAME_BYTES}.
+   * Requests in one frame. Every request is encoded with all its fields, so they share one layout
+   * and a full frame fits {@link #MAX_REQUEST_FRAME_BYTES} whatever the values.
    */
   public static final int MAX_REQUESTS_PER_FRAME = 24;
 
@@ -98,31 +116,33 @@ public final class Frames {
   }
 
   /**
-   * Reads one chunk from the world. The world can only be read on the main thread, so this is
-   * separate from the encoding, which runs on another thread. A section the source reports as
-   * uniform is not read block by block, so the cost follows terrain complexity, not world height,
-   * and a section the source can read whole is read in one call.
+   * Reads one chunk from the world, or returns null if the source cannot read it now ({@link
+   * WorldSource#readable}). The world can only be read on the main thread, so this is separate from
+   * the encoding, which runs on another thread. A section the source reports as uniform is not read
+   * block by block, so the cost follows terrain complexity, not world height, and a section the
+   * source can read whole is read in one call. Only the returned runs are allocated per chunk.
    */
   public static ChunkRuns readChunk(WorldSource world, int chunkX, int chunkZ) {
+    if (!world.readable(chunkX, chunkZ)) {
+      return null;
+    }
     int minX = chunkX * Chunks.SIZE;
     int minZ = chunkZ * Chunks.SIZE;
     int minY = world.minY();
     int height = world.height();
     int sections = height / WorldSource.SECTION_HEIGHT;
-    RunBuilder runs = new RunBuilder();
-    int[] sectionCells = null;
+    RunBuilder runs = CHUNK_SCRATCH.get();
+    runs.reset();
+    int[] sectionCells = runs.sectionCells;
     for (int section = 0; section < sections; section++) {
       int bottom = section * WorldSource.SECTION_HEIGHT;
       int uniform = world.uniformCell(chunkX, chunkZ, section);
       if (uniform != WorldSource.NOT_UNIFORM) {
-        int cell = cell(uniform >> 8, (byte) uniform);
+        int cell = cell(uniform);
         for (int column = 0; column < COLUMNS_PER_CHUNK; column++) {
           runs.add(column, cell, WorldSource.SECTION_HEIGHT);
         }
         continue;
-      }
-      if (sectionCells == null) {
-        sectionCells = new int[COLUMNS_PER_CHUNK * WorldSource.SECTION_HEIGHT];
       }
       if (!world.readSection(chunkX, chunkZ, section, sectionCells)) {
         readBlocks(world, minX, minY + bottom, minZ, WorldSource.SECTION_HEIGHT, runs);
@@ -136,7 +156,7 @@ public final class Frames {
           while (i + length < end && sectionCells[i + length] == read) {
             length++;
           }
-          runs.add(column, cell(read >> 8, (byte) read), length);
+          runs.add(column, cell(read), length);
           i += length;
         }
       }
@@ -155,7 +175,10 @@ public final class Frames {
         int z = minZ + dz;
         int column = dx * Chunks.SIZE + dz;
         for (int dy = 0; dy < layers; dy++) {
-          runs.add(column, cell(world.floorAt(x, y + dy, z), world.pathTypeAt(x, y + dy, z)), 1);
+          runs.add(
+              column,
+              cell(Cells.pack(world.floorAt(x, y + dy, z), world.pathTypeAt(x, y + dy, z))),
+              1);
         }
       }
     }
@@ -164,17 +187,25 @@ public final class Frames {
   /**
    * Run-length encodes a chunk read a section at a time, from the bottom up. Each column keeps its
    * open run. Runs are kept in the order they close and put in column order at the end, which keeps
-   * each column's runs in height order.
+   * each column's runs in height order. Reused from chunk to chunk after {@link #reset}.
    */
   private static final class RunBuilder {
 
-    private final ChunkRuns runs = new ChunkRuns();
+    private final int[] sectionCells = new int[COLUMNS_PER_CHUNK * WorldSource.SECTION_HEIGHT];
+    private final int[] runsPerColumn = new int[COLUMNS_PER_CHUNK];
     private final int[] openCell = new int[COLUMNS_PER_CHUNK];
     private final int[] openLength = new int[COLUMNS_PER_CHUNK];
+    private final int[] next = new int[COLUMNS_PER_CHUNK];
     // Each closed run as `(column << 32) | packed run`. Flat terrain has two runs per column, so
     // most chunks fit the first size.
     private long[] closed = new long[COLUMNS_PER_CHUNK * 2];
     private int closedCount;
+
+    void reset() {
+      Arrays.fill(runsPerColumn, 0);
+      Arrays.fill(openLength, 0);
+      closedCount = 0;
+    }
 
     void add(int column, int cell, int length) {
       if (openLength[column] > 0) {
@@ -194,7 +225,7 @@ public final class Frames {
       }
       int run = (uint16(openLength[column]) << 16) | openCell[column];
       closed[closedCount++] = ((long) column << 32) | (run & 0xFFFFFFFFL);
-      runs.runsPerColumn[column]++;
+      runsPerColumn[column]++;
     }
 
     /** Closes every column's last run, even an empty one, and returns the runs by column. */
@@ -202,10 +233,12 @@ public final class Frames {
       for (int column = 0; column < COLUMNS_PER_CHUNK; column++) {
         close(column);
       }
-      int[] next = new int[COLUMNS_PER_CHUNK];
+      next[0] = 0;
       for (int column = 1; column < COLUMNS_PER_CHUNK; column++) {
-        next[column] = next[column - 1] + runs.runsPerColumn[column - 1];
+        next[column] = next[column - 1] + runsPerColumn[column - 1];
       }
+      ChunkRuns runs = new ChunkRuns();
+      System.arraycopy(runsPerColumn, 0, runs.runsPerColumn, 0, COLUMNS_PER_CHUNK);
       runs.packedRuns = new int[closedCount];
       runs.runCount = closedCount;
       for (int i = 0; i < closedCount; i++) {
@@ -311,6 +344,9 @@ public final class Frames {
           "a request frame carries at most " + MAX_REQUESTS_PER_FRAME);
     }
     FlatBufferBuilder builder = builder();
+    // A field equal to its default is left out unless forced, and requests leaving out different
+    // fields would each need their own layout, which a full frame has no room for.
+    builder.forceDefaults(true);
     int[] offsets = new int[batch.size()];
     for (int i = 0; i < batch.size(); i++) {
       Request request = batch.get(i);
@@ -326,6 +362,7 @@ public final class Frames {
       PathRequest.addMaxFallDistance(builder, search.maxFallDistance());
       offsets[i] = PathRequest.endPathRequest(builder);
     }
+    builder.forceDefaults(false);
     int requestsVector = PathRequestBatch.createRequestsVector(builder, offsets);
     PathRequestBatch.startPathRequestBatch(builder);
     PathRequestBatch.addRequests(builder, requestsVector);
@@ -338,9 +375,10 @@ public final class Frames {
 
   /**
    * Requests the controller no longer wants, at most {@link #MAX_CANCELS_PER_FRAME}, so the frame
-   * fits one datagram.
+   * fits one datagram. {@code run} and {@code regionId} name the link and the area, as for {@link
+   * #requests}.
    */
-  public static byte[] cancels(long run, List<Long> requestIds) {
+  public static byte[] cancels(long run, int regionId, List<Long> requestIds) {
     if (requestIds.size() > MAX_CANCELS_PER_FRAME) {
       throw new IllegalArgumentException("a cancel frame carries at most " + MAX_CANCELS_PER_FRAME);
     }
@@ -351,7 +389,8 @@ public final class Frames {
     }
     int vector = PathCancel.createRequestIdsVector(builder, ids);
     int cancel = PathCancel.createPathCancel(builder, vector);
-    builder.finish(RequestFrame.createRequestFrame(builder, RequestMsg.PathCancel, cancel, run, 0));
+    builder.finish(
+        RequestFrame.createRequestFrame(builder, RequestMsg.PathCancel, cancel, run, regionId));
     return builder.sizedByteArray();
   }
 
@@ -449,9 +488,63 @@ public final class Frames {
     return builder.sizedByteArray();
   }
 
+  /**
+   * The reply in a response frame of controller run {@code run}, {@link Reply.Foreign} if it is
+   * another run's, or null for a body this controller does not know. Throws if the frame is
+   * malformed, as a datagram cut short or from something that is not a node may be.
+   */
+  public static Reply readResponse(ByteBuffer frame, long run) {
+    ResponseFrame response = ResponseFrame.getRootAsResponseFrame(frame);
+    if (response.run() != run) {
+      return new Reply.Foreign();
+    }
+    switch (response.bodyType()) {
+      case ResponseMsg.PathResponse -> {
+        PathResponse body = (PathResponse) response.body(new PathResponse());
+        // Not presized: the length is read from the datagram and may be garbage.
+        List<WorldOutput.Node> nodes = new ArrayList<>();
+        PathNode scratch = new PathNode();
+        for (int i = 0; i < body.nodesLength(); i++) {
+          body.nodes(scratch, i);
+          Pos pos = new Pos(scratch.pos().x(), scratch.pos().y(), scratch.pos().z());
+          nodes.add(new WorldOutput.Node(pos, (byte) scratch.type()));
+        }
+        return new Reply.Answer(
+            body.requestId(), body.reached(), nodes, body.cost(), body.worldSequence());
+      }
+      case ResponseMsg.UnknownProfile -> {
+        UnknownProfile body = (UnknownProfile) response.body(new UnknownProfile());
+        return new Reply.Refusal(body.requestId(), body.classId());
+      }
+      default -> {
+        return null;
+      }
+    }
+  }
+
+  /** The reply in a control frame, or null for a body this controller does not know. */
+  public static Reply readControlReply(ByteBuffer frame) {
+    ControlReplyFrame reply = ControlReplyFrame.getRootAsControlReplyFrame(frame);
+    switch (reply.bodyType()) {
+      case ControlReplyMsg.Hello -> {
+        Hello hello = (Hello) reply.body(new Hello());
+        return new Reply.Greeting(
+            hello.run(), hello.regionId(), hello.lastSequence(), hello.pathfinder());
+      }
+      case ControlReplyMsg.Heartbeat -> {
+        Heartbeat heartbeat = (Heartbeat) reply.body(new Heartbeat());
+        return new Reply.Depth(heartbeat.queueDepth());
+      }
+      default -> {
+        return null;
+      }
+    }
+  }
+
   private static FlatBufferBuilder builder() {
     FlatBufferBuilder builder = BUILDER.get();
     builder.clear();
+    builder.forceDefaults(false);
     return builder;
   }
 
@@ -475,15 +568,17 @@ public final class Frames {
   }
 
   /**
-   * A cell as {@code (floor << 8) | pathType}. Throws if the cell is not one the wire carries,
-   * which a packed run could not show: a wide floor would spill into the run length.
+   * {@code packed}, a {@link Cells#pack packed} cell, checked. Throws if the cell is not one the
+   * wire carries, which a packed run could not show: a wide floor would spill into the run length.
    */
-  private static int cell(int floor, byte pathType) {
+  private static int cell(int packed) {
+    int floor = Cells.floorOf(packed);
+    byte pathType = Cells.typeOf(packed);
     if (floor < 0 || floor > Cells.MAX_FLOOR || !PathTypes.isPerBlock(pathType)) {
       throw new IllegalArgumentException(
           "not a wire cell: " + PathTypes.name(pathType) + " with floor " + floor);
     }
-    return (floor << 8) | pathType;
+    return Cells.pack(floor, pathType);
   }
 
   /** {@code value} as a wire {@code short}. Throws if it does not fit instead of wrapping. */

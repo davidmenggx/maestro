@@ -1,5 +1,8 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
+import io.github.davidmenggx.maestro.controller.region.Region;
+import io.github.davidmenggx.maestro.controller.region.RegionMap;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput;
@@ -23,13 +26,29 @@ import java.util.TreeMap;
  *
  * <p>A request open when its controller process restarts has no outcome, because nothing is left to
  * report one. It is closed as lost with the process.
+ *
+ * <p>A request is servable when it starts in a region, in a chunk loaded long enough for any
+ * backlog of chunk reads to have reached it. Dropping a servable request for want of a node counts
+ * against the SLO, so a run cannot meet it by turning work away, unless the chunk left meanwhile,
+ * since an answer then cannot show it was searched while the chunk was there.
  */
 public final class RecordingOutput implements WorldOutput {
 
-  /** One request with no outcome yet. */
-  private record Open(long tick, Pos target) {}
+  /**
+   * One request with no outcome yet. {@code loadedSince} is when the chunk it starts in was loaded,
+   * as of the request, if it is servable.
+   */
+  private record Open(long tick, Pos start, Pos target, boolean servable, long loadedSince) {}
+
+  /**
+   * Ticks past the reads of every chunk loaded so far after which a chunk is resident on its
+   * holders: one to greet, one to read it, and margin.
+   */
+  private static final int SETTLE_TICKS = 4;
 
   private final Simulation sim;
+  private final SimWorld world;
+  private final RegionMap regions;
   private final List<PathResult> results = new ArrayList<>();
   private final List<Double> latencies = new ArrayList<>();
   private final Map<DropReason, Integer> drops = new EnumMap<>(DropReason.class);
@@ -41,16 +60,38 @@ public final class RecordingOutput implements WorldOutput {
 
   private int issued;
   private int lostToRestart;
+  private int unservedServable;
+  private int answeredOverAir;
 
-  public RecordingOutput(Simulation sim) {
+  public RecordingOutput(Simulation sim, SimWorld world, RegionMap regions) {
     this.sim = sim;
+    this.world = world;
+    this.regions = regions;
   }
 
   /** A request went in. Called before the controller sees it. */
   public void issued(WorldEvent.PathRequested request) {
     issued++;
+    boolean servable = servable(request);
+    long since =
+        servable
+            ? world.loadedSince(Chunks.of(request.start().x()), Chunks.of(request.start().z()))
+            : -1;
     open.computeIfAbsent(request.mobId(), mob -> new ArrayDeque<>())
-        .addLast(new Open(request.tick(), request.target()));
+        .addLast(new Open(request.tick(), request.start(), request.target(), servable, since));
+  }
+
+  private boolean servable(WorldEvent.PathRequested request) {
+    Pos start = request.start();
+    Region region = regions.regionAt(start.x(), start.z());
+    if (region == null || !world.contains(start.x(), start.z())) {
+      return false;
+    }
+    long since = world.loadedSince(Chunks.of(start.x()), Chunks.of(start.z()));
+    int readTicks =
+        (world.mostLoaded() + WorldStreams.MAX_CHUNK_READS_PER_TICK - 1)
+            / WorldStreams.MAX_CHUNK_READS_PER_TICK;
+    return since >= 0 && request.tick() - since >= readTicks + SETTLE_TICKS;
   }
 
   /** The controller has handled a request, so the older one for its mob must be closed. */
@@ -74,6 +115,9 @@ public final class RecordingOutput implements WorldOutput {
   public void pathComputed(PathResult result) {
     sim.digest().mix(sim.now()).mix(result.toString());
     results.add(result);
+    if (result.cost() == ModeledNode.SEARCHED_OVER_AIR) {
+      answeredOverAir++;
+    }
     // A path that reached its target ends there, in world positions. The modeled node's paths
     // are straight lines, so this checks the positions the controller put back in the world.
     if (result.reached()
@@ -106,7 +150,14 @@ public final class RecordingOutput implements WorldOutput {
   public void pathDropped(int mobId, DropReason reason) {
     sim.digest().mix(sim.now()).mix("drop").mix(mobId).mix(reason.name());
     drops.merge(reason, 1, Integer::sum);
-    close(mobId, reason);
+    Open request = close(mobId, reason);
+    if (reason == DropReason.NO_NODE
+        && request != null
+        && request.servable()
+        && world.loadedSince(Chunks.of(request.start().x()), Chunks.of(request.start().z()))
+            == request.loadedSince()) {
+      unservedServable++;
+    }
   }
 
   /**
@@ -159,9 +210,22 @@ public final class RecordingOutput implements WorldOutput {
     return List.copyOf(latencies);
   }
 
-  /** Requests the SLO counts as late: rejected for queue depth, or never answered in time. */
+  /**
+   * Requests the SLO counts as late: rejected for queue depth, never answered in time, or servable
+   * and dropped for want of a node.
+   */
   public long sloMisses() {
-    return dropped(DropReason.QUEUE_DEPTH) + dropped(DropReason.TIMEOUT);
+    return dropped(DropReason.QUEUE_DEPTH) + dropped(DropReason.TIMEOUT) + unservedServable;
+  }
+
+  /** Answers the controller accepted although the node searched them over air. */
+  public int answeredOverAir() {
+    return answeredOverAir;
+  }
+
+  /** Servable requests dropped for want of a node. */
+  public int unservedServable() {
+    return unservedServable;
   }
 
   public int answered() {

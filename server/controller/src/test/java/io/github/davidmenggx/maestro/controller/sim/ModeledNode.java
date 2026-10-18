@@ -17,6 +17,7 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import maestro.fbs.CellDelta;
 import maestro.fbs.CellRun;
 import maestro.fbs.ChunkSnapshot;
@@ -50,11 +51,16 @@ import maestro.fbs.WorldMsg;
  * Model of a C++ compute node. It decodes real frames with the generated bindings, holds the region
  * state a stateful node would, and makes the same decisions about links, requests, cancels and
  * world frames as the real node, which the conformance fixtures check against it. Paths are
- * straight lines, because the controller and the wire are under test, not A*.
+ * straight lines, because the controller and the wire are under test, not A*. An answer searched
+ * while the chunk its start is in was air has cost {@link #SEARCHED_OVER_AIR}, which no real search
+ * gives, so the harness can tell when the controller accepts one.
  *
  * <p>Workers start a request as soon as one is free and take a seeded time to serve it, so answers
  * can finish out of order and a burst waits behind the workers. With no workers, requests only wait
- * until {@link #serve} runs them.
+ * until {@link #serve} runs them. A request that waited past {@link #MAX_WAIT_STEPS} is dropped
+ * unserved.
+ *
+ * <p>The area is kept per chunk, and a chunk the node has only ever held as air takes no memory.
  *
  * <p>It refuses exactly the world frames the real node's {@code WorldStore} refuses, and reacts the
  * same way: nothing in the frame is applied, all held state is dropped, and the link is dropped so
@@ -104,11 +110,24 @@ public final class ModeledNode {
 
   private static final int MAX_PATH_NODES = 32;
 
+  /** The cost of an answer searched while its start chunk was air. */
+  static final float SEARCHED_OVER_AIR = -1;
+
   /** The node's own heartbeat interval, 1 s. The controller neither sets nor requests it. */
   static final int HEARTBEAT_STEPS = 20 * Simulation.STEPS_PER_TICK;
 
-  /** How long an answer or a cancel is kept for later copies of its request: 500 ms. */
-  static final int RETENTION_STEPS = 10 * Simulation.STEPS_PER_TICK;
+  /**
+   * How long an answer or a cancel is kept for later copies of its request: 1 s, twice the time
+   * after which the controller gives up on a request, so a resend still finds its answer when the
+   * server's ticks run long.
+   */
+  static final int RETENTION_STEPS = 20 * Simulation.STEPS_PER_TICK;
+
+  /**
+   * How long a request may wait for a worker: 1 s. The controller has given up on it by then, so it
+   * is dropped unserved, as a cancel drops it.
+   */
+  static final int MAX_WAIT_STEPS = 20 * Simulation.STEPS_PER_TICK;
 
   private enum State {
     WAITING,
@@ -117,7 +136,38 @@ public final class ModeledNode {
 
   /** An admitted request. Positions are relative to the area, as received. */
   private record Job(
-      long requestId, long run, long regionId, Pos start, Pos target, long generation) {}
+      long requestId,
+      long run,
+      long regionId,
+      Pos start,
+      Pos target,
+      long generation,
+      long admitted) {}
+
+  /**
+   * One chunk of the area, cells indexed {@code (dx * Chunks.SIZE + dz) * height + dy}, with its
+   * {@link AreaDigest#chunkHash} kept until a cell changes.
+   */
+  private static final class Chunk {
+
+    private final byte[] cells;
+    private final byte[] floors;
+    private boolean hashed;
+    private long hash;
+
+    private Chunk(byte[] cells, byte[] floors) {
+      this.cells = cells;
+      this.floors = floors;
+    }
+
+    private long hash() {
+      if (!hashed) {
+        hash = AreaDigest.chunkHash(cells, floors);
+        hashed = true;
+      }
+      return hash;
+    }
+  }
 
   /** A request settled within {@link #RETENTION_STEPS}: its answer, or null if canceled. */
   private record Settled(byte[] answer, long at) {}
@@ -157,18 +207,19 @@ public final class ModeledNode {
   /** Timers and completions that fell due while paused, run in order on resume. */
   private final List<Runnable> deferred = new ArrayList<>();
 
-  // The world: one area, kept across links.
+  // The world: one area, kept across links. A chunk not in `chunks` is air.
+  private boolean holdsArea;
   private long run;
   private long regionId;
   private int size;
   private int baseY;
   private int height;
-  private byte[] cells = new byte[0];
-  private byte[] floors = new byte[0];
+  private final Map<Integer, Chunk> chunks = new TreeMap<>();
   private long lastSequence;
 
   private long duplicateRequests;
   private long canceledRequests;
+  private long staleRequests;
   private long servedRequests;
   private boolean backlogged;
 
@@ -212,6 +263,11 @@ public final class ModeledNode {
     return servedRequests;
   }
 
+  /** Requests dropped because they waited past {@link #MAX_WAIT_STEPS}. */
+  public long staleRequests() {
+    return staleRequests;
+  }
+
   /** Whether a request ever waited for a worker. */
   public boolean backlogged() {
     return backlogged;
@@ -227,32 +283,81 @@ public final class ModeledNode {
   }
 
   public boolean hasState() {
-    return cells.length > 0 && lastSequence > 0;
+    return holdsArea && lastSequence > 0;
   }
 
   /** Holds an assigned area, possibly still all air because no chunk has arrived since. */
   public boolean assigned() {
-    return cells.length > 0;
+    return holdsArea;
   }
 
   /** Region state only. Two nodes with the same world have equal state, however they got there. */
   public long stateDigest() {
-    return digest(regionId, size, baseY, height, cells, floors);
+    AreaDigest digest = new AreaDigest(regionId, size, baseY, height);
+    for (Map.Entry<Integer, Chunk> chunk : chunks.entrySet()) {
+      digest.chunk(chunk.getKey(), chunk.getValue().hash());
+    }
+    return digest.value();
   }
 
   /**
-   * The digest of a region's state, with cells and floors indexed {@code (x * size + z) * height +
-   * (y - baseY)}, as a node holds them.
+   * The digest of a region's state, fed one chunk at a time in increasing index order, chunk {@code
+   * (cx, cz)} of the area having index {@code cx * (size / 16) + cz}. A chunk all air leaves the
+   * digest as an absent one does, so two equal states digest the same however they got there.
    */
-  static long digest(long regionId, int size, int baseY, int height, byte[] cells, byte[] floors) {
-    return new Digest()
-        .mix(regionId)
-        .mix(size)
-        .mix(baseY)
-        .mix(height)
-        .mix(cells)
-        .mix(floors)
-        .value();
+  static final class AreaDigest {
+
+    /** {@link #chunkHash} of a chunk all air. */
+    static final long AIR = 0;
+
+    private final Digest digest = new Digest();
+
+    AreaDigest(long regionId, int size, int baseY, int height) {
+      digest.mix(regionId).mix(size).mix(baseY).mix(height);
+    }
+
+    /** Cells and floors indexed {@code (dx * Chunks.SIZE + dz) * height + dy}. */
+    void chunk(int index, byte[] cells, byte[] floors) {
+      chunk(index, chunkHash(cells, floors));
+    }
+
+    /** A chunk by its {@link #chunkHash}. */
+    void chunk(int index, long hash) {
+      if (hash != AIR) {
+        digest.mix(index).mix(hash);
+      }
+    }
+
+    long value() {
+      return digest.value();
+    }
+
+    /**
+     * The hash of one chunk's cells and floors, or {@link #AIR} if they are all air. It reads eight
+     * bytes at a time, since checkpoints hash every chunk of a region.
+     */
+    static long chunkHash(byte[] cells, byte[] floors) {
+      for (int i = 0; i < cells.length; i++) {
+        if (cells[i] != (byte) PathType.OPEN || floors[i] != 0) {
+          long hash = mixWords(mixWords(0x9E3779B97F4A7C15L, cells), floors);
+          return hash == AIR ? AIR + 1 : hash;
+        }
+      }
+      return AIR;
+    }
+
+    private static long mixWords(long hash, byte[] bytes) {
+      ByteBuffer words = ByteBuffer.wrap(bytes);
+      int i = 0;
+      for (; i + Long.BYTES <= bytes.length; i += Long.BYTES) {
+        hash = (hash ^ words.getLong(i)) * 0x100000001B3L;
+        hash ^= hash >>> 32;
+      }
+      for (; i < bytes.length; i++) {
+        hash = (hash ^ bytes[i]) * 0x100000001B3L;
+      }
+      return hash;
+    }
   }
 
   /** Process death: everything is lost, and nothing the process scheduled runs. */
@@ -260,11 +365,7 @@ public final class ModeledNode {
     process++;
     deferred.clear();
     paused = false;
-    run = 0;
-    regionId = 0;
-    cells = new byte[0];
-    floors = new byte[0];
-    lastSequence = 0;
+    dropArea();
     forgetLink();
     linkRun = 0;
     linkAttempt = 0;
@@ -453,12 +554,16 @@ public final class ModeledNode {
       return;
     }
     violations.add(id + ": " + refusal);
+    dropArea();
+    dropLink();
+  }
+
+  private void dropArea() {
+    holdsArea = false;
     run = 0;
     regionId = 0;
-    cells = new byte[0];
-    floors = new byte[0];
+    chunks.clear();
     lastSequence = 0;
-    dropLink();
   }
 
   /** Applies one world frame, or returns the reason the real node would refuse it. */
@@ -557,7 +662,8 @@ public final class ModeledNode {
             frameRegion,
             new Pos(request.start().x(), request.start().y(), request.start().z()),
             new Pos(request.target().x(), request.target().y(), request.target().z()),
-            generation));
+            generation,
+            host.now()));
     startWorkers();
   }
 
@@ -579,16 +685,25 @@ public final class ModeledNode {
 
   /**
    * The oldest waiting request, now running, or null. A canceled one stays in the queue until
-   * reached and is skipped then, as the real node's queue does.
+   * reached and is skipped then, as the real node's queue does. One that waited past {@link
+   * #MAX_WAIT_STEPS} is dropped then, and later copies with it, as a cancel would.
    */
   private Job take() {
     while (waitingCount > 0) {
       Job next = waiting.poll();
-      if (open.get(next.requestId()) == State.WAITING) {
-        open.put(next.requestId(), State.RUNNING);
-        waitingCount--;
-        return next;
+      if (open.get(next.requestId()) != State.WAITING) {
+        continue;
       }
+      waitingCount--;
+      if (host.now() - next.admitted() > MAX_WAIT_STEPS) {
+        open.remove(next.requestId());
+        staleRequests++;
+        expire();
+        record(next.requestId(), null);
+        continue;
+      }
+      open.put(next.requestId(), State.RUNNING);
+      return next;
     }
     return null;
   }
@@ -663,7 +778,7 @@ public final class ModeledNode {
    * too early.
    */
   private byte[] answerBuilder(Job job) {
-    boolean matches = cells.length > 0 && run == job.run() && regionId == job.regionId();
+    boolean matches = holdsArea && run == job.run() && regionId == job.regionId();
     List<Pos> path = matches ? straightLine(job.start(), job.target()) : List.of();
     boolean reached = !path.isEmpty() && path.get(path.size() - 1).equals(job.target());
 
@@ -680,13 +795,23 @@ public final class ModeledNode {
     PathResponse.addRequestId(builder, job.requestId());
     PathResponse.addReached(builder, reached);
     PathResponse.addNodes(builder, nodes);
-    PathResponse.addCost(builder, path.size());
+    PathResponse.addCost(
+        builder, matches && overAir(job.start()) ? SEARCHED_OVER_AIR : path.size());
     PathResponse.addWorldSequence(builder, matches ? lastSequence : 0);
     int response = PathResponse.endPathResponse(builder);
 
     builder.finish(
         ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, response, job.run()));
     return builder.sizedByteArray();
+  }
+
+  /** Whether the area holds the chunk {@code start} is in as air. */
+  private boolean overAir(Pos start) {
+    if (!inArea(start.x(), start.y(), start.z())) {
+      return true;
+    }
+    int perSide = size / Chunks.SIZE;
+    return !chunks.containsKey(Chunks.of(start.x()) * perSide + Chunks.of(start.z()));
   }
 
   private static byte[] unknownProfile(long run, long requestId, int classId) {
@@ -731,6 +856,9 @@ public final class ModeledNode {
           + newHeight;
     }
 
+    if (assignment.run() == 0 || assignment.run() != linkRun) {
+      return "assigned an area of run " + assignment.run() + " on a link of run " + linkRun;
+    }
     if (assignment.resume()) {
       // Resuming keeps the held state, so it must be the stream the controller
       // is continuing, at the position it holds.
@@ -746,16 +874,28 @@ public final class ModeledNode {
       return null;
     }
 
+    // A stream starts over where it stands, never behind a frame already applied.
+    if (holdsArea
+        && assignment.run() == run
+        && assignment.regionId() == regionId
+        && assignment.sequence() < lastSequence) {
+      return "assigned region "
+          + regionId
+          + " afresh at sequence "
+          + assignment.sequence()
+          + ", behind the held "
+          + lastSequence;
+    }
+
     // Everything is air until a chunk says otherwise, as vanilla reads a chunk the
     // server does not hold.
+    holdsArea = true;
     run = assignment.run();
     regionId = assignment.regionId();
     size = newSize;
     baseY = newBaseY;
     height = newHeight;
-    cells = new byte[size * size * height];
-    floors = new byte[cells.length];
-    Arrays.fill(cells, (byte) PathType.OPEN);
+    chunks.clear();
     // The controller's sequence continues across a reassignment, so the
     // assignment says where it stands.
     lastSequence = assignment.sequence();
@@ -775,7 +915,7 @@ public final class ModeledNode {
   }
 
   private String applyChunkSnapshot(ChunkSnapshot snapshot) {
-    if (cells.length == 0) {
+    if (!holdsArea) {
       return "chunk before region assignment";
     }
     Vec2i position = snapshot.chunkXz();
@@ -799,26 +939,27 @@ public final class ModeledNode {
       return refused;
     }
 
-    int originX = position.x() * Chunks.SIZE;
-    int originZ = position.z() * Chunks.SIZE;
+    int chunkIndex = position.x() * perSide + position.z();
     // No columns means the server does not hold the chunk, so it is air.
     if (snapshot.runCountsLength() == 0) {
-      fillChunk(originX, originZ, (byte) PathType.OPEN, (byte) 0);
+      chunks.remove(chunkIndex);
     } else {
+      Chunk chunk = newChunk();
       CellRun cellRun = new CellRun();
       int runIndex = 0;
       for (int column = 0; column < snapshot.runCountsLength(); column++) {
-        int base = index(originX + column / Chunks.SIZE, baseY, originZ + column % Chunks.SIZE);
+        int base = column * height;
         int y = 0;
         for (int r = snapshot.runCounts(column); r > 0; r--) {
           snapshot.runs(cellRun, runIndex++);
           for (int i = 0; i < cellRun.length(); i++) {
-            cells[base + y] = (byte) cellRun.nodeType();
-            floors[base + y] = (byte) cellRun.floor();
+            chunk.cells[base + y] = (byte) cellRun.nodeType();
+            chunk.floors[base + y] = (byte) cellRun.floor();
             y++;
           }
         }
       }
+      chunks.put(chunkIndex, chunk);
     }
     advance(snapshot.sequence());
     return null;
@@ -865,20 +1006,14 @@ public final class ModeledNode {
     return runIndex == snapshot.runsLength() ? null : "chunk carries runs past its last column";
   }
 
-  private void fillChunk(int originX, int originZ, byte type, byte floor) {
-    for (int dx = 0; dx < Chunks.SIZE; dx++) {
-      for (int dz = 0; dz < Chunks.SIZE; dz++) {
-        int base = index(originX + dx, baseY, originZ + dz);
-        for (int y = 0; y < height; y++) {
-          cells[base + y] = type;
-          floors[base + y] = floor;
-        }
-      }
-    }
+  private Chunk newChunk() {
+    byte[] cells = new byte[Chunks.SIZE * Chunks.SIZE * height];
+    Arrays.fill(cells, (byte) PathType.OPEN);
+    return new Chunk(cells, new byte[cells.length]);
   }
 
   private String applyDelta(WorldDelta delta) {
-    if (cells.length == 0) {
+    if (!holdsArea) {
       return "delta " + delta.sequence() + " before any assignment";
     }
     CellDelta cell = new CellDelta();
@@ -892,7 +1027,7 @@ public final class ModeledNode {
         return "delta cell has floor " + cell.floor() + ", past " + Cells.MAX_FLOOR;
       }
       Vec3s pos = cell.pos();
-      if (index(pos.x(), pos.y(), pos.z()) < 0) {
+      if (!inArea(pos.x(), pos.y(), pos.z())) {
         return "delta cell " + pos.x() + "," + pos.y() + "," + pos.z() + " outside the area";
       }
     }
@@ -901,12 +1036,20 @@ public final class ModeledNode {
       return refused;
     }
 
+    int perSide = size / Chunks.SIZE;
     for (int i = 0; i < delta.cellsLength(); i++) {
       delta.cells(cell, i);
       Vec3s pos = cell.pos();
-      int index = index(pos.x(), pos.y(), pos.z());
-      cells[index] = (byte) cell.nodeType();
-      floors[index] = (byte) cell.floor();
+      int chunkIndex = Chunks.of(pos.x()) * perSide + Chunks.of(pos.z());
+      Chunk chunk = chunks.computeIfAbsent(chunkIndex, unseen -> newChunk());
+      int index =
+          (Math.floorMod(pos.x(), Chunks.SIZE) * Chunks.SIZE + Math.floorMod(pos.z(), Chunks.SIZE))
+                  * height
+              + pos.y()
+              - baseY;
+      chunk.cells[index] = (byte) cell.nodeType();
+      chunk.floors[index] = (byte) cell.floor();
+      chunk.hashed = false;
     }
     advance(delta.sequence());
     return null;
@@ -917,11 +1060,8 @@ public final class ModeledNode {
     host.applied(this, run, regionId, sequence);
   }
 
-  private int index(int x, int y, int z) {
+  private boolean inArea(int x, int y, int z) {
     int dy = y - baseY;
-    if (x < 0 || x >= size || z < 0 || z >= size || dy < 0 || dy >= height) {
-      return -1;
-    }
-    return (x * size + z) * height + dy;
+    return x >= 0 && x < size && z >= 0 && z < size && dy >= 0 && dy < height;
   }
 }

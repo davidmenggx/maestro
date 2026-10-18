@@ -14,7 +14,7 @@ using namespace maestro::serve;
 
 namespace {
 
-constexpr Clock::duration Retention = std::chrono::milliseconds(500);
+constexpr Clock::duration Retention = std::chrono::milliseconds(1000);
 const Clock::time_point Start{};
 
 Job job(std::uint64_t RequestId) {
@@ -61,6 +61,29 @@ TEST(RequestQueue, ServesInArrivalOrderAndCountsRunningRequests) {
   serve(Queue, 2, answer(2));
   serve(Queue, 3, answer(3));
   EXPECT_EQ(Queue.depth(), 0u);
+}
+
+TEST(RequestQueue, AJobCarriesTheTimeItWasAdmitted) {
+  RequestQueue Queue(Retention);
+  const Clock::time_point Later = Start + std::chrono::milliseconds(70);
+  ASSERT_EQ(admit(Queue, 1, Start), Admission::Queued);
+  ASSERT_EQ(admit(Queue, 2, Later), Admission::Queued);
+  // A copy keeps the first admission's time.
+  ASSERT_EQ(admit(Queue, 1, Later), Admission::Duplicate);
+  const std::optional<Job> First = Queue.take();
+  const std::optional<Job> Second = Queue.take();
+  ASSERT_TRUE(First && Second);
+  EXPECT_EQ(First->Admitted, Start);
+  EXPECT_EQ(Second->Admitted, Later);
+}
+
+TEST(RequestQueue, AJobSettledWithNoAnswerDropsItsCopies) {
+  RequestQueue Queue(Retention);
+  ASSERT_EQ(admit(Queue, 1), Admission::Queued);
+  serve(Queue, 1, nullptr);
+  EXPECT_EQ(admit(Queue, 1, Start + Retention / 2), Admission::Canceled);
+  EXPECT_EQ(Queue.depth(), 0u);
+  EXPECT_EQ(admit(Queue, 1, Start + Retention), Admission::Queued);
 }
 
 TEST(RequestQueue, ACopyOfAnOpenRequestIsDropped) {

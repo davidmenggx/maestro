@@ -194,7 +194,7 @@ void replay(const std::filesystem::path &Path, Tally &Count) {
       ASSERT_NE(Frame, nullptr);
       if (!BeforeDeltas && Frame->body_type() == fbs::WorldMsg::WorldDelta)
         BeforeDeltas = Store.pin();
-      ASSERT_EQ(Store.apply(WorldFrames[Applied]), world::ApplyStatus::Applied)
+      ASSERT_EQ(Store.apply(*Frame), world::ApplyStatus::Applied)
           << "frame " << Applied << " refused";
     }
     const std::shared_ptr<const world::Area> Area = Store.pin();

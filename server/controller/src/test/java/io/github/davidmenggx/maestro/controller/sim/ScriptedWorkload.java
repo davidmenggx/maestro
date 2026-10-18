@@ -36,7 +36,8 @@ public final class ScriptedWorkload implements Workload {
 
   private void apply(WorldEvent event) {
     switch (event) {
-      case WorldEvent.ChunkLoaded loaded -> world.loadChunk(loaded.chunkX(), loaded.chunkZ());
+      case WorldEvent.ChunkLoaded loaded ->
+          world.loadChunk(loaded.chunkX(), loaded.chunkZ(), loaded.tick());
       case WorldEvent.ChunkUnloaded unloaded ->
           world.unloadChunk(unloaded.chunkX(), unloaded.chunkZ());
       case WorldEvent.BlockChanged changed ->

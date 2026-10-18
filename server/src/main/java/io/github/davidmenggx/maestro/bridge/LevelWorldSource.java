@@ -1,33 +1,50 @@
 package io.github.davidmenggx.maestro.bridge;
 
+import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.ProfileTable;
 import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap;
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.BlockGetter;
-import net.minecraft.world.level.LevelReader;
+import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunkSection;
-import net.minecraft.world.level.chunk.status.ChunkStatus;
 
-/** The world boundary's pull side over a Minecraft level. Read on the server thread only. */
+/**
+ * The world boundary's pull side over a Minecraft level. Read on the server thread only.
+ *
+ * <p>Blocks are read through their chunk, and only while it is loaded at {@code FULL} status, so a
+ * read never loads a chunk. A chunk that is not loaded reads as air, as the node holds it.
+ */
 public final class LevelWorldSource implements WorldSource {
 
-  /** The cell of air: no collision height, and the {@code OPEN} type. */
-  private static final int AIR = maestro.fbs.PathType.OPEN;
+  /** A loaded chunk at {@code FULL} status, or null. Never loads one. */
+  @FunctionalInterface
+  interface LoadedChunks {
+    ChunkAccess get(int chunkX, int chunkZ);
+  }
 
-  private final LevelReader level;
+  /** The cell of air: no collision height, and the {@code OPEN} type. */
+  private static final int AIR = Cells.pack(0, (byte) maestro.fbs.PathType.OPEN);
+
+  private final LevelHeightAccessor heights;
+  private final LoadedChunks chunks;
   private final ProfileTable profiles;
   private final BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
-  private final Sections sections;
+  private final Sections sections = new Sections();
 
-  public LevelWorldSource(LevelReader level, ProfileTable profiles) {
-    this.level = level;
+  public LevelWorldSource(ServerLevel level, ProfileTable profiles) {
+    this(level, level.getChunkSource()::getChunkNow, profiles);
+  }
+
+  LevelWorldSource(LevelHeightAccessor heights, LoadedChunks chunks, ProfileTable profiles) {
+    this.heights = heights;
+    this.chunks = chunks;
     this.profiles = profiles;
-    this.sections = new Sections(level);
   }
 
   @Override
@@ -37,42 +54,55 @@ public final class LevelWorldSource implements WorldSource {
 
   @Override
   public int minY() {
-    return level.getMinY();
+    return heights.getMinY();
   }
 
   @Override
   public int height() {
-    return level.getHeight();
+    return heights.getHeight();
+  }
+
+  @Override
+  public boolean readable(int chunkX, int chunkZ) {
+    return chunks.get(chunkX, chunkZ) != null;
   }
 
   @Override
   public byte pathTypeAt(int x, int y, int z) {
-    return BlockCells.pathType(level, cursor.set(x, y, z));
+    ChunkAccess chunk = chunks.get(Chunks.of(x), Chunks.of(z));
+    return chunk == null ? Cells.typeOf(AIR) : BlockCells.pathType(chunk, cursor.set(x, y, z));
   }
 
   @Override
   public int floorAt(int x, int y, int z) {
-    return BlockCells.floor(level, cursor.set(x, y, z));
+    ChunkAccess chunk = chunks.get(Chunks.of(x), Chunks.of(z));
+    return chunk == null ? Cells.floorOf(AIR) : BlockCells.floor(chunk, cursor.set(x, y, z));
   }
 
   @Override
   public int uniformCell(int chunkX, int chunkZ, int section) {
-    LevelChunkSection blocks = section(chunkX, chunkZ, section);
-    if (blocks == null) {
-      return NOT_UNIFORM;
+    ChunkAccess chunk = chunks.get(chunkX, chunkZ);
+    if (chunk == null) {
+      return AIR;
     }
     return sections.uniformCell(
-        blocks, chunkX * Chunks.SIZE, minY() + section * SECTION_HEIGHT, chunkZ * Chunks.SIZE);
+        chunk,
+        chunk.getSection(section),
+        chunkX * Chunks.SIZE,
+        minY() + section * SECTION_HEIGHT,
+        chunkZ * Chunks.SIZE);
   }
 
+  /** Returns false for a chunk that is not loaded, which reads as air block by block. */
   @Override
   public boolean readSection(int chunkX, int chunkZ, int section, int[] cells) {
-    LevelChunkSection blocks = section(chunkX, chunkZ, section);
-    if (blocks == null) {
+    ChunkAccess chunk = chunks.get(chunkX, chunkZ);
+    if (chunk == null) {
       return false;
     }
     sections.read(
-        blocks,
+        chunk,
+        chunk.getSection(section),
         chunkX * Chunks.SIZE,
         minY() + section * SECTION_HEIGHT,
         chunkZ * Chunks.SIZE,
@@ -81,20 +111,12 @@ public final class LevelWorldSource implements WorldSource {
   }
 
   /**
-   * The section, or null if its chunk is not loaded. Such a chunk is left to the block reads, which
-   * only ever happen in a loaded chunk.
-   */
-  private LevelChunkSection section(int chunkX, int chunkZ, int section) {
-    ChunkAccess chunk = level.getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
-    return chunk == null ? null : chunk.getSection(section);
-  }
-
-  /**
-   * Reads a section's cells from its palette instead of through the level. A block's type is a
+   * Reads a section's cells from its palette instead of block by block. A block's type is a
    * function of its state, and so is its floor unless the block has a dynamic shape, whose
    * collision shape is not cached per state and may read the position or a block entity (shulker
    * boxes and moving pistons read their block entity). So each distinct state is read once per
    * section, at the first block that has it, and only a dynamic shape's floor is read per block.
+   * Blocks are read through {@code level}, which holds the section.
    */
   static final class Sections {
 
@@ -103,13 +125,11 @@ public final class LevelWorldSource implements WorldSource {
     /** Marks a state whose floor is read per block. Its type is in the low byte. */
     private static final int FLOOR_PER_BLOCK = 1 << 30;
 
-    private final BlockGetter level;
     private final BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
     private final Reference2IntOpenHashMap<BlockState> cellsByState =
         new Reference2IntOpenHashMap<>();
 
-    Sections(BlockGetter level) {
-      this.level = level;
+    Sections() {
       cellsByState.defaultReturnValue(UNSEEN);
     }
 
@@ -118,7 +138,7 @@ public final class LevelWorldSource implements WorldSource {
      * per block. A palette can still list a state no block has any more, so such a section is not
      * reported uniform. {@code (minX, minY, minZ)} is its lowest corner.
      */
-    int uniformCell(LevelChunkSection blocks, int minX, int minY, int minZ) {
+    int uniformCell(BlockGetter level, LevelChunkSection blocks, int minX, int minY, int minZ) {
       if (blocks.hasOnlyAir()) {
         return AIR;
       }
@@ -126,11 +146,12 @@ public final class LevelWorldSource implements WorldSource {
       if (first.getBlock().hasDynamicShape() || blocks.maybeHas(state -> state != first)) {
         return NOT_UNIFORM;
       }
-      return firstCell(first, cursor.set(minX, minY, minZ));
+      return firstCell(level, first, cursor.set(minX, minY, minZ));
     }
 
     /** Reads the section with lowest corner {@code (minX, minY, minZ)} into {@code cells}. */
-    void read(LevelChunkSection blocks, int minX, int minY, int minZ, int[] cells) {
+    void read(
+        BlockGetter level, LevelChunkSection blocks, int minX, int minY, int minZ, int[] cells) {
       cellsByState.clear();
       BlockState last = null;
       int lastCell = UNSEEN;
@@ -143,7 +164,7 @@ public final class LevelWorldSource implements WorldSource {
               last = state;
               lastCell = cellsByState.getInt(state);
               if (lastCell == UNSEEN) {
-                lastCell = firstCell(state, cursor.set(minX + dx, minY + dy, minZ + dz));
+                lastCell = firstCell(level, state, cursor.set(minX + dx, minY + dy, minZ + dz));
                 cellsByState.put(state, lastCell);
               }
             }
@@ -151,7 +172,8 @@ public final class LevelWorldSource implements WorldSource {
               cells[first + dy] = lastCell;
             } else {
               cursor.set(minX + dx, minY + dy, minZ + dz);
-              cells[first + dy] = (BlockCells.floor(state, level, cursor) << 8) | (lastCell & 0xFF);
+              cells[first + dy] =
+                  Cells.pack(BlockCells.floor(state, level, cursor), Cells.typeOf(lastCell));
             }
           }
         }
@@ -162,12 +184,12 @@ public final class LevelWorldSource implements WorldSource {
      * The cell of {@code state}, read at {@code pos}, which holds it. If the state's floor is read
      * per block, its type marked {@link #FLOOR_PER_BLOCK} instead.
      */
-    private int firstCell(BlockState state, BlockPos pos) {
-      int type = BlockCells.pathType(level, pos) & 0xFF;
+    private static int firstCell(BlockGetter level, BlockState state, BlockPos pos) {
+      byte type = BlockCells.pathType(level, pos);
       if (state.getBlock().hasDynamicShape()) {
-        return FLOOR_PER_BLOCK | type;
+        return FLOOR_PER_BLOCK | Cells.pack(0, type);
       }
-      return (BlockCells.floor(state, level, pos) << 8) | type;
+      return Cells.pack(BlockCells.floor(state, level, pos), type);
     }
   }
 }

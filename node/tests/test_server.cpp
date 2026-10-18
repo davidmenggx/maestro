@@ -297,6 +297,14 @@ const fbs::Hello *hello(const Bytes &Frame) {
   return root<fbs::ControlReplyFrame>(Frame)->body_as_Hello();
 }
 
+/// A frame header declaring `Length` bytes of payload.
+Bytes header(std::uint32_t Length) {
+  return {static_cast<std::uint8_t>(Length),
+          static_cast<std::uint8_t>(Length >> 8),
+          static_cast<std::uint8_t>(Length >> 16),
+          static_cast<std::uint8_t>(Length >> 24)};
+}
+
 } // namespace
 
 TEST_F(ServerTest, AFreshNodeSaysItHoldsNothing) {
@@ -646,7 +654,7 @@ TEST_F(ServerTest, AFirstFrameThatIsNotAJoinIsRefused) {
 
 TEST_F(ServerTest, ASilentConnectionIsClosedAfterTheJoinTimeout) {
   net::ServerOptions Opts = testOptions();
-  Opts.JoinTimeout = milliseconds(250);
+  Opts.Node.JoinTimeout = milliseconds(250);
   start(Opts);
   Connection Control = control();
   ASSERT_TRUE(Control.readHello());
@@ -721,14 +729,52 @@ TEST_F(ServerTest, AFrameDeclaredPastTheLimitDropsTheLink) {
   Connection Control = control();
   Connection World = world();
   ASSERT_TRUE(Control.readHello());
-  const std::uint32_t Length = net::MaxPayloadSize + 1;
-  const Bytes Header = {static_cast<std::uint8_t>(Length),
-                        static_cast<std::uint8_t>(Length >> 8),
-                        static_cast<std::uint8_t>(Length >> 16),
-                        static_cast<std::uint8_t>(Length >> 24)};
-  World.sendRaw(Header);
+  World.sendRaw(header(net::MaxPayloadSize + 1));
   EXPECT_TRUE(World.closedByNode());
   EXPECT_TRUE(Control.closedByNode());
+}
+
+TEST_F(ServerTest, AFirstFrameDeclaredPastTheJoinLimitIsRefusedAtOnce) {
+  // Long enough that only the limit can close a connection in time.
+  net::ServerOptions Opts = testOptions();
+  Opts.Node.JoinTimeout = std::chrono::minutes(1);
+  start(Opts);
+  Connection Control = control();
+  ASSERT_TRUE(Control.readHello());
+
+  // Waits for its body, which never comes.
+  Connection AtTheLimit = connect(Port::World);
+  AtTheLimit.sendRaw(header(net::MaxJoinSize));
+  EXPECT_FALSE(AtTheLimit.closedByNode(Quiet));
+
+  for (const Port On : {Port::World, Port::Control}) {
+    Connection Over = connect(On);
+    Over.sendRaw(header(net::MaxJoinSize + 1));
+    EXPECT_TRUE(Over.closedByNode());
+  }
+  EXPECT_FALSE(Control.closedByNode(Quiet));
+  EXPECT_TRUE(Control.awaitDepth(0));
+}
+
+TEST_F(ServerTest, AControlFrameDeclaredPastTheControlLimitDropsTheLink) {
+  start();
+  Connection Control = control();
+  Connection World = world();
+  ASSERT_TRUE(Control.readHello());
+  Control.sendRaw(header(net::MaxControlPayloadSize + 1));
+  EXPECT_TRUE(Control.closedByNode());
+  EXPECT_TRUE(World.closedByNode());
+}
+
+TEST_F(ServerTest, AWorldFrameMayBeLargerThanAControlFrame) {
+  start();
+  Connection Control = control();
+  Connection World = world();
+  ASSERT_TRUE(Control.readHello());
+  // Waits for its body, which never comes.
+  World.sendRaw(header(net::MaxControlPayloadSize + 1));
+  EXPECT_FALSE(World.closedByNode(Quiet));
+  EXPECT_FALSE(Control.closedByNode(Quiet));
 }
 
 TEST_F(ServerTest, AMalformedControlFrameDropsTheLink) {

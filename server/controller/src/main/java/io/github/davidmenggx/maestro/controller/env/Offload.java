@@ -11,6 +11,16 @@ import java.util.function.Supplier;
  */
 public interface Offload {
 
+  /**
+   * Which queue a job waits in. Request batches carry the latency budget, so a worker takes them
+   * before world frames, which a resend of a whole region can queue by the hundred.
+   */
+  enum Lane {
+    REQUESTS,
+    WORLD
+  }
+
   /** {@code name} identifies the job in metrics and simulation traces. */
-  <T> void submit(String name, Supplier<T> work, Consumer<T> completion, Runnable failure);
+  <T> void submit(
+      String name, Lane lane, Supplier<T> work, Consumer<T> completion, Runnable failure);
 }

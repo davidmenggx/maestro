@@ -4,6 +4,7 @@ import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionMap;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
@@ -27,7 +28,7 @@ public final class SimRun {
 
   /**
    * The SLO: p99 latency must be below this many ticks. Tighter than the admission bound in
-   * `Controller`, which only keeps a saturated fleet from falling further behind.
+   * `RequestTracker`, which only keeps a saturated fleet from falling further behind.
    */
   public static final double TICK_BUDGET = 3.0;
 
@@ -62,8 +63,15 @@ public final class SimRun {
   /** The current controller process. A restart fault replaces it. */
   public Controller controller;
 
-  /** Requests whose start is in each node's region, per tick. What the fleet was asked to do. */
+  /**
+   * Requests whose start is in each node's region, per tick. What the fleet was asked to do. A
+   * region's holders split its requests, but which holder serves one depends on what the controller
+   * knows, so each holder is charged them all.
+   */
   private final Map<NodeId, Map<Long, Integer>> offered = new LinkedHashMap<>();
+
+  /** What the self-check of each controller process a restart replaced found. */
+  private final List<String> retiredViolations = new ArrayList<>();
 
   private final Rng checkpointRng;
 
@@ -94,11 +102,11 @@ public final class SimRun {
       sim.addNode(id, scenario.serviceOf(i));
     }
 
-    this.regions = new RegionMap(topology.grid(), nodes);
+    this.regions = topology.regions(nodes);
     this.world =
         new SimWorld(
             topology, scenario.counts().get(Count.MOB_CLASSES), sim.rng().derive("terrain"));
-    this.out = new RecordingOutput(sim);
+    this.out = new RecordingOutput(sim, world, regions);
     this.controller = newController();
     this.workload = workloadFactory.apply(world, sim.rng().derive("workload"));
     this.checkpointRng = sim.rng().derive("checkpoints");
@@ -115,8 +123,16 @@ public final class SimRun {
    */
   private void restartController() {
     out.restarted();
+    for (String violation : controller.selfCheck()) {
+      retiredViolations.add("controller of run " + controller.run + ": " + violation);
+    }
     controller = newController();
-    workload.replayState(sim.env().clock().tick(), controller::accept);
+    workload.replayState(sim.env().clock().tick(), event -> sim.deliver(controller, event));
+  }
+
+  /** Violations the self-checks of the controller processes a restart replaced found. */
+  public List<String> retiredViolations() {
+    return List.copyOf(retiredViolations);
   }
 
   public static SimRun of(long seed, FaultPlan faults, long ticks) {
@@ -197,10 +213,13 @@ public final class SimRun {
   }
 
   private void offer(WorldEvent.PathRequested requested) {
-    int region = regions.regionAt(requested.start().x(), requested.start().z());
-    if (region >= 0) {
+    Region region = regions.regionAt(requested.start().x(), requested.start().z());
+    if (region == null) {
+      return;
+    }
+    for (NodeId holder : regions.holders(region.id())) {
       offered
-          .computeIfAbsent(regions.owner(region), node -> new LinkedHashMap<>())
+          .computeIfAbsent(holder, node -> new LinkedHashMap<>())
           .merge(requested.tick(), 1, Integer::sum);
     }
   }
@@ -213,13 +232,13 @@ public final class SimRun {
     if (checkpointRng.nextDouble() >= CHECKPOINT_CHANCE) {
       return;
     }
-    for (int region = 0; region < regions.regionCount(); region++) {
-      if (controller.regionSettled(region)) {
+    for (Region region : regions.regions()) {
+      if (controller.regionSettled(region.id())) {
         sim.checkpoint(
             sim.env().run(),
-            region,
-            controller.heldSequence(regions.owner(region)),
-            Invariants.freshDigest(this, region));
+            region.id(),
+            controller.heldSequence(regions.holders(region.id()).get(0)),
+            Invariants.freshDigest(this, region.id()));
       }
     }
   }
@@ -252,9 +271,9 @@ public final class SimRun {
     return true;
   }
 
-  /** Chunks the fleet covers, which is the number of frames in one full send of the world. */
+  /** The most chunks loaded at once, which is at least the frames of one full send of them. */
   public int chunkCount() {
-    return topology.chunksPerSide() * topology.chunksPerSide();
+    return world.mostLoaded();
   }
 
   /** Transport counters are per node and per channel, so a fleet total must be summed. */

@@ -24,8 +24,8 @@ void Workers::stop() {
 void Workers::run() {
   Scratch With(Core.searchKind());
   while (const std::optional<Job> Next = Core.queue().take())
-    if (Answer Result = Core.run(*Next, With))
-      Reply(*Next, std::move(Result));
+    if (Outcome Done = Core.run(*Next, With); Done.Result)
+      Reply(*Next, std::move(Done.Result));
 }
 
 } // namespace maestro::serve

@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.wire.Frames;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.Pos;
@@ -33,15 +34,20 @@ class WorldBoundaryTest {
   private static final int MOB = 1;
   private static final int WARMUP_MOB = 2;
   private static final short OTHER_CLASS = 2;
+
+  /** In the region of the default grid on the positive side of the origin. */
   private static final Pos HERE = new Pos(4, 40, 4);
-  private static final Pos THERE = new Pos(20, 40, 20);
+
+  /** In another region, across the origin, which has two holders. */
+  private static final Pos THERE = new Pos(-20, 40, -20);
+
   private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256, 3);
 
   /** Registration spends a request without an id, so the first one admitted gets 1. */
   private static final long FIRST_REQUEST = 1;
 
-  /** Owns the region holding {@code HERE}. */
-  private static final NodeId OWNER = NodeId.of(0);
+  /** Holds the region holding {@code HERE}, the last of the default grid, alone. */
+  private static final NodeId OWNER = NodeId.of(3);
 
   @Test
   void aMobRemovedWhileWaitingIsDroppedExactlyOnce() {
@@ -113,9 +119,12 @@ class WorldBoundaryTest {
 
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(0, run.sim.metrics().counter("offload.submitted", "job", "delta"), run.describe());
+    // Each loaded chunk is the first and only frame of its region.
+    List<NodeId> loaded = new ArrayList<>(holders(run, THERE));
+    loaded.addAll(holders(run, HERE));
     for (ModeledNode node : run.sim.nodes()) {
-      assertTrue(node.hasState(), run.describe());
-      assertEquals(1, node.lastSequence(), run.describe());
+      assertTrue(node.assigned(), run.describe());
+      assertEquals(loaded.contains(node.id()) ? 1 : 0, node.lastSequence(), run.describe());
     }
   }
 
@@ -151,6 +160,19 @@ class WorldBoundaryTest {
     script.add(new WorldEvent.PathRequested(14, MOB, MOB_CLASS, HERE, THERE, SEARCH));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+    SimRun unchurned =
+        SimRun.scripted(
+                1L,
+                FaultPlan.reliable(),
+                TICKS,
+                script.stream()
+                    .filter(
+                        event ->
+                            !(event instanceof WorldEvent.ChunkUnloaded)
+                                && !(event instanceof WorldEvent.ChunkLoaded loaded
+                                    && loaded.tick() == 10))
+                    .toList())
+            .go();
 
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(4, run.controller.requestsIssued(), run.describe());
@@ -158,11 +180,11 @@ class WorldBoundaryTest {
     assertEquals(2, run.out.answered(), run.describe());
     // One frame to clear the chunk and one to fill it again, with no new snapshot.
     assertEquals(
-        run.chunkCount() + 2,
+        unchurned.sim.metrics().counter("offload.submitted", "job", "chunk") + 2,
         run.sim.metrics().counter("offload.submitted", "job", "chunk"),
         run.describe());
     assertEquals(
-        run.regions.regionCount(), run.sim.metrics().total("world.resnapshot"), run.describe());
+        run.regions.nodes().size(), run.sim.metrics().total("world.resnapshot"), run.describe());
   }
 
   @Test
@@ -221,7 +243,7 @@ class WorldBoundaryTest {
     // Ends before the node serves the request.
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 3, script).go();
     assertEquals(1, run.controller.outstandingCount(), run.describe());
-    NodeId owner = run.regions.owner(run.regions.regionAt(HERE.x(), HERE.z()));
+    NodeId owner = holders(run, HERE).get(0);
 
     run.controller.onFrame(owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, 200));
     // A datagram that is not a frame at all, as from a sender that is not a node.
@@ -230,7 +252,7 @@ class WorldBoundaryTest {
     assertEquals(2, run.sim.metrics().total("controller.malformed.frame"), run.describe());
 
     // A well-formed answer from a node the request did not go to.
-    NodeId other = run.regions.owner(run.regions.regionAt(THERE.x(), THERE.z()));
+    NodeId other = holders(run, THERE).get(0);
     run.controller.onFrame(
         other, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, PathType.WALKABLE));
     assertEquals(1, run.controller.outstandingCount(), run.describe());
@@ -249,7 +271,7 @@ class WorldBoundaryTest {
     script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
     script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH));
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 3, script).go();
-    NodeId owner = run.regions.owner(run.regions.regionAt(HERE.x(), HERE.z()));
+    NodeId owner = holders(run, HERE).get(0);
 
     run.controller.onFrame(
         owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, PathType.WALKABLE, 0));
@@ -270,7 +292,7 @@ class WorldBoundaryTest {
     script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH));
     script.add(new WorldEvent.PathRequested(3, MOB, MOB_CLASS, HERE, HERE, SEARCH));
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 4, script).go();
-    NodeId owner = run.regions.owner(run.regions.regionAt(HERE.x(), HERE.z()));
+    NodeId owner = holders(run, HERE).get(0);
     assertEquals(1, run.out.dropped(DropReason.SUPERSEDED), run.describe());
     assertEquals(2, run.controller.outstandingCount(), run.describe());
 
@@ -321,7 +343,7 @@ class WorldBoundaryTest {
 
   /**
    * Admission keeps the node's answers within the budget: with one request served a tick, and the
-   * first served two ticks after it is made, nine fit in ten ticks.
+   * first served two ticks after it is made, eight fit in ten ticks.
    */
   @Test
   void admissionLeavesRoomForTheTicksABatchTakesToLeave() {
@@ -342,7 +364,7 @@ class WorldBoundaryTest {
 
     // Each admitted request is answered once the ones ahead of it and itself are served,
     // and the last within the budget.
-    int admitted = Controller.MAX_TICKS_LATE - Controller.SEND_TICKS;
+    int admitted = RequestTracker.MAX_TICKS_LATE - RequestTracker.SEND_TICKS;
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(admitted, run.out.answered(), run.describe());
     assertEquals(mobs - admitted, run.out.dropped(DropReason.QUEUE_DEPTH), run.describe());
@@ -462,7 +484,7 @@ class WorldBoundaryTest {
     SimRun run = SimRun.scripted(1L, plan, TICKS, script).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    assertEquals(Controller.MAX_RESENDS, run.sim.metrics().total("path.resent"));
+    assertEquals(RequestTracker.MAX_RESENDS, run.sim.metrics().total("path.resent"));
     assertEquals(1, run.out.dropped(DropReason.TIMEOUT), run.describe());
     assertEquals(0, run.out.answered(), run.describe());
   }
@@ -485,8 +507,8 @@ class WorldBoundaryTest {
   }
 
   /**
-   * As above, searched at {@code worldSequence}. Each region of the default grid is one chunk,
-   * which its first frame, sequence 1, carries.
+   * As above, searched at {@code worldSequence}. A script loads one chunk per region at most, which
+   * its first frame, sequence 1, carries.
    */
   private static ByteBuffer answer(long run, long requestId, int type, long worldSequence) {
     FlatBufferBuilder builder = new FlatBufferBuilder(128);
@@ -508,14 +530,15 @@ class WorldBoundaryTest {
     return events;
   }
 
+  /** The chunks holding {@code HERE} and {@code THERE}, the only ones a script uses. */
   private static List<WorldEvent> chunkLoads(long tick) {
-    int chunksPerSide = Topology.DEFAULT.chunksPerSide();
-    List<WorldEvent> events = new ArrayList<>();
-    for (int chunkX = 0; chunkX < chunksPerSide; chunkX++) {
-      for (int chunkZ = 0; chunkZ < chunksPerSide; chunkZ++) {
-        events.add(new WorldEvent.ChunkLoaded(tick, chunkX, chunkZ));
-      }
-    }
-    return events;
+    return List.of(
+        new WorldEvent.ChunkLoaded(tick, Chunks.of(HERE.x()), Chunks.of(HERE.z())),
+        new WorldEvent.ChunkLoaded(tick, Chunks.of(THERE.x()), Chunks.of(THERE.z())));
+  }
+
+  private static List<NodeId> holders(SimRun run, Pos pos) {
+    Region region = run.regions.regionAt(pos.x(), pos.z());
+    return run.regions.holders(region.id());
   }
 }
