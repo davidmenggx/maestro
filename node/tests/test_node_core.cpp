@@ -524,8 +524,7 @@ TEST_F(NodeCoreTest, AJobThatWaitedPastMaxWaitIsDroppedUnanswered) {
   EXPECT_EQ(responseIn(Done[0])->body_as_PathResponse()->request_id(), 2u);
   EXPECT_EQ(Core.queue().depth(), 1u);
 
-  // A copy of 1 is dropped as a copy of a canceled request is, until the
-  // retention ends.
+  // A copy of 1 is dropped like a canceled one until retention ends.
   Time += milliseconds(999);
   EXPECT_TRUE(datagram(requestFrame({1})).empty());
   EXPECT_EQ(Core.queue().depth(), 1u);

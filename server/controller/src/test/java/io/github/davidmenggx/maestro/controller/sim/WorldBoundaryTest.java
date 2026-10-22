@@ -25,10 +25,7 @@ import maestro.fbs.ResponseFrame;
 import maestro.fbs.ResponseMsg;
 import org.junit.jupiter.api.Test;
 
-/**
- * Boundary cases driven by a scripted trace. A generated workload reaches these only by chance.
- * Each checks a guarantee made to the mod: exactly one callback per request.
- */
+/** Boundary cases from a scripted trace. Each checks a request gets exactly one callback. */
 class WorldBoundaryTest {
 
   private static final long TICKS = 30;
@@ -114,8 +111,7 @@ class WorldBoundaryTest {
 
   @Test
   void aBlockChangeBeforeTheSnapshotIsAbsorbedByIt() {
-    // The change happens while the region is unreadable, so it must not be sent as
-    // a delta. The snapshot that follows already contains it.
+    // The change happens while the region is unreadable, so the snapshot carries it, not a delta.
     List<WorldEvent> script = new ArrayList<>();
     script.add(new WorldEvent.BlockChanged(2, HERE, (byte) PathType.WATER, 0));
     script.addAll(chunkLoads(5));
@@ -150,10 +146,7 @@ class WorldBoundaryTest {
     assertEquals(0, run.out.answered(), run.describe());
   }
 
-  /**
-   * A chunk that leaves is treated as air on the node, as vanilla treats a chunk the server does
-   * not hold, so only that chunk is resent. A search cannot start in it until it returns.
-   */
+  /** A chunk that leaves is air on the node, as in vanilla, so only it is resent. */
   @Test
   void anUnloadedChunkIsClearedOnTheNodeAndSentAgainWhenItReturns() {
     List<WorldEvent> script = prelude();
@@ -225,10 +218,7 @@ class WorldBoundaryTest {
     assertEquals(1, run.out.dropped(DropReason.CLASS_UNREGISTERED), run.describe());
   }
 
-  /**
-   * A node reads past its area as air, so a search that could read past the region would see a
-   * cliff where there is ground. It stays on the server.
-   */
+  /** A search that could read past the region would see a cliff, so it stays on the server. */
   @Test
   void aSearchThatCouldReadPastItsRegionIsNotSent() {
     int reachInside = HERE.x() - HERE_REGION_MIN;
@@ -331,10 +321,7 @@ class WorldBoundaryTest {
     assertEquals(1, run.out.dropped(DropReason.NO_NODE), run.describe());
   }
 
-  /**
-   * The first request's batch is on its way when the mob asks again, so the node will still serve
-   * it. It counts against the node until then, though the mob no longer hears about it.
-   */
+  /** The mob asks again while the first batch is in flight. It still counts against the node. */
   @Test
   void aSupersededRequestCountsAgainstItsNodeUntilItIsAnswered() {
     List<WorldEvent> script = prelude();
@@ -402,10 +389,7 @@ class WorldBoundaryTest {
     assertEquals(0, run.out.answered(), run.describe());
   }
 
-  /**
-   * Admission keeps the node's answers within the budget: with one request served a tick, and the
-   * first served two ticks after it is made, eight fit in ten ticks.
-   */
+  /** Admission keeps answers within the budget: at one request a tick, eight fit in ten ticks. */
   @Test
   void admissionLeavesRoomForTheTicksABatchTakesToLeave() {
     List<WorldEvent> script = prelude();
@@ -423,8 +407,7 @@ class WorldBoundaryTest {
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, oneAtATime, script).go();
 
-    // Each admitted request is answered once the ones ahead of it and itself are served,
-    // and the last within the budget.
+    // Each answer lands once those ahead of it are served, the last within the budget.
     int admitted = RequestTracker.MAX_TICKS_LATE - RequestTracker.SEND_TICKS;
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(admitted, run.out.answered(), run.describe());
@@ -432,10 +415,7 @@ class WorldBoundaryTest {
     assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
   }
 
-  /**
-   * A tick of requests to one node leaves in several frames, each small enough for a datagram,
-   * which the network may deliver in any order.
-   */
+  /** A tick of requests to one node leaves in several datagram-sized frames, in any order. */
   @Test
   void aTickOfRequestsLeavesInDatagramSizedFrames() {
     List<WorldEvent> script = prelude();
@@ -472,10 +452,7 @@ class WorldBoundaryTest {
         run.describe());
   }
 
-  /**
-   * The chunk leaves after the change, so the node is sent it as cleared. The change must not
-   * follow as a delta, which would put the block back into a chunk the node holds as air.
-   */
+  /** The chunk leaves after the change, so no delta may put the block back into it. */
   @Test
   void aBlockChangedInAChunkThatLeavesInTheSameTickIsNotSentAfterIt() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
@@ -490,10 +467,7 @@ class WorldBoundaryTest {
         List.of(), Invariants.checkAgainstFreshSnapshot(run, run.sim.node(OWNER)), run.describe());
   }
 
-  /**
-   * The chunk was sent as cleared, so the node holds it as air. A change reported in it must not be
-   * sent, which would put a block into a chunk the node holds as air.
-   */
+  /** The chunk was sent as cleared, so a change reported in it must not be sent. */
   @Test
   void aBlockChangedInAChunkSentAsClearedIsNotSent() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
@@ -508,10 +482,7 @@ class WorldBoundaryTest {
         List.of(), Invariants.checkAgainstFreshSnapshot(run, run.sim.node(OWNER)), run.describe());
   }
 
-  /**
-   * The request leaves at a tick boundary that the partition covers, so it is lost, and a resend
-   * after the partition is answered.
-   */
+  /** The request leaves during the partition and is lost; a resend after it is answered. */
   @Test
   void aLostRequestIsSentAgainAndAnswered() {
     List<WorldEvent> script = prelude();
@@ -550,10 +521,7 @@ class WorldBoundaryTest {
     assertEquals(0, run.out.answered(), run.describe());
   }
 
-  /**
-   * Loads the world and registers {@code MOB_CLASS} with the node that owns it. Registration
-   * abandons the request that triggers it, so every script spends one request on registration.
-   */
+  /** Loads the world and registers {@code MOB_CLASS}, which costs one request per script. */
   private static List<WorldEvent> prelude() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
     script.add(new WorldEvent.MobSpawned(0, WARMUP_MOB, HERE));
@@ -567,10 +535,7 @@ class WorldBoundaryTest {
     return answer(run, requestId, type, 1);
   }
 
-  /**
-   * As above, searched at {@code worldSequence}. A script loads one chunk per region at most, which
-   * its first frame, sequence 1, carries.
-   */
+  /** As above, searched at {@code worldSequence}. A script's first frame is sequence 1. */
   private static ByteBuffer answer(long run, long requestId, int type, long worldSequence) {
     FlatBufferBuilder builder = new FlatBufferBuilder(128);
     PathResponse.startNodesVector(builder, 1);

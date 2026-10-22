@@ -33,25 +33,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Answers the searches Maestro offloads, and applies the controller's outcomes to the mobs that
- * asked. Used on the server thread only.
+ * Answers the searches Maestro offloads and applies the controller's outcomes to the mobs that
+ * asked. Server thread only.
  *
- * <p>An offloaded call sends a request. While it waits, the call returns the mob's live path if it
- * is following one, so a mob chasing a moving target keeps moving, or else a held path at its own
- * block ({@link HeldPaths}). The answer replaces either when it arrives, if the mob still follows
- * it. A request the controller refuses at once is searched on the server instead: by the {@link
- * Failover} if the region's nodes cannot take it now, and otherwise by vanilla in the same call.
- * One dropped later ends a held path, and the mob's goal asks again.
+ * <p>While a request waits, the call returns the mob's live path, or else a held path ({@link
+ * HeldPaths}); the answer replaces it on arrival. A request refused at admission is searched on the
+ * server, through {@link Failover} if the region's nodes cannot take it. One dropped later ends a
+ * hold, and the goal asks again.
  *
- * <p>A mob waits for its answer only while it follows its placeholder and its navigation was handed
- * it after the call, so a caller that searched but did not take the path, as a goal whose {@code
- * canUse} declines after its search, does not have the answer applied. A mob that does not wait
- * when the tick's work ends cancels its request. Judging this at the end of the tick, not when the
- * navigation drops the placeholder, lets a goal that replaces another stop the navigation and hand
- * it the same path back, as the goal selector does when the new goal's {@code canUse} searched.
+ * <p>A mob waits only while it follows its placeholder and its navigation was handed it after the
+ * call. A mob that does not wait when the tick's work ends cancels its request. Judging at tick end
+ * lets a goal that replaces another get the same path back.
  *
- * <p>In shadow mode vanilla answers every call, and each answer from the fleet is compared with
- * vanilla's.
+ * <p>In shadow mode vanilla answers every call and the fleet's answers are only compared.
  */
 public final class PathOffload implements Searches.Interceptor, WorldOutput {
 

@@ -28,8 +28,8 @@ public final class NodeLinks {
     private boolean connecting;
 
     /**
-     * Counts the links opened to the node. It names the link in its {@code Join}, and a request
-     * batch built for one link is never sent on a later one.
+     * Counts links opened to the node. Names the link in its {@code Join}; a batch built for one
+     * link is never sent on a later one.
      */
     private long attempt;
 
@@ -155,9 +155,7 @@ public final class NodeLinks {
     }
   }
 
-  /**
-   * A node of the fleet. Frames and callbacks from any other are dropped before this is reached.
-   */
+  /** A node of the fleet. Frames and callbacks from any other are dropped earlier. */
   private Link link(NodeId node) {
     Link link = links.get(node);
     if (link == null) {

@@ -42,8 +42,7 @@ void init(std::string_view ServiceName, std::string_view OtlpEndpoint) {
 }
 
 void shutdown() {
-  // A span started afterwards goes nowhere, as before `init`, rather than
-  // through a null provider. Releasing the last reference flushes the old one.
+  // Releasing the last reference flushes the old provider.
   trace_api::Provider::SetTracerProvider(
       std::shared_ptr<trace_api::TracerProvider>(
           std::make_shared<trace_api::NoopTracerProvider>()));

@@ -9,8 +9,7 @@ import java.util.random.RandomGeneratorFactory;
  */
 public final class SeededRng implements Rng {
 
-  // Named explicitly. Replay needs the same algorithm and seed, so it must not
-  // depend on the platform default.
+  // Named explicitly so replay does not depend on the platform default.
   private static final String ALGORITHM = "L64X128MixRandom";
 
   private static final RandomGeneratorFactory<RandomGenerator> FACTORY =

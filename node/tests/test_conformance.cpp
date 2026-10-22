@@ -52,7 +52,7 @@ std::string unknownProfile(std::uint64_t RequestId, std::uint64_t Run) {
          std::to_string(Run) + ")";
 }
 
-/// What `Wire` says the node does, in the words `Replay` reports it in.
+/// What `Wire` says the node does, as `Replay` reports it.
 std::string expected(const fbs::Effect &Wire) {
   switch (Wire.kind()) {
   case fbs::EffectKind::Hello:
@@ -89,8 +89,7 @@ std::string list(const std::set<ConnectionId> &Ids) {
   return Out + "}";
 }
 
-/// A node with no workers and default options, driven one step at a time,
-/// which describes everything it does in reply.
+/// A node with no workers and default options, driven one step at a time.
 class Replay final : public serve::NodeCore::Output {
 public:
   Replay() : Core(serve::NodeOptions{}, [this] { return Time; }, *this) {}
@@ -100,7 +99,7 @@ public:
     Effects.clear();
     Opened.reset();
     Refused = false;
-    // Copied out of the fixture, so it is aligned as a frame off the wire.
+    // Copied so it is aligned as a frame off the wire.
     const Bytes Frame = Step.frame()
                             ? Bytes(Step.frame()->begin(), Step.frame()->end())
                             : Bytes();
@@ -128,7 +127,7 @@ public:
       break;
     case fbs::StepKind::Disconnect:
       if (Connection) {
-        // Closed by the controller, so not one the node closes.
+        // The controller closed it, not the node.
         Joined.erase(*Connection);
         Core.disconnected(*Connection);
       } else {
@@ -207,7 +206,6 @@ private:
   }
 
   void linkDropped(std::string_view) override {
-    // The drop closes exactly the link's joined connections.
     if (Closed == Joined)
       Effects.push_back("LinkDropped");
     else

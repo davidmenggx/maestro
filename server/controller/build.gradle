@@ -9,9 +9,7 @@ repositories {
   mavenCentral()
 }
 
-// flatc emits the FlatBuffers bindings here (via `make schema-java`). They live
-// with the controller because the transport seam carries encoded frames; the mod
-// project sees them through the `api` dependency below.
+// flatc emits the FlatBuffers bindings here (`make schema-java`); the mod sees them via `api`.
 sourceSets.main.java.srcDir "${projectDir}/src/generated/java"
 
 dependencies {
@@ -34,8 +32,7 @@ tasks.withType(JavaCompile).configureEach {
 
 def fuzzTiers = [shallow: "5000", deep: "1500", coverage: "2000"]
 
-// Forwarded to the forked test JVM, which does not inherit the Gradle JVM's
-// properties. `make fuzz SEED=n` replays a seed reported by a failing run.
+// Forwarded to the forked test JVM. `make fuzz SEED=n` replays a failing seed.
 def forwardSweepProperties = { Test task, String defaultRuns ->
   ["maestro.dst.seed", "maestro.dst.runs"].each { key ->
     def value = System.getProperty(key)
@@ -47,7 +44,7 @@ def forwardSweepProperties = { Test task, String defaultRuns ->
     task.systemProperty "maestro.dst.runs", defaultRuns
   }
 
-  // A seed printed on failure is the whole replay story, so keep test output.
+  // Keep output so a failing seed is visible.
   task.testLogging {
     showStandardStreams = true
     exceptionFormat = 'full'

@@ -9,14 +9,11 @@ import io.github.davidmenggx.maestro.controller.world.Chunks;
 import java.util.List;
 
 /**
- * The coordinate space of a run and how it is divided among nodes: a square grid of square,
- * full-height regions of {@link #REGION_SIZE} blocks, cut from the production lattice ({@link
- * RegionLayout}), so the origin is at the center of a region and positions on both sides of it are
- * covered. Each region has one node, and the first {@code replicated} have a second, which shares
- * its requests. Separate from {@link Scenario}, which describes what happens in that space.
+ * The coordinate space of a run and how it is divided among nodes: a square grid of {@link
+ * #REGION_SIZE}-block regions cut from the production lattice ({@link RegionLayout}), centered on
+ * the origin. Each region has one node, and the first {@code replicated} have a second.
  *
- * <p>The {@code with} methods let a focused test change one dimension of {@link #DEFAULT} without
- * restating the rest.
+ * <p>The {@code with} methods change one dimension of {@link #DEFAULT} in a focused test.
  */
 public record Topology(int regionsPerSide, int replicated, int minY, int height, int relief) {
 
@@ -80,10 +77,7 @@ public record Topology(int regionsPerSide, int replicated, int minY, int height,
     return map;
   }
 
-  /**
-   * Lowest x and z of the grid. It starts {@code (regionsPerSide - 1) / 2} cells below the
-   * origin's, so the origin's cell is the middle one, or the lower of the middle two.
-   */
+  /** Lowest x and z of the grid, so the origin's cell is the middle one (the lower of two). */
   public int min() {
     return RegionLayout.cellMin(-((regionsPerSide - 1) / 2));
   }

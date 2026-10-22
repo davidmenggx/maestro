@@ -42,11 +42,7 @@ import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 import org.junit.jupiter.api.Test;
 
-/**
- * The parity fixtures recorded from vanilla are also the wire fixtures shared with the node. These
- * tests check that every frame in them keeps the wire contract, and that the controller's encoder
- * builds each one byte for byte from its decoded content.
- */
+/** The parity fixtures are the node's wire fixtures. Checks each frame and its re-encoding. */
 class ParityFixtureTest {
 
   /** Set by the Gradle build to the committed fixtures. */

@@ -35,8 +35,8 @@ public final class Searches {
   }
 
   /**
-   * Vanilla's search for one intercepted call. Within the call it runs once, in full or on a share
-   * of its node budget. It may also run again later, from wherever the mob stands then.
+   * Vanilla's search for one intercepted call. Runs once within the call, in full or on a share of
+   * its node budget, and may run again later from where the mob then stands.
    */
   public static final class Vanilla {
 
@@ -81,8 +81,8 @@ public final class Searches {
   }
 
   /**
-   * Blocks a region read for a search reaches past its path length bound, the larger of the two
-   * margins the navigation uses.
+   * Blocks a region read for a search reaches past its path length bound (the larger of the
+   * navigation's two margins).
    */
   private static final int REGION_MARGIN = 16;
 
@@ -94,10 +94,9 @@ public final class Searches {
   private Searches() {}
 
   /**
-   * Whether the call is one the node reproduces: a single target, searched by exactly vanilla's
-   * {@code PathFinder} and {@code WalkNodeEvaluator}. Subclasses change the search, so they stay
-   * vanilla: the Warden's path finder measures distance on the horizontal plane only, and the
-   * Creaking's evaluator changes which cells are walkable.
+   * Whether the node reproduces the call: a single target, searched by exactly {@code PathFinder}
+   * and {@code WalkNodeEvaluator}. Subclasses (the Warden's finder, the Creaking's evaluator)
+   * change the search and stay vanilla.
    */
   public static boolean intercepted(PathFinder finder, NodeEvaluator evaluator, int targets) {
     return finder.getClass() == PathFinder.class
@@ -147,10 +146,9 @@ public final class Searches {
   }
 
   /**
-   * Whether the search running now was asked for by a caller that follows the path it gets: one of
-   * the navigation's {@code moveTo} methods, or {@code MeleeAttackGoal.canUse}, which moves along
-   * its path once it starts. A caller that only reads a path, as to judge whether a target can be
-   * reached, would take a placeholder for the answer.
+   * Whether the running search comes from a caller that follows the path it gets (a navigation
+   * {@code moveTo} or {@code MeleeAttackGoal.canUse}). A caller that only reads a path would take a
+   * placeholder for the answer.
    */
   public static boolean offloadable() {
     return offloadable > 0;

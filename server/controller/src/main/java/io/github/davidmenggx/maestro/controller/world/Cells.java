@@ -1,15 +1,11 @@
 package io.github.davidmenggx.maestro.controller.world;
 
-/**
- * What one cell holds besides its position. Bounds shared by the boundary and the encoder, and the
- * packed form a {@link WorldSource} reads cells in: {@code (floor << 8) | pathType}.
- */
+/** Cell bounds, and the packed form {@code (floor << 8) | pathType}. */
 public final class Cells {
 
   /**
-   * Tallest collision height, in sixteenths of a block, that a cell may carry. The node refuses a
-   * frame with a taller one, because its collision check looks only one layer below a box. A fence
-   * is 24, a full block 16.
+   * Tallest collision height a cell may carry, in sixteenths. The node refuses taller ones, since
+   * its collision check looks only one layer below a box. A fence is 24, a full block 16.
    */
   public static final int MAX_FLOOR = 32;
 

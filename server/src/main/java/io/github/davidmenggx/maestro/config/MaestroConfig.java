@@ -20,10 +20,9 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * Startup settings read from `<config dir>/maestro.json`. A missing file is created with the
- * defaults below, and a missing key takes its default, so a file written before a setting was added
- * still loads. A malformed file, or one with a key that is not a setting or a value a setting
- * cannot take, aborts startup.
+ * Startup settings read from `<config dir>/maestro.json`. A missing file is created with defaults
+ * and a missing key takes its default. A malformed file, an unknown key or a bad value aborts
+ * startup.
  *
  * <p>{@code nodes} lists the compute fleet. With none, nothing is offloaded. {@code nodeCapacity}
  * is the requests a node serves per tick, as admission assumes.
@@ -121,8 +120,7 @@ public record MaestroConfig(
       require(json.isJsonObject(), "file is not a JSON object");
       JsonObject settings = GSON.toJsonTree(DEFAULT).getAsJsonObject();
       for (Map.Entry<String, JsonElement> setting : json.getAsJsonObject().entrySet()) {
-        // Gson ignores a key it does not know, so a misspelled or retired setting would
-        // otherwise be dropped without a word.
+        // Gson silently ignores unknown keys.
         require(SETTINGS.contains(setting.getKey()), "`" + setting.getKey() + "` is not a setting");
         settings.add(setting.getKey(), setting.getValue());
       }
@@ -139,8 +137,7 @@ public record MaestroConfig(
     } catch (IOException e) {
       throw new IllegalStateException("Could not read Maestro config at " + path, e);
     } catch (RuntimeException e) {
-      // Gson wraps the canonical constructor's exception when it rejects a record
-      // component, so the useful message is on the cause.
+      // Gson wraps the constructor's exception; the useful message is on the cause.
       throw new IllegalStateException(
           "Invalid Maestro config at " + path + ": " + rootCause(e).getMessage(), e);
     }

@@ -163,9 +163,8 @@ class PathOffloadTest {
 
   @Test
   void aGoalThatStopsTheNavigationAndHandsItThePathBackKeepsItsRequest() {
-    // A strolling mob spots a target. The attack goal's `canUse` searches and gets the
-    // stroll path, then the goal selector stops the stroll goal, which stops the
-    // navigation, and starts the attack goal, which follows that path again.
+    // The attack goal's `canUse` gets the stroll path, the selector stops the stroll (and the
+    // navigation), then the attack goal follows that path again.
     Path stroll = path(line(-4, 0));
     navigator.follow(stroll, START);
     Path placeholder = search(START, TARGET);
@@ -213,8 +212,8 @@ class PathOffloadTest {
 
   @Test
   void aCallerThatDoesNotTakeItsPlaceholderHasItsRequestCanceled() {
-    // A goal's `canUse` searches, gets the stroll path the mob follows, and declines. The mob
-    // strolls on along that same path, so only what the navigation was handed shows it.
+    // `canUse` searches and declines; the mob strolls on along the same path, so only what the
+    // navigation was handed shows it.
     Path stroll = path(line(-4, 0));
     navigator.follow(stroll, START);
     assertSame(stroll, search(START, TARGET));
@@ -539,7 +538,7 @@ class PathOffloadTest {
   }
 
   /**
-   * Full searches in the failover, by mobs that never wait, until this tick's budget is gone. The
+   * Full searches in the failover, by mobs that never wait, until this tick's budget is gone; the
    * last runs past it.
    */
   private void spendTheBudget() {

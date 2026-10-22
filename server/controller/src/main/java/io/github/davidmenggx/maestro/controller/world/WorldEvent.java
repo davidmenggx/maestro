@@ -3,11 +3,8 @@ package io.github.davidmenggx.maestro.controller.world;
 import java.util.Objects;
 
 /**
- * Everything the controller learns about the world, from the server or from the simulator's trace
- * or generator. Events arrive on the server main thread in tick order.
- *
- * <p>Mob and player positions are reported only where the controller needs them. A request carries
- * its own start, so per-tick movement does not cross the boundary.
+ * Everything the controller learns about the world, in tick order on the main thread. A request
+ * carries its own start, so per-tick mob movement does not cross the boundary.
  */
 public sealed interface WorldEvent {
 
@@ -28,10 +25,8 @@ public sealed interface WorldEvent {
   }
 
   /**
-   * {@code pathType} is {@code getPathTypeFromState} for the new block state (the per-block type
-   * only), as an ordinal of the shared {@code PathType} enum. {@code floor} is the top of the
-   * block's collision shape in sixteenths, rounded up, or 0 if it has none. One event per block
-   * change.
+   * {@code pathType} is the {@code getPathTypeFromState} ordinal of the new block state. {@code
+   * floor} is the top of its collision shape in sixteenths, rounded up, or 0 if none.
    */
   record BlockChanged(long tick, Pos pos, byte pathType, int floor) implements WorldEvent {
     public BlockChanged {
@@ -75,9 +70,8 @@ public sealed interface WorldEvent {
   }
 
   /**
-   * The inputs of one {@code PathFinder.findPath} call that vary per call, not per mob: the
-   * distance that counts as arrival, the two search bounds, and {@code Mob.getMaxFallDistance},
-   * which depends on the mob's target, health and the difficulty.
+   * The {@code PathFinder.findPath} inputs that vary per call: the arrival distance, the two search
+   * bounds, and {@code Mob.getMaxFallDistance}.
    */
   record Search(int reachRange, float maxPathLength, int maxVisitedNodes, int maxFallDistance) {
 
@@ -91,9 +85,8 @@ public sealed interface WorldEvent {
     public static final int MAX_FALL_DISTANCE = 0xFFFF;
 
     /**
-     * Largest path length bound taken, the follow range attribute's maximum. How far a search reads
-     * is derived from it, so a larger bound would overflow that. A path walks less than this far,
-     * one block or more per node, which also bounds the size of an answer.
+     * Largest path length bound taken, the follow range maximum. The search read distance derives
+     * from it, and it bounds the size of an answer.
      */
     public static final float MAX_PATH_LENGTH = 2048f;
 
@@ -112,9 +105,8 @@ public sealed interface WorldEvent {
     }
 
     /**
-     * Whether a search with these inputs may be made: each fits its wire field, and the path length
-     * bound is positive and at most {@link #MAX_PATH_LENGTH}, since how far the search reads is
-     * derived from it.
+     * Whether each input fits its wire field and the path length bound is positive and at most
+     * {@link #MAX_PATH_LENGTH}.
      */
     public static boolean fits(
         int reachRange, float maxPathLength, int maxVisitedNodes, int maxFallDistance) {
@@ -130,10 +122,9 @@ public sealed interface WorldEvent {
   }
 
   /**
-   * One A* request. {@code start} is the start node the evaluator resolved on the server, not the
-   * mob's position. {@code classId} names the mob's current profile, not one fixed at spawn. The
-   * controller assigns the request id, so a repeat request for the same mob replaces the
-   * outstanding one, even if the repeat itself is refused.
+   * One A* request. {@code start} is the start node the evaluator resolved, not the mob's position.
+   * {@code classId} names the mob's current profile. A repeat request for the same mob replaces the
+   * outstanding one, even if the repeat is refused.
    */
   record PathRequested(long tick, int mobId, short classId, Pos start, Pos target, Search search)
       implements WorldEvent {
@@ -149,9 +140,8 @@ public sealed interface WorldEvent {
   }
 
   /**
-   * The mob no longer wants a path because it lost its target or stopped hunting. A request that
-   * has not left yet is never sent. One already sent is canceled at its node, best effort, and
-   * still counts against the node until its answer is due.
+   * The mob no longer wants a path. An unsent request is never sent. A sent one is canceled at its
+   * node, best effort, and still counts against the node until its answer is due.
    */
   record PathCanceled(long tick, int mobId) implements WorldEvent {
     public PathCanceled {

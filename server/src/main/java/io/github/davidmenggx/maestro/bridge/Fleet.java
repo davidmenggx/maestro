@@ -143,8 +143,8 @@ public final class Fleet implements AutoCloseable {
   }
 
   /**
-   * A server tick's work ends: what arrived during it is handed over, mobs that stopped waiting for
-   * their answers cancel them, then the tick closes.
+   * A server tick's work ends: arrivals are handed over, mobs that stopped waiting cancel, then the
+   * tick closes.
    */
   public void tickEnding() {
     handOver();

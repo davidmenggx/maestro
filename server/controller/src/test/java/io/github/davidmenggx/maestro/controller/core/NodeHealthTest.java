@@ -90,8 +90,7 @@ class NodeHealthTest {
     assertEquals(7, health.samples(NODE));
     assertEquals(List.of(), ticks(1));
 
-    // The intervals it learned are 1 s, not 5, so a node that stops now is found as soon as one
-    // whose server never stalled.
+    // It learned 1 s intervals, so a dead node is found as fast as with no stall.
     assertEquals(List.of(), ticks(2 * HEARTBEAT_TICKS));
     assertEquals(List.of(NODE), ticks(2 * HEARTBEAT_TICKS));
   }

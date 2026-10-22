@@ -344,8 +344,7 @@ TEST_F(ServerTest, AnswersAVanillaSearchAsVanillaDid) {
     }
   ASSERT_NE(Case, nullptr);
 
-  // The fixture's world stream holds framed frames, as the wire carries them.
-  // Its first is the assignment, whose run the link and requests must name.
+  // The first frame is the assignment, whose run the link and requests name.
   const auto *Stream = Fixture->world();
   const auto First = net::peekHeader(std::span(Stream->data(), Stream->size()));
   ASSERT_EQ(First.Status, net::HeaderStatus::Ready);
@@ -524,8 +523,7 @@ TEST_F(ServerTest, TheHeartbeatCountsWaitingRequestsAndACancelDropsOne) {
   Control.send(mobClassFrame());
   Datagrams Requests = requests();
 
-  // Profiles travel on TCP and requests on UDP, so ask until the node stops
-  // refusing the profile.
+  // Profile (TCP) can trail the request (UDP): ask until it is held.
   for (int Attempt = 0; Attempt < 25; ++Attempt) {
     Requests.send(requestFrame({1}));
     if (!Requests.receive(Quiet))

@@ -15,29 +15,27 @@ import java.util.Set;
 
 /**
  * Modeled network. An ordered channel keeps frame order and cannot lose a frame without breaking
- * the connection. An unordered channel may drop, duplicate and reorder frames, which the
- * at-least-once request path must tolerate. Its frames are UDP datagrams, so one too large to send
- * is refused, one split into IP fragments is lost if any fragment is, and one in flight when the
- * link changes still arrives.
+ * the connection. An unordered channel may drop, duplicate and reorder frames. Its frames are UDP
+ * datagrams: one too large is refused, one split into fragments is lost if any fragment is, and one
+ * in flight when the link changes still arrives.
  *
  * <p>Process death resets the connection, so the controller sees it. A partition does not, so only
- * a failure detector can find it. A stall holds only the ordered channels, like TCP holding a
- * stream during a retransmit, so unordered frames can overtake the held ones. A paused process
- * keeps its connections but handles nothing, so what reaches it waits until it resumes. A blackhole
- * loses every datagram to and from the node while its links carry on.
+ * a failure detector can find it. A stall holds only the ordered channels, so unordered frames can
+ * overtake them. A paused process keeps its connections but handles nothing until it resumes. A
+ * blackhole loses every datagram to and from the node while its links carry on.
  *
- * <p>A node that is partitioned, paused or blackholed cannot answer a request, whatever its links
- * show. The simulation is told when that starts and ends ({@link Simulation#unresponsive}).
+ * <p>A partitioned, paused or blackholed node cannot answer, whatever its links show. The
+ * simulation is told when that starts and ends ({@link Simulation#unresponsive}).
  *
- * <p>Overlapping faults of one kind on one node are counted, so a fault ends only when every
- * interval of it has.
+ * <p>Overlapping faults of one kind on a node are counted, so a fault ends when all its intervals
+ * have.
  *
- * <p>Each controller process gets its own {@link Session}. A restarted controller's links are gone
- * and its old session sends nothing, but datagrams still in flight reach the new process. The first
- * frame the node reads on each ordered connection is the one it joins the link with.
+ * <p>Each controller process gets its own {@link Session}. A restarted controller's old session
+ * sends nothing, but datagrams in flight reach the new process. The first frame on each ordered
+ * connection is the node's `Join`.
  *
- * <p>What reaches the controller, frames and link changes alike, waits for the next hand-over to
- * the controller thread ({@link Simulation#toController}), in arrival order.
+ * <p>Frames and link changes reach the controller in arrival order at the next hand-over ({@link
+ * Simulation#toController}).
  */
 public final class SimTransport {
 
@@ -69,9 +67,7 @@ public final class SimTransport {
   /** Counts each node's connect attempts and link changes. A frame is valid only in its own. */
   private final Map<NodeId, Integer> epoch = new LinkedHashMap<>();
 
-  /**
-   * Ordered links whose first frame, which should be a `Join`, the node has handled in this epoch.
-   */
+  /** Ordered links whose first frame, which should be a `Join`, the node handled this epoch. */
   private final Set<Link> opened = new LinkedHashSet<>();
 
   private final Map<Link, Long> lastDelivery = new LinkedHashMap<>();
@@ -87,10 +83,7 @@ public final class SimTransport {
     this.nodes = nodes;
   }
 
-  /**
-   * The transport of one controller process. Once a newer session starts, this one sends nothing
-   * and hears nothing.
-   */
+  /** The transport of one controller process. Once a newer session starts, this one is silent. */
   public final class Session implements Transport {
 
     private Listener listener;
@@ -258,10 +251,7 @@ public final class SimTransport {
     }
   }
 
-  /**
-   * The connection breaks but the process lives, so the node keeps its world state and forgets what
-   * belonged to the link.
-   */
+  /** The connection breaks but the process lives: the node keeps world state, forgets the link. */
   public void resetLink(NodeId node) {
     bumpEpoch(node);
     if (connected.contains(node)) {
@@ -381,8 +371,7 @@ public final class SimTransport {
     String nodeLabel = node.toString();
     sim.metrics().count("transport.sent", 1, "node", nodeLabel, "channel", channel.name());
 
-    // The receiving side would refuse it: a node drops a stream frame past its limit, and a
-    // socket will not send a datagram past the protocol's.
+    // The receiver would refuse it: a frame past its limit, or a datagram past the protocol's.
     if (bytes.length > (channel.ordered() ? Frames.MAX_FRAME_BYTES : Frames.MAX_DATAGRAM_BYTES)) {
       sim.metrics().count("transport.oversize", 1, "node", nodeLabel, "channel", channel.name());
       return;
@@ -450,7 +439,7 @@ public final class SimTransport {
     }
     if (direction == Direction.TO_CONTROLLER) {
       sim.metrics().count("transport.received", 1, "node", label, "channel", channel.name());
-      // The process the frame reached reads it, unless a restart ended that process first.
+      // Dropped if a restart ended the receiving process first.
       Session receiver = session;
       long arrived = sim.env().clock().nowNanos();
       sim.toController(

@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 #
-# Runs the released mod against a real compute node: starts `maestro-node` on
-# loopback, boots a dedicated server whose config points at it, lets husks chase
-# villagers near spawn for a while, stops it, and checks what the fleet did from
-# the summary the mod logs when it stops.
+# Runs the released mod against a real `maestro-node` on loopback, lets husks
+# chase villagers near spawn, and checks the summary the mod logs on stop.
 #
-# OFFLOAD=shadow (the default) keeps vanilla's paths and compares the node's
-# answers with them, every one of which must match. OFFLOAD=on lets the node's
-# answers move the mobs. Either way no request may be dropped once admitted,
-# since nothing fails on loopback.
+# OFFLOAD=shadow (default) keeps vanilla's paths and requires every node answer
+# to match them. OFFLOAD=on lets answers move the mobs. Either way no admitted
+# request may be dropped.
 
 set -euo pipefail
 
@@ -22,12 +19,11 @@ CONFIG="$SERVER_DIR/run/config/maestro.json"
 
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-300}"
 SHUTDOWN_TIMEOUT="${SHUTDOWN_TIMEOUT:-120}"
-# Seconds the mobs run at the normal tick rate. Sprinting would squeeze the
-# node's tick budget into a few milliseconds.
+# Seconds the mobs run at the normal tick rate; sprinting would shrink the
+# node's tick budget.
 RUN_SECONDS="${RUN_SECONDS:-20}"
-# The fewest answers the run must get, and in shadow mode the share of them that
-# must match vanilla's path. The world changes only before the mobs arrive, so
-# the node searches the world vanilla searched and every answer must match.
+# Minimum answers, and in shadow mode the required share matching vanilla.
+# The world changes only before the mobs arrive, so all answers must match.
 MIN_ANSWERS="${MIN_ANSWERS:-20}"
 MIN_MATCH_PERCENT="${MIN_MATCH_PERCENT:-100}"
 
@@ -57,7 +53,7 @@ mkdir -p "$(dirname "$LOG")" "$(dirname "$CONFIG")"
 : >"$LOG"
 : >"$NODE_LOG"
 
-# The run writes its own config. One already there is put back afterwards.
+# An existing config is restored afterwards.
 BACKUP=""
 if [[ -f "$CONFIG" ]]; then
   BACKUP="$(mktemp)"
@@ -87,8 +83,8 @@ NODE_PID=$!
 
 FIFO="$(mktemp -u)"
 mkfifo "$FIFO"
-# Opened read-write: a write-only open on a FIFO blocks until a reader attaches,
-# and holding it open keeps the server's console reader from seeing EOF.
+# Read-write open: a write-only FIFO open blocks until a reader attaches, and
+# keeps the server's console reader from seeing EOF.
 exec 3<>"$FIFO"
 
 EXIT_FILE="$(mktemp)"
@@ -120,8 +116,8 @@ for ((i = 0; i < STARTUP_TIMEOUT; i++)); do
 done
 grep -qF "$READY_LINE" "$LOG" || fail "server did not start within ${STARTUP_TIMEOUT}s"
 
-# Sends console command $1 and waits up to $3 seconds (default 60) for a new
-# log line matching the extended regex $2.
+# Sends console command $1, waits up to $3 s (default 60) for a new log line
+# matching regex $2.
 run_command() {
   local command="$1" expected="$2" timeout="${3:-60}" before i
   before="$(grep -cE -- "$expected" "$LOG" || true)"
@@ -136,10 +132,9 @@ run_command() {
   fail "no '$expected' within ${timeout}s of '$command'"
 }
 
-# No chunk stays loaded without a player, so the area around spawn is force
-# loaded for the mobs to tick. Husks do not burn in daylight, and hunt villagers.
+# Force load the spawn area so the mobs tick. Husks do not burn in daylight.
 echo "e2e-test: server up, summoning husks and villagers"
-# A run that failed may have left them force loaded.
+# A failed run may have left them force loaded.
 run_command "forceload add ~-32 ~-32 ~32 ~32" "force loaded|No chunks were marked"
 for ((attempt = 0; ; attempt++)); do
   run_command "execute if loaded ~24 ~ ~24" "Test (passed|failed)"
@@ -147,11 +142,10 @@ for ((attempt = 0; ; attempt++)); do
   ((attempt < 120)) || fail "the spawn area did not load"
   sleep 0.5
 done
-# Mobs a failed run left behind would race the block changes below.
+# Leftover mobs would race the block changes below.
 run_command "kill @e[tag=$MOB_TAG]" "Killed|No entity was found"
-# A few block changes, which reach the node as deltas. They are made before any
-# mob exists, so no search races them. The dev world is kept between runs, so a
-# block may already be in place.
+# Block changes that reach the node as deltas, made before any mob exists. The
+# dev world persists, so a block may already be in place.
 run_command "setblock ~2 ~ ~8 minecraft:oak_fence" "Changed the block|Could not set the block"
 run_command "setblock ~-8 ~ ~2 minecraft:cobblestone" "Changed the block|Could not set the block"
 for offset in "-12 ~ -8" "10 ~ -10" "-6 ~ 12" "14 ~ 6"; do
@@ -210,7 +204,7 @@ if [[ "$OFFLOAD" == "shadow" ]]; then
   fi
 else
   APPLIED="$(count applied)"
-  # An answer is not applied only when its mob stopped waiting for it in the tick it arrived.
+  # An answer goes unapplied only if its mob stopped waiting that tick.
   ((APPLIED * 2 >= ANSWERED)) || fail "only $APPLIED of $ANSWERED answers moved a mob"
 fi
 

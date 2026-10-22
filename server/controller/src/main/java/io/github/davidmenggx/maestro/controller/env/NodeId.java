@@ -1,9 +1,6 @@
 package io.github.davidmenggx.maestro.controller.env;
 
-/**
- * Identity of one compute node. A value type, so maps keyed on it iterate in the same order every
- * run.
- */
+/** Identity of one compute node. */
 public record NodeId(int id) {
 
   public NodeId {

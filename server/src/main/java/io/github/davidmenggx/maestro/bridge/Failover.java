@@ -18,17 +18,15 @@ import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Paths for mobs whose node cannot take their search now, as while it is down or its region is sent
- * again. A mob following a path made in the last {@link #RECENT_TICKS} ticks keeps it. Any other
- * gets a cheap path at once, vanilla's search on {@link #CHEAP_SHARE} of its node budget, and waits
- * for a full search.
+ * Paths for mobs whose node cannot take their search now (down, or its region resent). A mob
+ * following a path made in the last {@link #RECENT_TICKS} ticks keeps it. Any other gets a cheap
+ * path at once (vanilla's search on {@link #CHEAP_SHARE} of its node budget) and waits for a full
+ * search.
  *
- * <p>Full searches run on the server thread within {@link #BUDGET_NANOS} a tick: in the call itself
- * while no other mob waits, and otherwise when the tick's work ends, in turns. Each mob's turn is
- * the tick it asked, a mob {@link #BLOCKS_PER_TICK} blocks further from its nearest player counting
- * as a tick later, so the mobs nearest a player go first and every mob still gets its turn. A
- * search cannot stop part way, so one that runs past the budget is paid back from the next ticks'.
- * Used on the server thread only.
+ * <p>Full searches run on the server thread within {@link #BUDGET_NANOS} a tick: in the call while
+ * no other mob waits, otherwise at the tick's end, in turns. A mob's turn is the tick it asked,
+ * plus one per {@link #BLOCKS_PER_TICK} blocks from its nearest player. A search cannot stop part
+ * way, so an overrun is paid back from later ticks. Server thread only.
  */
 final class Failover {
 

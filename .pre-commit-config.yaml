@@ -17,8 +17,7 @@ repos:
         types_or: [c, c++, c#, cuda]
 
   # ---- Java ----
-  # The pre-commit mirror for google-java-format was removed upstream, so run a
-  # pinned, JDK-25-compatible gjf via a local wrapper instead.
+  # The upstream mirror was removed; a local wrapper runs a pinned gjf.
   - repo: local
     hooks:
       - id: google-java-format

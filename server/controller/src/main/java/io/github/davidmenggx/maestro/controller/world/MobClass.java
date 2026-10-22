@@ -4,20 +4,18 @@ import java.util.Arrays;
 import java.util.Objects;
 
 /**
- * One land-mob pathfinding profile: the {@code WalkNodeEvaluator} inputs. These change at runtime
- * per mob, so a profile is interned by content, and {@code classId} names that content, not a mob
- * type. A request names the profile its mob has at that moment.
+ * One land-mob pathfinding profile: the {@code WalkNodeEvaluator} inputs. A profile is interned by
+ * content, and {@code classId} names that content, not a mob type.
  *
  * <p>{@code malus} is indexed by {@code PathType} ordinal and covers every ordinal, including those
- * a cell cannot carry, because the node resolves those types before applying a malus.
+ * a cell cannot carry, since the node resolves types before applying a malus.
  */
 public record MobClass(short classId, Shape shape, Abilities abilities, float[] malus) {
 
   /**
-   * Collision box, and the height the mob can step up without jumping. A search's cost grows with
-   * the footprint, and admission assumes requests cost about the same, so a shape is at most {@link
-   * #MAX_FOOTPRINT} cells, and a larger mob's search stays on the server. The node refuses a
-   * profile past either bound. The step height attribute reaches 10.
+   * Collision box and step height. Search cost grows with the footprint, so a shape is at most
+   * {@link #MAX_FOOTPRINT} cells and a larger mob's search stays on the server. The node refuses a
+   * profile past either bound. Step height reaches 10.
    */
   public record Shape(float width, float height, float maxUpStep) {
 
@@ -45,9 +43,8 @@ public record MobClass(short classId, Shape shape, Abilities abilities, float[] 
     }
 
     /**
-     * Cells the evaluator tests for a mob of this size at each node, {@code entityWidth *
-     * entityHeight * entityDepth} as {@code NodeEvaluator.prepare} sizes them. In double, so a huge
-     * width cannot overflow.
+     * Cells the evaluator tests at each node, sized as {@code NodeEvaluator.prepare} does. A
+     * double, so a huge width cannot overflow.
      */
     public static double footprint(float width, float height) {
       double side = Math.floor(width + 1.0f);
@@ -80,7 +77,7 @@ public record MobClass(short classId, Shape shape, Abilities abilities, float[] 
         && Arrays.equals(malus, otherMalus);
   }
 
-  /** Copied on the way in and out, so the array cannot be modified through the record. */
+  /** Copied on the way in and out. */
   @Override
   public float[] malus() {
     return malus.clone();

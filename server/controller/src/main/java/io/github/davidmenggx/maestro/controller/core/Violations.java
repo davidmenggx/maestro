@@ -4,9 +4,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Controller bugs the controller noticed itself, such as a node replying on a channel it never
- * replies on. Bounded, since a misbehaving node could otherwise grow it without end: past {@link
- * #MAX_KEPT} only a count is kept.
+ * Controller bugs noticed by the controller itself. Bounded: past {@link #MAX_KEPT} only a count is
+ * kept.
  */
 final class Violations {
 

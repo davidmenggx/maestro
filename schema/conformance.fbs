@@ -1,22 +1,19 @@
 namespace maestro.fbs;
 
-// Test data, never sent: scripts that drive one node through the life of its
-// links, with what the node must do at each step. The C++ node and the
-// controller's modeled node both replay every case, so the model cannot drift
-// from the node unnoticed. Frames are the controller's encoding, as the wire
-// carries them. Answers are compared by request id, run and world sequence
-// only, since the model does not run A*.
+// Test data, never sent: scripts driving one node through its links, with the
+// effects expected at each step. The node and the controller's model both
+// replay every case. Answers are compared by request id, run and world
+// sequence only, since the model does not run A*.
 //
-// A replay starts with a node that holds nothing, has no workers, keeps
-// answers and cancels for 1000 ms, drops a request that waited more than
-// 1000 ms, and runs the vanilla search. Time starts at 0 and moves only with
-// `Advance`.
+// A replay starts with an empty node, no workers, 1000 ms retention of answers
+// and cancels, a 1000 ms request wait limit, and the vanilla search. Time
+// starts at 0 and moves only with `Advance`.
 
 enum LinkPort : ubyte { World, Control }
 
 enum StepKind : ubyte {
-  // A new connection on `port`, whose first frame is `frame`. Unless the node
-  // refuses it, it becomes the port's current connection.
+  // A new connection on `port` opening with `frame`. Becomes current unless
+  // refused.
   Connect,
   // `frame` on the current connection of `port`.
   Stream,
@@ -26,9 +23,8 @@ enum StepKind : ubyte {
   Datagram,
   // `millis` pass.
   Advance,
-  // The node runs `count` waiting requests to completion, oldest first, or
-  // every waiting request if `count` is 0. A canceled request, or one that
-  // waited too long, is skipped and not counted.
+  // Run `count` waiting requests, oldest first, or all if 0. Canceled and
+  // expired requests are skipped and not counted.
   Serve,
   // The node's heartbeat timer fires.
   Heartbeat
@@ -45,11 +41,9 @@ enum EffectKind : ubyte {
   Answer,
   // An `UnknownProfile` datagram: `request_id` and the frame's `run`.
   UnknownProfile,
-  // The node dropped its link and closed every connection of it. Once per
-  // drop, however many connections it closed.
+  // The node dropped its link, once per drop whatever the connection count.
   LinkDropped,
-  // The node closed the connection the step opened, which never joined the
-  // link.
+  // The node closed the connection the step opened.
   Refused
 }
 
@@ -62,7 +56,7 @@ table Effect {
   request_id:ulong;
 }
 
-// `effects` is everything the node does in reply to the step, in order.
+// `effects` are the node's replies to the step, in order.
 table Step {
   kind:StepKind;
   port:LinkPort;

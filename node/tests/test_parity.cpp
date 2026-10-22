@@ -46,8 +46,7 @@ Bytes readFile(const std::filesystem::path &Path) {
   return Bytes(std::istreambuf_iterator<char>(In), {});
 }
 
-/// Copies a frame out of the container into its own buffer, aligned as a frame
-/// read off the wire would be.
+/// Copies a frame into its own aligned buffer, as read off the wire.
 Bytes copy(const flatbuffers::Vector<std::uint8_t> *Frame) {
   return Frame ? Bytes(Frame->begin(), Frame->end()) : Bytes();
 }
@@ -138,9 +137,8 @@ std::string difference(const search::Result &Node, const Recorded &Vanilla) {
 
 struct Tally {
   int Exact = 0;
-  /// Exact cases that cover what the rest of the suite barely reaches: long
-  /// paths, an answer that a block change decided, an answer that the visit
-  /// budget decided, and a climb that takes a jump of two.
+  /// Exact cases covering what the suite barely reaches: long paths, answers
+  /// decided by a block change or the visit budget, and a two-block climb.
   int ExactLong = 0;
   int ExactChangedByDelta = 0;
   int ExactBudgetBound = 0;
@@ -174,8 +172,7 @@ void replay(const std::filesystem::path &Path, Tally &Count) {
   ASSERT_TRUE(split(Fixture->world(), WorldFrames));
   world::WorldStore Store;
   std::size_t Applied = 0;
-  // The world as it was before the first block change, to tell which answers
-  // a change decided.
+  // The world before the first block change, to tell which answers it decided.
   std::shared_ptr<const world::Area> BeforeDeltas;
 
   const auto Search = search::makeSearch(fbs::Pathfinder::VANILLA);
@@ -273,9 +270,8 @@ TEST(Parity, ReproducesEveryExactVanillaSearch) {
   EXPECT_GT(Count.ExactBudgetBound, 0)
       << "the visit budget decided no exact case";
   EXPECT_GT(Count.ExactHighJump, 0) << "no exact path climbs two blocks";
-  // Approximated cases may differ by design, so they are measured, not
-  // asserted. The measures are also test properties, which the XML report
-  // keeps, so they can be followed across runs.
+  // Approximated cases may differ by design: measured, not asserted. Recorded
+  // as test properties to track across runs.
   const int Approximated = std::max(Count.Approximated, 1);
   const double MeanCost = Count.CostDifference / Approximated;
   const double MeanLength =

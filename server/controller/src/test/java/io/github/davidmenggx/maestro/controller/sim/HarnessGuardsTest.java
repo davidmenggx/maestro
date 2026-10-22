@@ -45,11 +45,7 @@ import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 import org.junit.jupiter.api.Test;
 
-/**
- * The harness must be reliable before its runs can be trusted. These tests cover the machinery the
- * assertions depend on, the samplers that decide what a sweep explores, and the guards that report
- * harness misuse as an error message.
- */
+/** Tests for the harness machinery: assertions, samplers and misuse guards. */
 class HarnessGuardsTest {
 
   private static final int DRAWS = 300;
@@ -173,9 +169,7 @@ class HarnessGuardsTest {
       }
     }
 
-    // Process death, a silent partition, a stalled stream, a frozen process, lost
-    // datagrams, a link reset and a controller restart need different recoveries, so the
-    // sweep must cover all of them.
+    // Each fault kind needs a different recovery, so the sweep must cover all of them.
     assertEquals(
         Set.of(
             "NodeDied",
@@ -192,9 +186,8 @@ class HarnessGuardsTest {
     assertTrue(
         longestSpan > FaultPlan.MAX_FAULT_SPAN_TICKS,
         "no fault outlasted " + FaultPlan.MAX_FAULT_SPAN_TICKS + " ticks: " + longestSpan);
-    // Faults must be able to accumulate on one node, or the sweep can never cover a
-    // second failure during a recovery. A paired fault adds two entries, so the
-    // count only needs to exceed the number of faults drawn.
+    // Faults must be able to accumulate on one node, to reach a second failure during a
+    // recovery. A paired fault adds two entries.
     faultCount.assertCovers("fault count", 0, FaultPlan.MAX_FAULTS);
     minLatency.assertCovers("min latency", 1, FaultPlan.MAX_MIN_LATENCY_STEPS);
     maxLatency.assertCovers(
@@ -386,9 +379,8 @@ class HarnessGuardsTest {
 
     node.receive(Channel.REQUEST, requests(walk(5)));
 
-    // A request arriving before its profile is network behavior, not a controller
-    // bug, so it is not a violation. The answer is sent immediately instead of
-    // waiting for a worker.
+    // A request arriving before its profile is network behavior, not a violation. It is
+    // answered at once, without a worker.
     assertEquals(List.of(), node.violations());
     assertEquals(1, requestFramesSent(sim));
   }
@@ -569,8 +561,7 @@ class HarnessGuardsTest {
     sendWorld(sim, first, Frames.chunkSnapshot(5, 0, 0, Frames.readChunk(world, 0, 0)));
     assertEquals(List.of(), sim.streamViolations());
 
-    // A node takes a fresh assignment wherever it starts if it held nothing of the stream, so
-    // the harness checks that none starts behind a frame already sent to another holder.
+    // A fresh assignment may start anywhere, but never behind a frame sent to another holder.
     sendWorld(sim, second, Frames.assignment(RUN, 0, size, 2, false, world));
     sendWorld(sim, second, Frames.chunkSnapshot(3, 0, 0, Frames.readChunk(world, 0, 0)));
     assertEquals(List.of(), first.violations());
@@ -928,8 +919,7 @@ class HarnessGuardsTest {
     transport.connect(id);
     sim.run(event -> {}, (tick, input) -> {}, 1);
     assertEquals(1, listener.connected);
-    // The listener opened the link with a `Join` on each connection, and the node said hello,
-    // which the controller hears at the next hand-over.
+    // The listener sent a `Join` on each connection and the node said hello.
     sim.run(event -> {}, (tick, input) -> {}, 1);
     assertEquals(0, sim.metrics().total("transport.refused"));
     assertTrue(listener.frames >= 1, "no hello");
@@ -944,10 +934,7 @@ class HarnessGuardsTest {
     assertEquals(0, sim.metrics().total("transport.refused"));
   }
 
-  /**
-   * The controller runs on the server thread, so it hears the network and finished offload work
-   * only where the server hands over: as a tick starts, and as its work ends.
-   */
+  /** The controller hears the network and finished offload work only as a tick starts and ends. */
   @Test
   void theControllerHearsAnythingOnlyWhenTheServerHandsOver() {
     int busySteps = 300;
@@ -1048,10 +1035,7 @@ class HarnessGuardsTest {
     assertTrue(listener.frames > heard, "the answer never came");
   }
 
-  /**
-   * A chunk frame with {@code columns} one-run columns of air with {@code floor}. Only a faulty
-   * encoder would send one with the wrong column count or a floor past the limit.
-   */
+  /** A chunk frame of {@code columns} one-run air columns at {@code floor}. */
   private static byte[] chunkWithColumns(long sequence, int columns, int floor) {
     FlatBufferBuilder builder = new FlatBufferBuilder(1024);
     int[] counts = new int[columns];

@@ -9,10 +9,8 @@ namespace maestro::search {
 /// Vanilla's default `PathType.getMalus` for every ordinal.
 const std::array<float, world::PathTypeCount> &defaultMalus();
 
-/// `WalkNodeEvaluator.getPathTypeStatic`. For an `OPEN` cell above the
-/// area's bottom layer, the result comes from the type of the cell below,
-/// and for any type below that vanilla does not list, from
-/// `checkNeighbourBlocks`. Every other cell keeps its own type.
+/// `WalkNodeEvaluator.getPathTypeStatic`: an `OPEN` cell takes its type from
+/// the cell below, then from `checkNeighbourBlocks` if that is unlisted.
 world::PathType pathTypeStatic(const world::Area &Area, int X, int Y, int Z);
 
 /// `WalkNodeEvaluator.checkNeighbourBlocks`. Scans `dx`, `dy`, `dz` over -1..1

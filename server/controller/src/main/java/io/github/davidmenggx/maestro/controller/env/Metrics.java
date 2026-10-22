@@ -1,11 +1,8 @@
 package io.github.davidmenggx.maestro.controller.env;
 
 /**
- * Counters, distributions and gauges, in the shapes OpenTelemetry instruments take. Makes no timing
- * calls; every value comes from {@link Clock}.
- *
- * <p>{@code labels} are alternating key and value strings. An array keeps the iteration order
- * fixed.
+ * Counters, distributions and gauges. {@code labels} are alternating key and value strings, in a
+ * fixed order.
  */
 public interface Metrics {
 

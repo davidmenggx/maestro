@@ -7,11 +7,9 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * The faults the network, the fleet, the controller process and its encode workers may inject into
- * a run. The drop and duplicate rates apply to unordered channels only, because an ordered channel
- * cannot lose a frame without breaking the connection. {@code offloadFailureRate} is the
- * probability that an offloaded encode throws, until the run settles ({@link
- * Simulation#settleFrom}).
+ * Faults the network, fleet, controller process and encode workers may inject into a run. Drop and
+ * duplicate rates apply to unordered channels only. {@code offloadFailureRate} is the chance an
+ * offloaded encode throws, until the run settles ({@link Simulation#settleFrom}).
  */
 public record FaultPlan(
     int minLatencySteps,
@@ -34,10 +32,7 @@ public record FaultPlan(
   /** Process death: state is lost and the peer sees a reset. */
   public record NodeDied(long tick, NodeId node) implements NodeFault {}
 
-  /**
-   * The connection breaks but the process survives, so the node keeps its region state. This is the
-   * case resume-from-N is for: the node reconnects still holding most of the stream.
-   */
+  /** The connection breaks but the process survives, so the node resumes from what it holds. */
   public record LinkReset(long tick, NodeId node) implements NodeFault {}
 
   public record NodeRecovered(long tick, NodeId node) implements NodeFault {}
@@ -46,36 +41,23 @@ public record FaultPlan(
   public record Partitioned(long tick, NodeId node, boolean active) implements NodeFault {}
 
   /**
-   * The ordered channels stop delivering while the link stays up, like TCP during a retransmit
-   * backoff, and unordered frames still get through. Held frames arrive when the stall ends. This
-   * is how a request can arrive before the profile it names.
+   * Ordered channels stop delivering while the link stays up; held frames arrive when the stall
+   * ends. A request can arrive before the profile it names.
    */
   public record Stalled(long tick, NodeId node, boolean active) implements NodeFault {}
 
-  /**
-   * The node's process freezes, as in a long collection pause: its links stay up, but it serves
-   * nothing, sends no heartbeat, and handles what reaches it only once it resumes. This is the case
-   * only a failure detector can tell from a slow node.
-   */
+  /** The node freezes: links stay up, but it serves nothing and sends no heartbeat. */
   public record Paused(long tick, NodeId node, boolean active) implements NodeFault {}
 
-  /**
-   * Every datagram to and from the node is lost while its links and heartbeats carry on, as when a
-   * firewall blocks the request port or the node answers from an address the controller does not
-   * know. Only the missing answers show it.
-   */
+  /** Every datagram to and from the node is lost while its links and heartbeats carry on. */
   public record Blackholed(long tick, NodeId node, boolean active) implements NodeFault {}
 
-  /**
-   * The controller process restarts with a new run id. Its links and everything it had in flight
-   * are gone, and the nodes keep their world state from the old run.
-   */
+  /** The controller restarts with a new run id; nodes keep world state from the old run. */
   public record ControllerRestarted(long tick) implements Fault {}
 
   /**
-   * The server's work in this tick takes {@code steps}, as in a long collection pause or a burst of
-   * chunk generation. The controller hears nothing meanwhile, while the fleet carries on. It cannot
-   * delay or lose a request in ticks, so a plan with only these is still clean.
+   * The server's work in this tick takes {@code steps}. The controller hears nothing meanwhile. It
+   * cannot delay or lose a request in ticks, so a plan with only these is still clean.
    */
   public record ServerStalled(long tick, int steps) implements Fault {}
 
@@ -96,26 +78,15 @@ public record FaultPlan(
 
   static final double MAX_SAMPLED_RATE = 0.1;
 
-  /**
-   * Share of sampled plans with nothing that can delay or lose a request, so a sweep has runs the
-   * latency SLO applies to. They still draw a latency range and a duplicate rate, and only those
-   * whose fleet can serve their load in time are held to the SLO, about a quarter of them.
-   */
+  /** Share of sampled plans that cannot delay or lose a request, so the latency SLO applies. */
   static final double CLEAN_CHANCE = 0.4;
 
-  /**
-   * Faults drawn per run. Several may hit one node, so the sweep covers a failure during a
-   * recovery. Raising this makes the average run harsher without widening the space, trading runs
-   * that get far enough to answer requests for runs that spend their whole length recovering.
-   */
+  /** Faults drawn per run. Several may hit one node, to cover a failure during a recovery. */
   static final int MAX_FAULTS = 5;
 
   static final int MAX_FAULT_SPAN_TICKS = 15;
 
-  /**
-   * Share of partitions, pauses and blackholes that last long enough for the heartbeat detector to
-   * suspect the node, and for a quiet request path to fail a probe and be probed again.
-   */
+  /** Share of partitions, pauses and blackholes long enough for the detectors to notice. */
   static final double LONG_FAULT_CHANCE = 0.3;
 
   static final int MAX_LONG_FAULT_SPAN_TICKS = 160;
@@ -138,10 +109,8 @@ public record FaultPlan(
   static final int MAX_LATENCY_SPAN_STEPS = 400;
 
   /**
-   * Share of clean plans whose latency sits just under the edge each way: the longest at which one
-   * request served at the slowest node's highest cost is still answered in the tick its batch
-   * arrives in ({@link #edgeLatency}). Such a run has no slack: a tick added by the controller
-   * misses the SLO.
+   * Share of clean plans whose latency sits just under the edge ({@link #edgeLatency}). Such a run
+   * has no slack: one tick added by the controller misses the SLO.
    */
   static final double EDGE_CHANCE = 0.5;
 
@@ -153,10 +122,7 @@ public record FaultPlan(
     return new FaultPlan(2, 12, 0.0, 0.0, 0.0, List.of());
   }
 
-  /**
-   * Whether nothing in the plan can delay or lose a request: no loss, no failed encode, and no
-   * fleet or controller fault. Latency, duplicates and server stalls are allowed, because none can.
-   */
+  /** Whether nothing in the plan can delay or lose a request. */
   public boolean clean() {
     return dropRate == 0
         && offloadFailureRate == 0
@@ -165,9 +131,7 @@ public record FaultPlan(
 
   /**
    * The longest one-way latency at which a request served in {@code maxCostSteps} by an idle node
-   * is answered within the tick its batch arrives in: the batch leaves at the end of a tick, and
-   * the answer must arrive before that tick's successor ends, where the controller also checks what
-   * to resend. 0 if no latency is short enough.
+   * is still answered within the tick its batch arrives in. 0 if none is short enough.
    */
   static int edgeLatency(int maxCostSteps) {
     return Math.max(0, (Simulation.STEPS_PER_TICK - 1 - maxCostSteps) / 2);
@@ -175,14 +139,11 @@ public record FaultPlan(
 
   /**
    * One draw from the full range of latency, loss, duplication and encode failure, plus up to
-   * {@link #MAX_FAULTS} faults that may overlap on one node or hit several nodes at once. Each
-   * fault starts inside {@code activeTicks} and, unless the node is permanently lost, ends there
-   * too, so the quiet tail of the run can settle. A share {@link #LONG_FAULT_CHANCE} of the faults
-   * that leave a link up but its node unable to answer last up to {@link
-   * #MAX_LONG_FAULT_SPAN_TICKS}. One plan in {@link #CLEAN_CHANCE} has only latency and
-   * duplication, and a share {@link #EDGE_CHANCE} of those has latency at the edge for a fleet
-   * whose slowest request costs {@code maxCostSteps}. A share {@link #STALL_CHANCE} of all plans
-   * stall the server once.
+   * {@link #MAX_FAULTS} faults that may overlap. Faults start and end inside {@code activeTicks}
+   * unless the node is lost for good. A share {@link #LONG_FAULT_CHANCE} of the silent faults last
+   * up to {@link #MAX_LONG_FAULT_SPAN_TICKS}. One plan in {@link #CLEAN_CHANCE} has only latency
+   * and duplication, and a share {@link #EDGE_CHANCE} of those sits at the edge for a fleet whose
+   * slowest request costs {@code maxCostSteps}. A share {@link #STALL_CHANCE} stall the server.
    */
   public static FaultPlan sample(Rng rng, int nodeCount, long activeTicks, int maxCostSteps) {
     int minLatency = 1 + rng.nextInt(MAX_MIN_LATENCY_STEPS);

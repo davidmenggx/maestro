@@ -21,10 +21,9 @@ public abstract class MinecraftServerMixin {
   private static final Logger LOG = LoggerFactory.getLogger("maestro");
 
   /**
-   * {@code createLevels} builds the overworld directly, then iterates the {@code LEVEL_STEM}
-   * registry to create every other dimension and to set up each level's world border, the
-   * overworld's included. Iterating the overworld's entry alone keeps its border setup and creates
-   * no other dimension.
+   * {@code createLevels} iterates the {@code LEVEL_STEM} registry to create every other dimension
+   * and set up each border, the overworld's included. Iterating only the overworld's entry keeps
+   * its border and creates no other dimension.
    */
   @Redirect(
       method = "createLevels",

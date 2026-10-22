@@ -20,16 +20,15 @@ namespace {
 using asio::ip::tcp;
 using asio::ip::udp;
 
-/// How long an acceptor rests after a failed accept, such as one out of file
-/// descriptors, which would fail again at once.
+/// Pause after a failed accept, which would otherwise fail again at once.
 constexpr std::chrono::milliseconds AcceptBackoff{100};
 
 } // namespace
 
-/// One TCP connection carrying length-prefixed frames. Lives on the I/O
-/// thread. `OnClose` runs when the peer or the network ends the connection,
-/// or when the peer declares a frame over its limit, not when `close` does.
-/// `OnSilent` runs if no frame arrives within the timeout `start` is given.
+/// One TCP connection carrying length-prefixed frames, on the I/O thread.
+/// `OnClose` runs when the peer or the network ends it or a frame is over the
+/// limit, not on `close`. `OnSilent` runs if no frame arrives within the
+/// timeout `start` is given.
 class Server::Stream : public std::enable_shared_from_this<Stream> {
 public:
   using FrameHandler = std::function<void(std::span<const std::uint8_t>)>;
@@ -153,8 +152,7 @@ Server::Server(asio::io_context &Io, const ServerOptions &Opts)
   WorldPort = WorldAcceptor.local_endpoint().port();
   ControlPort = ControlAcceptor.local_endpoint().port();
   RequestPort = Requests.local_endpoint().port();
-  // A full send buffer drops the answer, as the network might, instead of
-  // stalling the I/O thread.
+  // A full send buffer drops the answer rather than stall the I/O thread.
   Requests.non_blocking(true);
   accept(WorldAcceptor, WorldBackoff, serve::Port::World);
   accept(ControlAcceptor, ControlBackoff, serve::Port::Control);
@@ -267,8 +265,7 @@ void Server::sendTo(const udp::endpoint &To,
   if (!Error)
     return;
   ++Unsent;
-  // At most a line a second, so an overloaded node is not slowed further by
-  // its own log.
+  // At most a line a second.
   const auto At = std::chrono::steady_clock::now();
   if (At - LastUnsentLog < std::chrono::seconds(1))
     return;

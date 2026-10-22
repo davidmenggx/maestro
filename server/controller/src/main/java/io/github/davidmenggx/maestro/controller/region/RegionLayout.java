@@ -10,9 +10,7 @@ import java.util.List;
  */
 public final class RegionLayout {
 
-  /**
-   * Side of a region: four pathfinding horizons of about 64 blocks, the smallest the spec allows.
-   */
+  /** Side of a region: four pathfinding horizons of about 64 blocks, the spec minimum. */
   public static final int SIZE = 256;
 
   /** One cell of the lattice, by index along each axis. */

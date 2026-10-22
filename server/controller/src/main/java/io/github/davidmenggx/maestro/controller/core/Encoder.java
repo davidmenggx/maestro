@@ -6,17 +6,15 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * Runs encodes off the controller thread, and runs a failed one again at the next tick boundary, at
- * most {@link #MAX_ATTEMPTS} times in all before giving up. The work captured everything it reads,
- * so a retry builds the same bytes. A world frame keeps its sequence number, because skipping a
- * number would leave a gap for the node.
+ * Runs encodes off the controller thread and retries a failed one at the next tick boundary, up to
+ * {@link #MAX_ATTEMPTS} in all. A retry builds the same bytes, and a world frame keeps its sequence
+ * so the node sees no gap.
  */
 public final class Encoder {
 
   /**
-   * Tries at one encode. A batch of requests given up on goes back to its node's next batch. A
-   * world frame given up on leaves a gap no later frame can cross, so its region's stream starts
-   * over.
+   * Tries at one encode. A given-up request batch returns to its node's next batch. A given-up
+   * world frame leaves an unfillable gap, so its region's stream starts over.
    */
   public static final int MAX_ATTEMPTS = 5;
 

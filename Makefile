@@ -1,22 +1,3 @@
-# Maestro top-level build. Orchestrates:
-#   * flatc          - the FlatBuffers compiler (built once from a pinned tag)
-#   * schema         - generate C++ and Java bindings from schema/*.fbs
-#   * node           - the C++20 compute node (CMake + FetchContent)
-#   * server         - the Java Fabric server mod (Gradle + Loom)
-#
-# Common targets:
-#   make            build node + server
-#   make node       build the C++ compute node
-#   make server     build the Fabric mod jar
-#   make test       run both unit test suites
-#   make fuzz       run the controller's deterministic simulation seed sweeps
-#                   (TIER=shallow|deep|coverage narrows it to one tier)
-#   make test-boot  boot the released mod and assert the mixins applied
-#   make capture    record vanilla parity fixtures (SEED="1 2" N=cases)
-#   make conformance  write the node conformance fixture
-#   make clean      remove build outputs (keeps fetched deps)
-#   make help       list targets
-
 SHELL := /bin/bash
 ROOT  := $(abspath .)
 BUILD := $(ROOT)/build
@@ -29,15 +10,13 @@ GEN_JAVA := $(ROOT)/server/controller/src/generated/java
 
 FLATC := $(BUILD)/tools/bin/flatc
 
-# Minecraft 26.1 needs JDK 25. The `java.toolchain` blocks in the Gradle builds
-# select it, and Gradle finds installed JDKs on its own.
+# Minecraft 26.1 needs JDK 25, selected by the Gradle `java.toolchain` blocks.
 GRADLE := ./gradlew
 
-# Toggle the OpenTelemetry C++ SDK (heavy) for the node build.
+# The OpenTelemetry C++ SDK is heavy to build.
 MAESTRO_WITH_OTEL ?= ON
 
-# Sanitizers for the node build, e.g. `address,undefined` or `thread`. Empty
-# builds without any.
+# e.g. `address,undefined` or `thread`.
 MAESTRO_SANITIZE ?=
 
 .PHONY: all help flatc schema schema-cpp schema-java \

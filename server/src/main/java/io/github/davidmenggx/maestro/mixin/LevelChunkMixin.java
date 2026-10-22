@@ -13,8 +13,8 @@ public abstract class LevelChunkMixin {
 
   /**
    * Every block change in a loaded chunk passes here. One that changes the block's cell is reported
-   * to the fleet, whatever made it. The cell is compared even when vanilla reports no change, since
-   * it also reports none when a change made while removing the old block replaced the new one.
+   * to the fleet. The cell is compared even when vanilla reports no change, which it also does when
+   * removing the old block replaced the new one.
    */
   @WrapMethod(
       method =

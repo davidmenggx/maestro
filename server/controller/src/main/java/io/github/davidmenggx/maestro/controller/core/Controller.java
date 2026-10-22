@@ -17,11 +17,9 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * The controller. It streams each region's world to the nodes holding it ({@link WorldStreams}),
- * admits, batches, resends and cancels path requests and applies their answers ({@link
- * RequestTracker}), keeps a link to every node ({@link NodeLinks}), and takes a node that stopped
- * answering out of service ({@link NodeHealth}). Failover to another node and resharding are not
- * built.
+ * Streams each region's world to its holders ({@link WorldStreams}), handles path requests ({@link
+ * RequestTracker}), links to nodes ({@link NodeLinks}) and removes unresponsive nodes from service
+ * ({@link NodeHealth}). Failover and resharding are not built.
  */
 public final class Controller implements WorldInput, Transport.Listener {
 
@@ -61,8 +59,7 @@ public final class Controller implements WorldInput, Transport.Listener {
     env.transport().listen(this);
   }
 
-  // Accessors for harness assertions and production checks. Everything below this point is
-  // behavior.
+  // Accessors for harness assertions and production checks.
 
   /** Identifies this controller process to the fleet. */
   public long run() {
@@ -124,7 +121,7 @@ public final class Controller implements WorldInput, Transport.Listener {
       case WorldEvent.MobRemoved removed -> requests.mobRemoved(removed.mobId());
       case WorldEvent.PathRequested requested -> requests.pathRequested(requested);
       case WorldEvent.PathCanceled canceled -> requests.pathCanceled(canceled.mobId());
-      // Shedding and the failover budget will read player positions. Nothing does yet.
+      // Shedding and the failover budget will read player positions.
       case WorldEvent.PlayerMoved ignored -> {}
       case WorldEvent.PlayerLeft ignored -> {}
     }

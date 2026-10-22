@@ -10,24 +10,15 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Which nodes may be sent requests. Two signals take a node out of service, and either alone is
- * enough:
+ * Which nodes may be sent requests. A node leaves service on either signal: overdue heartbeats by a
+ * phi accrual detector (a frozen or cut-off node), or a quiet request path (requests left and none
+ * was answered within the tick budget, as with blocked datagrams or answers too late to use). A
+ * node out of service gets no requests, so its mobs fall back to the server. Heartbeats alone
+ * restore a suspected node. A quiet path is probed once after a backoff that doubles per failed
+ * probe, and any answer in time ends it.
  *
- * <ul>
- *   <li>Its heartbeats are overdue, as a phi accrual detector over their arrival times judges. This
- *       finds a node that froze or was cut off, with or without requests in flight.
- *   <li>Its request path went quiet: requests left for it and none was answered within the tick
- *       budget. This finds a request stream the link does not share, such as datagrams that are
- *       blocked or answers that never come back, and a node that answers too late to be of use.
- * </ul>
- *
- * A node out of service is sent no requests, so its mobs fall back to the server. Heartbeats bring
- * a suspected node back by themselves. A quiet request path is tried again with one probe request
- * after a backoff that doubles with each failed probe, and any answer in time ends the quiet.
- *
- * <p>The detector reads the time the transport heard each heartbeat, on the controller's clock, so
- * a server stall between hand-overs does not stretch the intervals it learns. Phi is computed with
- * {@code StrictMath}, so a run replays the same on every platform.
+ * <p>The detector uses the controller's clock at transport arrival, so server stalls do not stretch
+ * learned intervals. Phi uses {@code StrictMath} so runs replay on every platform.
  */
 public final class NodeHealth {
 
@@ -37,37 +28,30 @@ public final class NodeHealth {
   /** Heartbeat intervals the detector keeps. At one a second, the last 100 s. */
   static final int MAX_SAMPLES = 100;
 
-  /**
-   * The heartbeat interval assumed until intervals are seen. The node sets its own, 1 s, and the
-   * detector learns it from arrivals.
-   */
+  /** Heartbeat interval assumed until intervals are seen. The node sends every 1 s. */
   public static final long FIRST_INTERVAL_NANOS = 1_000_000_000L;
 
-  /**
-   * Floor of the interval spread, so a node whose heartbeats have been regular is not suspected for
-   * a little jitter.
-   */
+  /** Floor of the interval spread, so regular heartbeats are not suspected for a little jitter. */
   public static final long MIN_DEVIATION_NANOS = 200_000_000L;
 
-  /** A pause added to the expected interval, such as a collection pause on the node. */
+  /** Pause added to the expected interval, such as a collection pause on the node. */
   public static final long ACCEPTABLE_PAUSE_NANOS = 1_000_000_000L;
 
   /**
-   * Requests first sent since the last answer in time before a quiet request path takes its node
-   * out of service. One lost request is not enough, so the loss of one request and its resends to a
-   * lossy network does not.
+   * Requests first sent since the last timely answer before a quiet path takes the node out of
+   * service. One lost request and its resends do not.
    */
   public static final int QUIET_REQUESTS = 2;
 
   /**
    * Ticks since the oldest of those requests left before the path counts as quiet: past the tick
-   * budget, by which a working node has answered.
+   * budget.
    */
   public static final int QUIET_TICKS = RequestTracker.MAX_TICKS_LATE + 1;
 
   /**
-   * Ticks an unanswered request counts toward a quiet path. One whose answer was lost longer ago
-   * says little about the path now, so the next request is given its own time.
+   * Ticks an unanswered request counts toward a quiet path. An older loss says little about the
+   * path now.
    */
   public static final int QUIET_WINDOW_TICKS = 2 * QUIET_TICKS;
 
@@ -104,8 +88,8 @@ public final class NodeHealth {
     private Circuit circuit = Circuit.CLOSED;
 
     /**
-     * Ticks at which requests were first sent since the last answer in time, the first {@link
-     * #QUIET_REQUESTS} of them. They belong to the link they were sent on, which forgets them.
+     * Ticks at which requests were first sent since the last timely answer, the first {@link
+     * #QUIET_REQUESTS}. They belong to their link, which forgets them.
      */
     private final List<Long> quietSends = new ArrayList<>(QUIET_REQUESTS);
 
@@ -126,7 +110,7 @@ public final class NodeHealth {
 
     private void restart(long arrived) {
       intervals.clear();
-      // As if two heartbeats had come a quarter of the assumed interval either side of it.
+      // As if two heartbeats had come a quarter of the assumed interval either side.
       long spread = FIRST_INTERVAL_NANOS / 4;
       record(FIRST_INTERVAL_NANOS - spread);
       record(FIRST_INTERVAL_NANOS + spread);
@@ -138,7 +122,7 @@ public final class NodeHealth {
       if (lastArrival == NONE) {
         return 0;
       }
-      // A hundred samples at most, so summing them each time costs little and never drifts.
+      // At most a hundred samples, so summing each time is cheap and never drifts.
       double sum = 0;
       for (long interval : intervals) {
         sum += interval;
@@ -166,10 +150,9 @@ public final class NodeHealth {
   }
 
   /**
-   * Phi of a heartbeat {@code elapsed} after the last, for arrivals whose intervals have {@code
-   * mean} and {@code deviation}: minus the log10 of the chance that the next one is still to come,
-   * from a logistic approximation of the normal distribution. Infinite once that chance rounds to
-   * zero.
+   * Phi of a heartbeat {@code elapsed} after the last: minus the log10 of the chance the next one
+   * is still to come, from a logistic approximation of the normal distribution. Infinite once that
+   * rounds to zero.
    */
   public static double phi(double elapsed, double mean, double deviation) {
     double y = (elapsed - mean) / deviation;
@@ -178,10 +161,7 @@ public final class NodeHealth {
     return -StrictMath.log10(later);
   }
 
-  /**
-   * The node greeted the controller on a new link, which starts its heartbeat history. {@code
-   * arrived} is when the transport heard the greeting.
-   */
+  /** The node greeted on a new link, which starts its heartbeat history. */
   void greeted(NodeId node, long arrived) {
     health(node).restart(arrived);
   }
@@ -197,8 +177,8 @@ public final class NodeHealth {
   }
 
   /**
-   * The link is gone, and its heartbeats with it, and the requests the node forgot with it. Its
-   * circuit stays as it is.
+   * The link is gone, with its heartbeats and the requests the node forgot. The circuit stays as
+   * is.
    */
   void disconnected(NodeId node) {
     Health health = health(node);
@@ -216,9 +196,8 @@ public final class NodeHealth {
   }
 
   /**
-   * The node answered a request it was sent in time, so its request path works. A late answer, to a
-   * request the controller already gave up on, does not count: a node that only answers late is no
-   * use.
+   * The node answered in time, so its request path works. A late answer to an abandoned request
+   * does not count.
    */
   void answered(NodeId node) {
     Health health = health(node);
@@ -238,8 +217,8 @@ public final class NodeHealth {
   }
 
   /**
-   * Whether the requests the node holds may still be answered: it is not suspected, and its request
-   * path is not quiet. A probe out keeps it in service, so the probe is not dropped.
+   * Whether requests the node holds may still be answered: not suspected and path not quiet. A
+   * probe out keeps it in service.
    */
   private static boolean inService(Health health) {
     return !health.suspected && health.circuit != Circuit.OPEN;
@@ -257,8 +236,8 @@ public final class NodeHealth {
   }
 
   /**
-   * A request was given up on before it left. If it was the probe, the node was never tried, so the
-   * next request admitted is the probe instead.
+   * A request was given up before it left. If it was the probe, the next admitted request is the
+   * probe.
    */
   void withdrawn(NodeId node, long requestId) {
     Health health = health(node);
@@ -269,8 +248,8 @@ public final class NodeHealth {
   }
 
   /**
-   * Judges every node at the start of a tick, after what arrived before it was handed over, and
-   * returns those that just went out of service, whose live requests are then dropped.
+   * Judges every node at the start of a tick and returns those that just left service, whose live
+   * requests are then dropped.
    */
   List<NodeId> evaluate(long tick, long now) {
     List<NodeId> lost = new ArrayList<>();
@@ -316,7 +295,7 @@ public final class NodeHealth {
       if (health.inService == null || inService != health.inService) {
         metrics.gauge("node.in_service", inService ? 1 : 0, "node", label);
         if (!inService) {
-          // Its requests are canceled now, so those left unanswered show nothing.
+          // Its requests are canceled now, so unanswered ones show nothing.
           health.quietSends.clear();
           lost.add(node);
         }

@@ -1,16 +1,15 @@
 package io.github.davidmenggx.maestro.controller.world;
 
 /**
- * Vanilla keys a search's nodes by {@code Node.createHash}, which keeps only part of a position.
- * Two positions with one hash share a node, so the search treats one as the other. The compute node
- * keys its nodes by the whole position and cannot do the same, so a search where this could happen
- * stays vanilla.
+ * Vanilla keys a search's nodes by {@code Node.createHash}, which keeps only part of a position, so
+ * two positions can share a node. The compute node keys by the whole position, so a search where
+ * this could happen stays vanilla.
  *
- * <p>The hash keeps {@code y} modulo 256, {@code z} modulo 256 and {@code x} modulo 32768, except
- * that {@code z}'s bit 7 shares a hash bit with the sign of {@code x}, and {@code x}'s bit 7 with
- * the sign of {@code z}. Two positions within a search therefore share a hash only if they are 256
- * apart in {@code y} or {@code z}, 128 apart in {@code z} where {@code x} is negative, or 128 apart
- * in {@code x} where {@code z} is negative.
+ * <p>The hash keeps {@code y} and {@code z} modulo 256 and {@code x} modulo 32768, except that
+ * {@code z}'s bit 7 shares a hash bit with the sign of {@code x}, and {@code x}'s bit 7 with the
+ * sign of {@code z}. Positions in one search share a hash only if they are 256 apart in {@code y}
+ * or {@code z}, 128 apart in {@code z} where {@code x} is negative, or 128 apart in {@code x} where
+ * {@code z} is negative.
  */
 public final class NodeHashes {
 
@@ -27,12 +26,11 @@ public final class NodeHashes {
 
   /**
    * Whether two nodes of one search could share a hash: two positions the search may create, or one
-   * of those and the target, which vanilla creates before searching.
+   * of those and the target, which vanilla creates first.
    *
    * <p>A node is expanded only while nearer the start than {@code maxPathLength}, and creates nodes
-   * one block further, up to {@code floor(max(1, maxUpStep))} blocks above it, and down to {@code
-   * maxFallDistance + 1} blocks below it. A mob that cannot float also sinks through water, as far
-   * as {@code minY}.
+   * one block further, up to {@code floor(max(1, maxUpStep))} above and {@code maxFallDistance + 1}
+   * below. A mob that cannot float also sinks through water, down to {@code minY}.
    */
   public static boolean mayCollide(
       Pos start,
@@ -42,8 +40,7 @@ public final class NodeHashes {
       float maxUpStep,
       boolean canFloat,
       int minY) {
-    // Past these, the box alone holds two positions with one hash, and the arithmetic below could
-    // overflow.
+    // Past these the box alone holds a collision, and the arithmetic below could overflow.
     if (!(maxPathLength < 32768) || !(maxUpStep < 256)) {
       return true;
     }
@@ -64,8 +61,7 @@ public final class NodeHashes {
       return true;
     }
 
-    // The target and a position inside the box. Only positions a multiple of 128 away from the
-    // target along each axis can share its hash.
+    // Only positions a multiple of 128 from the target on each axis can share its hash.
     int targetHash = hash(target.x(), target.y(), target.z());
     for (long x = first(minX, target.x(), 128); x <= maxX; x += 128) {
       for (long z = first(minZ, target.z(), 128); z <= maxZ; z += 128) {

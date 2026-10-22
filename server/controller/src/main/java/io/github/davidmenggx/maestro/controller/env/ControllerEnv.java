@@ -3,10 +3,9 @@ package io.github.davidmenggx.maestro.controller.env;
 import java.util.Objects;
 
 /**
- * Every source of nondeterminism the controller is allowed to reach. {@code run} identifies this
- * controller process to the fleet, which keys region streams, profiles and request ids by it, so it
- * must differ between processes and is never 0. It is drawn from a source that does not repeat, not
- * from {@code rng}, whose seed may.
+ * Every source of nondeterminism the controller may reach. {@code run} identifies this process to
+ * the fleet, so it must differ between processes and is never 0. It does not come from {@code rng},
+ * whose seed may repeat.
  */
 public record ControllerEnv(
     Clock clock, Rng rng, Offload offload, Transport transport, Metrics metrics, long run) {

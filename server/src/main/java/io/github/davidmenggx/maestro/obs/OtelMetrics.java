@@ -15,12 +15,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Production {@link Metrics}: each name is one OpenTelemetry instrument, made when first used. Used
- * on the server thread only.
+ * Production {@link Metrics}: each name is one OpenTelemetry instrument, made on first use. Server
+ * thread only.
  *
- * <p>A histogram takes OpenTelemetry's default buckets, which start at 0, 5 and 10, unless its name
- * has buckets of its own below. Ticks late are counted one tick per bucket, so the SLO of 3 ticks
- * can be read from them, and sizes double from bucket to bucket.
+ * <p>Histograms use the default buckets unless their name has its own below. Ticks late get one
+ * bucket per tick, so the 3-tick SLO can be read off; sizes double per bucket.
  */
 public final class OtelMetrics implements Metrics {
 

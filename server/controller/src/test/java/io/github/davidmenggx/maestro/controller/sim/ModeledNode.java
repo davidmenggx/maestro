@@ -48,25 +48,19 @@ import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 
 /**
- * Model of a C++ compute node. It decodes real frames with the generated bindings, holds the region
- * state a stateful node would, and makes the same decisions about links, requests, cancels and
- * world frames as the real node, which the conformance fixtures check against it. Paths are
- * straight lines, because the controller and the wire are under test, not A*. An answer searched
- * while the chunk its start is in was air has cost {@link #SEARCHED_OVER_AIR}, which no real search
- * gives, so the harness can tell when the controller accepts one.
+ * Model of a C++ compute node. It decodes real frames and makes the same link, request, cancel and
+ * world-frame decisions as the real node, which the conformance fixtures check. Paths are straight
+ * lines, since the controller and the wire are under test, not A*. An answer searched over an air
+ * start chunk has cost {@link #SEARCHED_OVER_AIR}, so the harness can tell if the controller
+ * accepts one.
  *
- * <p>Workers start a request as soon as one is free and take a seeded time to serve it, so answers
- * can finish out of order and a burst waits behind the workers. With no workers, requests only wait
- * until {@link #serve} runs them. A request that waited past {@link #MAX_WAIT_STEPS} is dropped
- * unserved.
+ * <p>Workers take a seeded time per request, so answers can finish out of order. With no workers,
+ * requests wait until {@link #serve} runs them. A request waiting past {@link #MAX_WAIT_STEPS} is
+ * dropped unserved.
  *
- * <p>The area is kept per chunk, and a chunk the node has only ever held as air takes no memory.
- *
- * <p>It refuses exactly the world frames the real node's {@code WorldStore} refuses, and reacts the
- * same way: nothing in the frame is applied, all held state is dropped, and the link is dropped so
- * the node reconnects reporting nothing held. A correct controller never sends such a frame, so
- * each refusal is recorded in {@link #violations()} instead of thrown, and one run reports every
- * problem it hit.
+ * <p>It refuses the world frames the real node's {@code WorldStore} refuses: nothing is applied,
+ * all held state is dropped, and the link is dropped. A correct controller never sends one, so each
+ * refusal is recorded in {@link #violations()} instead of thrown.
  */
 public final class ModeledNode {
 
@@ -116,17 +110,10 @@ public final class ModeledNode {
   /** The node's own heartbeat interval, 1 s. The controller neither sets nor requests it. */
   static final int HEARTBEAT_STEPS = 20 * Simulation.STEPS_PER_TICK;
 
-  /**
-   * How long an answer or a cancel is kept for later copies of its request: 1 s, twice the time
-   * after which the controller gives up on a request, so a resend still finds its answer when the
-   * server's ticks run long.
-   */
+  /** How long an answer or a cancel is kept for later copies of its request: 1 s. */
   static final int RETENTION_STEPS = 20 * Simulation.STEPS_PER_TICK;
 
-  /**
-   * How long a request may wait for a worker: 1 s. The controller has given up on it by then, so it
-   * is dropped unserved, as a cancel drops it.
-   */
+  /** How long a request may wait for a worker: 1 s, then it is dropped unserved. */
   static final int MAX_WAIT_STEPS = 20 * Simulation.STEPS_PER_TICK;
 
   private enum State {
@@ -144,10 +131,7 @@ public final class ModeledNode {
       long generation,
       long admitted) {}
 
-  /**
-   * One chunk of the area, cells indexed {@code (dx * Chunks.SIZE + dz) * height + dy}, with its
-   * {@link AreaDigest#chunkHash} kept until a cell changes.
-   */
+  /** One chunk of the area, cells indexed {@code (dx * Chunks.SIZE + dz) * height + dy}. */
   private static final class Chunk {
 
     private final byte[] cells;
@@ -295,9 +279,8 @@ public final class ModeledNode {
   }
 
   /**
-   * The digest of a region's state, fed one chunk at a time in increasing index order, chunk {@code
-   * (cx, cz)} of the area having index {@code cx * (size / 16) + cz}. A chunk all air leaves the
-   * digest as an absent one does, so two equal states digest the same however they got there.
+   * The digest of a region's state, fed chunks in increasing index order, chunk {@code (cx, cz)}
+   * having index {@code cx * (size / 16) + cz}. An all-air chunk digests as an absent one.
    */
   static final class AreaDigest {
 
@@ -326,10 +309,7 @@ public final class ModeledNode {
       return digest.value();
     }
 
-    /**
-     * The hash of one chunk's cells and floors, or {@link #AIR} if they are all air. It reads eight
-     * bytes at a time, since checkpoints hash every chunk of a region.
-     */
+    /** The hash of one chunk's cells and floors, or {@link #AIR} if all air. */
     static long chunkHash(byte[] cells, byte[] floors) {
       for (int i = 0; i < cells.length; i++) {
         if (cells[i] != (byte) PathType.OPEN || floors[i] != 0) {
@@ -385,29 +365,21 @@ public final class ModeledNode {
     startWorkers();
   }
 
-  /**
-   * The network broke the link, or the controller closed it, and the transport has already told
-   * both sides. The node forgets what belonged to the link.
-   */
+  /** The link broke or the controller closed it. The node forgets what belonged to the link. */
   void connectionLost() {
     if (live) {
       forgetLink();
     }
   }
 
-  /**
-   * The controller closed a connection on {@code port}. If it was part of the link, the link goes.
-   */
+  /** The controller closed a connection on {@code port}. If it was in the link, the link goes. */
   void disconnected(Channel port) {
     if (live && joined(port)) {
       dropLink();
     }
   }
 
-  /**
-   * A new connection on {@code port}, with its first frame. It joins the link, replaces it, or is
-   * refused, as the comment on {@code Join} in the schema says.
-   */
+  /** A new connection on {@code port}, with its first frame, as the schema's `Join` describes. */
   void connect(Channel port, ByteBuffer first) {
     Join join = joinIn(port, first);
     if (join == null || join.run() == 0 || join.link() == 0) {
@@ -443,10 +415,7 @@ public final class ModeledNode {
     }
   }
 
-  /**
-   * Runs up to {@code count} waiting requests at once, oldest first, or every waiting request if
-   * {@code count} is 0. For a node with no workers.
-   */
+  /** Runs up to {@code count} waiting requests, oldest first, or all if 0. For no-worker nodes. */
   void serve(int count) {
     for (int served = 0; count == 0 || served < count; served++) {
       Job job = take();
@@ -521,10 +490,7 @@ public final class ModeledNode {
     host.linkDropped();
   }
 
-  /**
-   * Profiles and request ids belong to the link, since the next link may come from another
-   * controller run, so they are forgotten. The world state and the link's token stay.
-   */
+  /** Forgets profiles and request ids, which belong to the link. World state and token stay. */
   private void forgetLink() {
     live = false;
     worldJoined = false;
@@ -625,8 +591,7 @@ public final class ModeledNode {
   private void admit(PathRequest request, long frameRun, long frameRegion) {
     long requestId = request.requestId();
     if (!knownClasses.containsKey((short) request.classId())) {
-      // The profile has not arrived yet, so tell the controller immediately instead of
-      // letting the request time out. Nothing is recorded, so a later copy is served.
+      // Profile not here yet: answer at once, and record nothing so a later copy is served.
       host.send(Channel.REQUEST, unknownProfile(frameRun, requestId, request.classId()));
       return;
     }
@@ -663,10 +628,8 @@ public final class ModeledNode {
   }
 
   /**
-   * Records a request for this node's area whose search could read past it, worked out from the
-   * spec's rule: {@code ceil(maxPathLength) + floor(width + 1) + 1} blocks around the start on
-   * either horizontal axis. Positions on the wire are relative to the area, so its corner is the
-   * origin.
+   * Records a request whose search could read past the area: {@code ceil(maxPathLength) +
+   * floor(width + 1) + 1} blocks around the start on either horizontal axis.
    */
   private void checkReach(PathRequest request, long frameRun, long frameRegion) {
     if (!holdsArea || run != frameRun || regionId != frameRegion) {
@@ -692,10 +655,7 @@ public final class ModeledNode {
     }
   }
 
-  /**
-   * Drops a waiting request, and any copy that arrives later. One running or answered is left
-   * alone.
-   */
+  /** Drops a waiting request and any later copy. A running or answered one is left alone. */
   private void cancel(long requestId) {
     expire();
     if (settled.containsKey(requestId) || open.get(requestId) == State.RUNNING) {
@@ -709,9 +669,8 @@ public final class ModeledNode {
   }
 
   /**
-   * The oldest waiting request, now running, or null. A canceled one stays in the queue until
-   * reached and is skipped then, as the real node's queue does. One that waited past {@link
-   * #MAX_WAIT_STEPS} is dropped then, and later copies with it, as a cancel would.
+   * The oldest waiting request, now running, or null. Canceled and overdue ones are skipped when
+   * reached, as in the real node's queue.
    */
   private Job take() {
     while (waitingCount > 0) {
@@ -797,9 +756,8 @@ public final class ModeledNode {
   }
 
   /**
-   * The answer to a job against the area held now. A node holding no area, or another run's or
-   * region's, answers with no path at sequence 0, which the controller reads as a search that ran
-   * too early.
+   * The answer to a job against the area held now. With no area, or another run's or region's, it
+   * is no path at sequence 0, which the controller reads as a search that ran too early.
    */
   private byte[] answerBuilder(Job job) {
     boolean matches = holdsArea && run == job.run() && regionId == job.regionId();
@@ -866,7 +824,7 @@ public final class ModeledNode {
     int newSize = assignment.size();
     int newBaseY = assignment.minY();
     int newHeight = assignment.height();
-    // Wire positions are shorts, so the area must fit in one.
+    // Wire positions are shorts.
     if (newSize <= 0
         || newSize % Chunks.SIZE != 0
         || newSize > Short.MAX_VALUE
@@ -885,8 +843,7 @@ public final class ModeledNode {
       return "assigned an area of run " + assignment.run() + " on a link of run " + linkRun;
     }
     if (assignment.resume()) {
-      // Resuming keeps the held state, so it must be the stream the controller
-      // is continuing, at the position it holds.
+      // Resuming must continue the held stream at the held position.
       if (!hasState()
           || assignment.run() != run
           || assignment.regionId() != regionId
@@ -912,8 +869,7 @@ public final class ModeledNode {
           + lastSequence;
     }
 
-    // Everything is air until a chunk says otherwise, as vanilla reads a chunk the
-    // server does not hold.
+    // Air until a chunk arrives, as vanilla reads a chunk the server does not hold.
     holdsArea = true;
     run = assignment.run();
     regionId = assignment.regionId();
@@ -921,8 +877,7 @@ public final class ModeledNode {
     baseY = newBaseY;
     height = newHeight;
     chunks.clear();
-    // The controller's sequence continues across a reassignment, so the
-    // assignment says where it stands.
+    // The sequence continues across a reassignment.
     lastSequence = assignment.sequence();
     host.assigned(this, run, regionId, lastSequence);
     return null;
@@ -991,9 +946,9 @@ public final class ModeledNode {
   }
 
   /**
-   * The reason a chunk's runs break the contract, or null if they do not: one column per position,
-   * every column at full height in runs of at least one block, only per-block types, and no extra
-   * runs. A chunk with no columns is cleared and has no runs.
+   * The reason a chunk's runs break the contract, or null: one column per position, each at full
+   * height in runs of at least one block, only per-block types, no extra runs. A chunk with no
+   * columns is cleared.
    */
   private String checkChunkContract(ChunkSnapshot snapshot) {
     int columns = snapshot.runCountsLength();

@@ -30,15 +30,13 @@ import maestro.fbs.WorldMsg;
 
 /**
  * Tick-driven deterministic simulator. Time is a step counter: {@link #STEPS_PER_TICK} steps make
- * one tick, and every delay in the harness is in steps. Events at the same step run in insertion
- * order, so two runs of one seed are identical.
+ * one tick, and every delay is in steps. Events at the same step run in insertion order, so two
+ * runs of one seed are identical.
  *
- * <p>The server works for the first part of each tick and then idles until the next one. The
- * controller runs on the server thread, so what the network and the offload workers produce for it
- * waits until the server hands over control: when a tick's work starts and just before it ends. A
- * tick whose work runs past its time delays the next, which starts as soon as it ends, and a server
- * that falls far behind starts its schedule over, as Minecraft's does. The fleet keeps real time
- * throughout.
+ * <p>The server works for the first part of each tick, then idles. The controller runs on the
+ * server thread, so network and offload results reach it only when a tick's work starts and just
+ * before it ends. A tick running long delays the next; a server far behind restarts its schedule,
+ * as Minecraft does. The fleet keeps real time throughout.
  */
 public final class Simulation {
 
@@ -102,10 +100,7 @@ public final class Simulation {
   /** Highest world sequence each holder applied, per region stream. */
   private final Map<HeldStream, Long> appliedByHolder = new LinkedHashMap<>();
 
-  /**
-   * What each holder of a region must hold once it applies a sequence, from {@link #checkpoint}.
-   * Kept for the whole run, since every holder of the region reaches it.
-   */
+  /** What each holder of a region must hold at a sequence, from {@link #checkpoint}. */
   private final Map<Checkpoint, Long> checkpoints = new LinkedHashMap<>();
 
   private final List<String> streamViolations = new ArrayList<>();
@@ -190,19 +185,12 @@ public final class Simulation {
     return checkpointsCompared;
   }
 
-  /**
-   * From {@code tick} on, no encode fails. Fleet faults end before a run's quiet tail, and this
-   * ends the last fault that could hold a world frame back, so every live node can catch up before
-   * the run ends.
-   */
+  /** From {@code tick} on, no encode fails, so every live node can catch up before the run ends. */
   public void settleFrom(long tick) {
     settleFrom = tick;
   }
 
-  /**
-   * How many steps of each tick the server works before it ends the tick, between 1 and {@link
-   * #MAX_BUSY_STEPS}. The rest of the tick it idles, as a server under its tick budget does.
-   */
+  /** Steps of each tick the server works, between 1 and {@link #MAX_BUSY_STEPS}. It idles after. */
   public void serverBusySteps(int steps) {
     if (steps < 1 || steps > MAX_BUSY_STEPS) {
       throw new IllegalArgumentException("a tick's work takes 1 to " + MAX_BUSY_STEPS + " steps");
@@ -210,10 +198,7 @@ public final class Simulation {
     busySteps = steps;
   }
 
-  /**
-   * The chance that a tick's work runs past its time, taking between one and {@link
-   * #MAX_SLOW_TICKS} ticks' worth of steps.
-   */
+  /** The chance that a tick's work runs past its time, for up to {@link #MAX_SLOW_TICKS} ticks. */
   public void slowTicks(double chance) {
     if (!(chance >= 0 && chance <= 1)) {
       throw new IllegalArgumentException("a chance is in [0, 1]: " + chance);
@@ -221,10 +206,7 @@ public final class Simulation {
     slowTickChance = chance;
   }
 
-  /**
-   * Queues a transport callback for the controller thread. It runs at the next hand-over, after the
-   * callbacks queued before it.
-   */
+  /** Queues a transport callback for the controller thread, run at the next hand-over. */
   void toController(String name, Runnable action) {
     inbox.add(new Scheduled(now, order++, name, action));
   }
@@ -234,10 +216,7 @@ public final class Simulation {
     onRestart = Objects.requireNonNull(action, "action");
   }
 
-  /**
-   * A new controller process: a new run id, its own transport session and offload, and nothing left
-   * of the old process. What the old one had in flight is lost.
-   */
+  /** A new controller process: new run id, transport and offload. In-flight work is lost. */
   private void startController() {
     incarnation++;
     long run = 0;
@@ -255,11 +234,7 @@ public final class Simulation {
     failOpen.restarted(run, tick);
   }
 
-  /**
-   * Records that a fleet node applied {@code sequence} of a region's world stream. The sequence a
-   * holder applies only rises, however often the region is sent to it again, and a holder at a
-   * checkpoint holds what the world held when the checkpoint was taken.
-   */
+  /** Records that a fleet node applied {@code sequence} of a region's world stream. */
   void applied(ModeledNode node, long run, long region, long sequence) {
     HeldStream held = new HeldStream(node.id(), run, region);
     long highest = appliedByHolder.getOrDefault(held, 0L);
@@ -331,10 +306,8 @@ public final class Simulation {
   }
 
   /**
-   * Records a world frame the controller sent. A fresh assignment starts a stream over only where
-   * it stands, never behind a frame already sent to a holder of the region, so it has no gap a node
-   * could have needed. Judged when it is sent, since frames to different holders travel separate
-   * links and may arrive in any order.
+   * Records a world frame the controller sent. A fresh assignment must never start behind a frame
+   * already sent to a holder. Judged at send time, since holders' links deliver in any order.
    */
   void worldFrameSent(NodeId node, byte[] bytes) {
     WorldFrame frame = WorldFrame.getRootAsWorldFrame(ByteBuffer.wrap(bytes));
@@ -370,10 +343,7 @@ public final class Simulation {
     }
   }
 
-  /**
-   * The state a holder of the region must have once it applies {@code sequence}, which the
-   * controller produced last for it.
-   */
+  /** The state a holder of the region must have once it applies {@code sequence}. */
   void checkpoint(long run, long region, long sequence, long stateDigest) {
     checkpoints.put(new Checkpoint(run, region, sequence), stateDigest);
   }
@@ -421,10 +391,8 @@ public final class Simulation {
   }
 
   /**
-   * Runs {@code ticks} ticks. Each tick applies its faults, hands over to the controller, opens the
-   * tick and lets the workload change the world. The fleet works while the server does, then the
-   * controller is handed over to again and closes the tick, and the fleet works on until the tick's
-   * last step. {@code afterTick} runs last.
+   * Runs {@code ticks} ticks: faults, hand-over, tick open, workload, the server's work, hand-over,
+   * tick close, then the fleet works to the tick's last step. {@code afterTick} runs last.
    */
   public void run(WorldInput controller, Workload workload, long ticks, LongConsumer afterTick) {
     if (ticks < 1) {
@@ -457,13 +425,10 @@ public final class Simulation {
     }
   }
 
-  /**
-   * Steps the current tick's work takes: the server's usual share of a tick, more if the tick is
-   * slow, and at least what a stall in the fault plan holds it for.
-   */
+  /** Steps the current tick's work takes: the usual share, more if slow or stalled. */
   private long workSteps() {
     long work = busySteps;
-    // Drawn only when slow ticks are possible, so a run without them replays unchanged.
+    // Drawn only if slow ticks are possible, so other runs replay unchanged.
     if (slowTickChance > 0 && serverRng.nextDouble() < slowTickChance) {
       work = STEPS_PER_TICK + serverRng.nextInt((MAX_SLOW_TICKS - 1) * STEPS_PER_TICK + 1);
     }
@@ -500,10 +465,7 @@ public final class Simulation {
     controller.accept(event);
   }
 
-  /**
-   * The server thread hands over to the controller: queued transport callbacks run in arrival
-   * order, then offload work finished by now, in the order it finished.
-   */
+  /** Runs queued transport callbacks in arrival order, then offload work finished by now. */
   private void handOver() {
     for (int i = 0; i < inbox.size(); i++) {
       Scheduled next = inbox.get(i);
@@ -542,19 +504,13 @@ public final class Simulation {
   }
 
   /**
-   * Work runs at the first hand-over after it finishes, because production drains finished jobs
-   * there, and its completion runs with it. A result therefore never reaches the controller inside
-   * the call that submitted it, and work that reads controller state changed after it was submitted
-   * is caught. Work that throws, or that the fault plan fails, reports its failure at the same
-   * point. A job of a controller process that has since restarted reports nothing. The lane orders
-   * only a production worker's queue, which this model does not have.
+   * Work and its completion run at the first hand-over after it finishes, so a result never reaches
+   * the controller inside the submitting call. Failures report at the same point. Jobs of a
+   * restarted process report nothing. The lane is ignored.
    */
   private final class SimOffload implements Offload {
 
-    /**
-     * A frame encode takes tens of microseconds, so between two steps and a couple of milliseconds.
-     * At least one step, so work never finishes in the hand-over that submitted it.
-     */
+    /** Encodes take tens of microseconds. At least one step, so work never finishes at submit. */
     private static final int MIN_WORK_STEPS = 2;
 
     private static final int MAX_WORK_STEPS = 40;
@@ -570,7 +526,7 @@ public final class Simulation {
         String name, Lane lane, Supplier<T> work, Consumer<T> completion, Runnable failure) {
       long ready = now + MIN_WORK_STEPS + offloadRng.nextInt(MAX_WORK_STEPS - MIN_WORK_STEPS + 1);
       metrics.count("offload.submitted", 1, "job", name);
-      // Drawn only when failures are possible, so a plan without them replays unchanged.
+      // Drawn only if failures are possible, so other runs replay unchanged.
       if (tick < settleFrom
           && offloadFailureRate > 0
           && offloadRng.nextDouble() < offloadFailureRate) {

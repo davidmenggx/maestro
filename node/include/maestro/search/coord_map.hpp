@@ -16,9 +16,7 @@ template <typename V> class CoordMap {
 public:
   void clear() {
     Size = 0;
-    // A slot is live only if it holds the current generation, so bumping the
-    // generation empties every slot. When the counter wraps, old slots are
-    // wiped so they cannot match again.
+    // A slot is live only in the current generation. On wrap, slots are wiped.
     if (++Generation == 0) {
       for (Slot &S : Slots)
         S.Generation = 0;

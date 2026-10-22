@@ -39,23 +39,21 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Production {@link Transport}. A link is two TCP connections, one per ordered channel, whose
- * frames each carry a 4-byte little-endian length. Requests travel as UDP datagrams, each node's
- * from a socket of its own that outlives its links, so a datagram in flight when a link changes
- * still arrives. An answer comes back to the socket its request left from, which names its node
- * whatever address the node answers from, as a node behind NAT or with several addresses may.
+ * Production {@link Transport}. A link is two TCP connections, one per ordered channel, with 4-byte
+ * little-endian length-prefixed frames. Requests travel as UDP datagrams from a per-node socket
+ * that outlives its links. An answer is matched to its node by the socket it came back to, not by
+ * the address it came from.
  *
- * <p>Frames are sent without being copied, so a caller must not change one it has sent.
+ * <p>Frames are sent without copying, so a caller must not change one it has sent.
  *
- * <p>The network runs on one thread of its own. What it hears waits in a queue until {@link #drain}
- * hands it to the listener on the server thread, with the time it was heard.
+ * <p>The network runs on its own thread. What it hears is queued until {@link #drain} hands it to
+ * the listener on the server thread, with the time it was heard.
  */
 public final class NettyTransport implements Transport, AutoCloseable {
 
   /**
-   * Unsent bytes one connection may hold before its link is closed. A node whose connection stays
-   * up while it stops reading would otherwise grow them without bound. Once it reconnects, its
-   * stream resumes or its region is sent again.
+   * Unsent bytes one connection may hold before its link is closed, so a node that stops reading
+   * cannot grow them without bound.
    */
   public static final int MAX_PENDING_BYTES = 64 << 20;
 
@@ -73,9 +71,8 @@ public final class NettyTransport implements Transport, AutoCloseable {
       InetSocketAddress world, InetSocketAddress control, InetSocketAddress request) {}
 
   /**
-   * One connect attempt and, once both connections are up, the link it opened. {@code reported}
-   * says whether the attempt's outcome was queued for the listener, and {@code ended} whether its
-   * connections are closed or closing.
+   * One connect attempt and, once both connections are up, the link it opened. {@code reported}:
+   * its outcome was queued for the listener. {@code ended}: its connections are closed or closing.
    */
   private static final class Link {
     final NodeId node;
@@ -106,10 +103,9 @@ public final class NettyTransport implements Transport, AutoCloseable {
   private volatile Listener listener;
 
   /**
-   * Resolves every node's addresses and binds each node's request socket. {@code nanoTime} stamps
-   * each frame when it is heard, on the controller clock's scale, from the network thread. Throws
-   * {@link IllegalArgumentException} if a host does not resolve, or two nodes take requests at one
-   * address.
+   * Resolves every node's addresses and binds its request socket. {@code nanoTime} stamps each
+   * frame when heard, on the controller clock's scale. Throws {@link IllegalArgumentException} if a
+   * host does not resolve or two nodes take requests at one address.
    */
   public NettyTransport(
       Map<NodeId, NodeAddress> nodes, int maxPendingBytes, LongSupplier nanoTime) {
@@ -377,10 +373,7 @@ public final class NettyTransport implements Transport, AutoCloseable {
     }
   }
 
-  /**
-   * Answers on one node's request socket. A datagram from anything else that reaches it is dropped
-   * by the controller, which accepts only answers for its own run.
-   */
+  /** Answers on one node's request socket. The controller drops answers of another run. */
   private final class Datagrams extends SimpleChannelInboundHandler<DatagramPacket> {
 
     private final NodeId node;

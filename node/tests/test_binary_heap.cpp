@@ -33,8 +33,8 @@ TEST(BinaryHeap, PopsInCostOrder) {
 }
 
 TEST(BinaryHeap, BreaksTiesAsVanillaDoes) {
-  // The last entry moves to the root and sifts down only for a strictly lower
-  // child cost, so equal costs do not leave in insertion order.
+  // Sift-down moves only for a strictly lower child cost, so equal costs do
+  // not leave in insertion order.
   std::vector<Node> Nodes = withCosts({1.0F, 1.0F, 1.0F});
   BinaryHeap Heap(Nodes);
   for (NodeId Id = 0; Id < Nodes.size(); ++Id)

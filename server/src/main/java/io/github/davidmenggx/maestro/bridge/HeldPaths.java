@@ -9,11 +9,10 @@ import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
 
 /**
- * Hold-in-place paths: one node at the mob's own block, which a mob follows while its real path is
- * computed. A held path is never done and never advances, so the goal that asked for it keeps
- * running, and the navigation neither moves the mob nor judges it stuck. Releasing it ends it, as
- * when its request is dropped. Every path also knows the tick it was made on. Used on the server
- * thread only.
+ * Hold-in-place paths: one node at the mob's own block, followed while its real path is computed. A
+ * held path is never done and never advances, so the goal keeps running and the navigation neither
+ * moves the mob nor judges it stuck. Every path also records the tick it was made on. Server thread
+ * only.
  */
 public final class HeldPaths {
 
@@ -34,8 +33,8 @@ public final class HeldPaths {
   public static final long UNKNOWN = Long.MIN_VALUE;
 
   /**
-   * Ticks a path stays held at most. The controller settles every request within its tick budget,
-   * so a hold that outlives it lost its request somewhere, and ends on its own.
+   * Ticks a path stays held at most. A hold that outlives the controller's tick budget lost its
+   * request, and ends on its own.
    */
   static final int MAX_HOLD_TICKS = RequestTracker.MAX_TICKS_LATE + 2;
 

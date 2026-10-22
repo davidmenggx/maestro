@@ -25,10 +25,9 @@ import net.minecraft.world.level.block.state.properties.RailShape;
 import net.minecraft.world.level.block.state.properties.SlabType;
 
 /**
- * Seeded test terrain on a square of whole chunks: mild hills, terraces and pits, with obstacles
- * that give every per-block path type, and rooms and pens a mob has to leave through a door or a
- * gate. Each column is one vertical band, with no overhangs or caves. How many of each obstacle a
- * seed places is drawn too, so seeds range from bare to crowded.
+ * Seeded test terrain on a square of whole chunks: mild hills, terraces and pits, obstacles giving
+ * every per-block path type, and rooms and pens with a door or gate. Each column is one vertical
+ * band. Obstacle counts are drawn per seed, from bare to crowded.
  */
 final class Terrain {
 
@@ -208,8 +207,8 @@ final class Terrain {
   }
 
   /**
-   * Patches of mixed hazards, so some cells border more than one kind and the order in which
-   * vanilla scans neighbours decides their type.
+   * Patches of mixed hazards, so some cells border several kinds and vanilla's scan order decides
+   * their type.
    */
   private void hazards(int maxCount) {
     BlockState[] onGround = {

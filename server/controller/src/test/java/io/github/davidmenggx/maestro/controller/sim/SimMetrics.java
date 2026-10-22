@@ -7,10 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
-/**
- * Records what the controller reports so invariants can check it. Output order is the same on
- * repeated runs.
- */
+/** Records what the controller reports so invariants can check it. */
 public final class SimMetrics implements Metrics {
 
   private final Map<String, Long> counters = new TreeMap<>();
@@ -73,9 +70,8 @@ public final class SimMetrics implements Metrics {
   }
 
   /**
-   * Nearest-rank percentile of {@code values} plus {@code misses} samples larger than any of them,
-   * which rank as {@code +Infinity}. A miss is a sample that never got a value, such as a request
-   * that was never answered. Returns {@code NaN} when there are no samples at all.
+   * Nearest-rank percentile of {@code values} plus {@code misses} samples above any of them (a
+   * request never answered). Returns {@code NaN} when there are no samples.
    */
   public static double percentileWithMisses(List<Double> values, double quantile, long misses) {
     return rank(values, quantile, misses);

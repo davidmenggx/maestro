@@ -31,10 +31,9 @@ public abstract class PathFinderMixin {
   @Shadow private int maxVisitedNodes;
 
   /**
-   * Wraps the search itself, which runs after the evaluator's {@code prepare} has resolved the
-   * start node and before its {@code done}, so the mob's profile is read as the search sees it. A
-   * call the interceptor takes is answered by it, which runs vanilla's search only if it chooses,
-   * in full or on a share of its node budget, and may run it again after the call.
+   * Wraps the search, which runs between the evaluator's {@code prepare} and {@code done}, so the
+   * profile is read as the search sees it. A call the interceptor takes is answered by it, which
+   * runs vanilla's search only if it chooses.
    */
   @WrapOperation(
       method =

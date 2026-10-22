@@ -2,14 +2,14 @@ include "common.fbs";
 
 namespace maestro.fbs;
 
-// Land-mob (`WalkNodeEvaluator`) pathfinding profile, referenced by `class_id`
-// in each request. These inputs change at runtime per mob, so a profile
-// is interned by content, and `class_id` names that content, not a mob type. A
-// node is sent a profile the first time a request names one it does not hold.
-// `width` and `height` are positive and give an evaluator footprint
-// (`floor(width + 1)^2 * floor(height + 1)` cells, as `NodeEvaluator.prepare`
-// sizes it) of at most 512, and `max_up_step` is in [0, 16]. A larger mob's
-// search stays on the server, since a search's cost grows with its footprint.
+// `WalkNodeEvaluator` profile named by `class_id` in each request. These inputs
+// change per mob at runtime, so profiles are interned by content and
+// `class_id` names content, not a mob type. A node gets a profile the first
+// time a request names one it lacks.
+// `width` and `height` are positive and give a footprint of
+// `floor(width + 1)^2 * floor(height + 1)` cells (as `NodeEvaluator.prepare`)
+// of at most 512; larger searches stay on the server. `max_up_step` is in
+// [0, 16].
 table MobClass {
   class_id:ushort;
   width:float;

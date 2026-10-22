@@ -49,8 +49,7 @@ public final class MaestroServer implements DedicatedServerModInitializer {
             fleet.tickStarted();
           }
         });
-    // What the fleet hears is handed over before the counter advances, so it counts toward the
-    // tick that just ran, not the next one.
+    // Handed over before the counter advances, so it counts toward the tick that just ran.
     ServerTickEvents.END_SERVER_TICK.register(
         server -> {
           Fleet fleet = Fleet.active();

@@ -62,8 +62,8 @@ TEST(PathTypes, OpenIsPromotedByTheCellBelow) {
             PathType::DAMAGE_CAUTIOUS);
   EXPECT_EQ(standingOn(Cell{PathType::TRAPDOOR, 3}),
             PathType::ON_TOP_OF_TRAPDOOR);
-  // Any other cell under an open cell makes it walkable, unless a neighbour
-  // is a hazard.
+  // Any cell under an open cell makes it walkable unless a neighbour is a
+  // hazard.
   EXPECT_EQ(standingOn(Fence), PathType::WALKABLE);
   EXPECT_EQ(standingOn(Cell{PathType::LEAVES, 16}), PathType::WALKABLE);
 }
@@ -125,8 +125,7 @@ TEST(PathTypes, TheFirstHazardInScanOrderDecides) {
   WestCactus.set(9, 1, 8, Water);
   EXPECT_EQ(staticAt(WestCactus, 8, 1, 8), PathType::DAMAGING_IN_NEIGHBOR);
 
-  // A western hazard in the layer above still comes before an eastern one in
-  // the cell's own layer.
+  // A western hazard above still precedes an eastern one in the cell's layer.
   DenseWorld WestAbove = ground();
   WestAbove.set(7, 2, 8, Water);
   WestAbove.set(9, 1, 8, Cactus);

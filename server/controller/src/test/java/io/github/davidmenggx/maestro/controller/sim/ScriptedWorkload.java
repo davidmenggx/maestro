@@ -10,20 +10,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-/**
- * Replays a fixed list of events, applying the world changes they describe. A recorded server trace
- * will have this form. Focused tests use it when a random workload would not reliably produce the
- * situation under test.
- */
+/** Replays a fixed list of events, for tests where a random workload would not reach the case. */
 public final class ScriptedWorkload implements Workload {
 
   // Looked up by tick and never iterated, so hash order cannot affect a run.
   private final Map<Long, List<WorldEvent>> byTick = new HashMap<>();
   private final SimWorld world;
 
-  /**
-   * The mobs and players the script has placed and not yet removed, in the order it placed them.
-   */
+  /** The mobs and players placed and not yet removed, in placement order. */
   private final Map<Integer, Pos> mobs = new LinkedHashMap<>();
 
   private final Map<Integer, Pos> players = new LinkedHashMap<>();

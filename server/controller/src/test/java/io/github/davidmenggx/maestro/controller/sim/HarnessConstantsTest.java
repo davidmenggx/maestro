@@ -8,17 +8,12 @@ import io.github.davidmenggx.maestro.controller.core.RequestTracker;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import org.junit.jupiter.api.Test;
 
-/**
- * The one place harness constants are checked against each other. Several are correct only relative
- * to another constant. If they drift apart, nothing fails: the sweep still passes but no longer
- * reaches the case it was sized for. Nothing here runs a simulation.
- */
+/** Checks harness constants against each other; drift silently stops a sweep reaching its case. */
 class HarnessConstantsTest {
 
   @Test
   void anEdgeLatencyLeavesNoSlackForOneRequest() {
-    // At the edge, one request served at the highest cost is answered on the tick's
-    // last step the controller still reads, and one step more is a tick late.
+    // At the edge, a top-cost request is answered on the last step read; one more is late.
     for (int cost : new int[] {1, 125, 500, 997}) {
       int edge = FaultPlan.edgeLatency(cost);
       assertTrue(2 * edge + cost <= Simulation.STEPS_PER_TICK - 1, "cost " + cost);
@@ -82,8 +77,7 @@ class HarnessConstantsTest {
 
   @Test
   void answersSentBeforeANodeStopsAreHeardWithinTheStrayWindow() {
-    // The slowest datagram arrives within a tick, and waits at most a tick more to be
-    // handed over.
+    // The slowest datagram arrives within a tick and waits at most a tick more.
     int slowest = FaultPlan.MAX_MIN_LATENCY_STEPS + FaultPlan.MAX_LATENCY_SPAN_STEPS;
     assertTrue(slowest < Simulation.STEPS_PER_TICK, "a datagram can take more than a tick");
     assertTrue(FailOpenCheck.STRAY_ANSWER_TICKS >= 2);
@@ -91,8 +85,7 @@ class HarnessConstantsTest {
 
   @Test
   void theSloIsTighterThanTheAdmissionBound() {
-    // Answers later than the admission bound are abandoned, so an SLO at or past it
-    // could never fail.
+    // Answers later than the admission bound are abandoned, so an SLO at or past it cannot fail.
     assertTrue(
         SimRun.TICK_BUDGET < RequestTracker.MAX_TICKS_LATE,
         "the SLO budget is no tighter than what admission control already guarantees");

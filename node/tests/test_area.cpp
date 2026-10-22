@@ -42,13 +42,12 @@ TEST(Column, AnEditInsideARunSplitsIt) {
 
 TEST(Column, AnEditMatchingANeighbourMergesWithIt) {
   const Column Ground = column({{4, Stone}, {48, Air}});
-  // Raising the ground by one block extends the stone run instead of adding a
-  // new run.
+  // Raising the ground extends the stone run.
   const auto Raised = Ground.with(4, Stone);
   const std::vector<maestro::world::Run> Expected = {{5, Stone}, {48, Air}};
   EXPECT_TRUE(std::ranges::equal(Raised->runs(), Expected));
 
-  // Clearing the top stone block merges it into the air run above.
+  // Clearing the top stone merges it into the air run above.
   const auto Lowered = Ground.with(3, Air);
   const std::vector<maestro::world::Run> LoweredExpected = {{3, Stone},
                                                             {48, Air}};
@@ -115,8 +114,7 @@ TEST(Area, ANewVersionSharesWhatItDidNotChange) {
   EXPECT_EQ(After->sequence(), Before->sequence() + 1);
   EXPECT_EQ(After->at(3, 0, 4), Water);
   EXPECT_EQ(Before->at(3, 0, 4), Air);
-  // The edited column is new. Its neighbour in the same chunk and all
-  // columns of the other chunks are shared.
+  // Only the edited column is new.
   EXPECT_NE(After->column(3, 4), Before->column(3, 4));
   EXPECT_EQ(After->column(3, 5), Before->column(3, 5));
   EXPECT_EQ(After->column(20, 20), Before->column(20, 20));
@@ -146,8 +144,7 @@ TEST(Area, ANewVersionKeepsItsStreamAndTakesTheFramesSequence) {
 }
 
 TEST(Area, AnEditSharesTheRestOfItsRowAndEveryOtherRow) {
-  // Three chunks per side, so the edited chunk has neighbours in its own row
-  // and in other rows.
+  // Three chunks per side, so neighbours exist in the same and other rows.
   maestro::test::DenseWorld World(48, -16, 48);
   for (int X = 0; X < 48; ++X)
     for (int Z = 0; Z < 48; ++Z)
@@ -158,7 +155,6 @@ TEST(Area, AnEditSharesTheRestOfItsRowAndEveryOtherRow) {
   const auto After = Before->withCells({&Edit, 1}, Before->sequence() + 1);
 
   EXPECT_NE(After->column(20, 20), Before->column(20, 20));
-  // Same chunk, same row of chunks, and another row of chunks.
   EXPECT_EQ(After->column(21, 20), Before->column(21, 20));
   EXPECT_EQ(After->column(20, 40), Before->column(20, 40));
   EXPECT_EQ(After->column(40, 20), Before->column(40, 20));
@@ -203,8 +199,7 @@ TEST(Area, ClearingAChunkLeavesTheOthers) {
 }
 
 TEST(Area, TheLastEditToACellWinsHoweverTheEditsInterleave) {
-  // Few cells, so one delta edits most columns and cells several times, in
-  // between edits to other chunks and rows.
+  // Few cells, so one delta edits most columns and cells repeatedly.
   constexpr int Size = 48;
   constexpr int MinY = -8;
   constexpr int Height = 16;
@@ -292,8 +287,7 @@ TEST(Area, EditsAcrossChunksEachLandInTheirOwn) {
   maestro::test::DenseWorld World(48, -16, 48);
   World.fill(0, -16, 0, 47, -1, 47, Stone);
   const auto Before = World.load();
-  // Interleaved across chunks of the same row and of other rows, at chunk
-  // edges.
+  // Interleaved across chunks and rows, at chunk edges.
   const std::vector<CellEdit> Edits = {{15, 0, 15, Water}, {16, 0, 15, Stone},
                                        {15, 0, 16, Stone}, {47, 0, 47, Water},
                                        {16, 0, 16, Water}, {0, 0, 47, Stone}};
@@ -304,7 +298,7 @@ TEST(Area, EditsAcrossChunksEachLandInTheirOwn) {
     EXPECT_EQ(After->at(Edit.X, Edit.Y + 1, Edit.Z), Air);
     EXPECT_EQ(Before->at(Edit.X, Edit.Y, Edit.Z), Air);
   }
-  // Untouched neighbours in the edited chunks, and an untouched chunk.
+  // Untouched neighbours and chunks are shared.
   EXPECT_EQ(After->column(14, 15), Before->column(14, 15));
   EXPECT_EQ(After->column(17, 16), Before->column(17, 16));
   EXPECT_EQ(After->column(40, 8), Before->column(40, 8));

@@ -41,58 +41,50 @@ import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 
 /**
- * Every frame payload the controller puts on the wire, and every reply it reads, encoded and
- * decoded with the generated bindings, so the wire format is in one place. Positions are given in
- * world coordinates with the corner {@code (originX, originZ)} of the receiving node's area, and
- * leave as the wire's relative positions.
+ * Every frame payload the controller sends and every reply it reads, using the generated bindings.
+ * Positions are given in world coordinates and leave relative to the corner {@code (originX,
+ * originZ)} of the receiving node's area.
  *
- * <p>The generated setters take an {@code int} and cast it to the field's width without checking,
- * so any value not already range-checked at the boundary must go through {@link #int16} or {@link
- * #uint16} first.
+ * <p>Generated setters cast an {@code int} to the field width unchecked, so values not
+ * range-checked at the boundary go through {@link #int16} or {@link #uint16}.
  *
- * <p>Each thread encodes with one builder, cleared before every frame, so its buffer grows to the
- * largest frame once instead of being allocated per frame. Only the finished bytes are copied out.
- * An encoder must not call another while it builds.
+ * <p>Each thread reuses one builder, cleared per frame, so its buffer grows once. An encoder must
+ * not call another while it builds.
  */
 public final class Frames {
 
   private static final ThreadLocal<FlatBufferBuilder> BUILDER =
       ThreadLocal.withInitial(() -> new FlatBufferBuilder(4096));
 
-  /** The buffers a chunk is read through, reused by each thread from chunk to chunk. */
+  /** Buffers a chunk is read through, reused per thread. */
   private static final ThreadLocal<RunBuilder> CHUNK_SCRATCH =
       ThreadLocal.withInitial(RunBuilder::new);
 
   /**
    * Largest payload the node reads from its world and control streams. Must match the node's {@code
-   * net::MaxPayloadSize}. A chunk at the tallest world Minecraft allows, with every block in a run
-   * of its own, is about 4 MiB.
+   * net::MaxPayloadSize}. A worst-case chunk is about 4 MiB.
    */
   public static final int MAX_FRAME_BYTES = 8 << 20;
 
-  /**
-   * Largest UDP payload over IPv4. An answer always fits: its path is shorter than {@link
-   * WorldEvent.Search#MAX_PATH_LENGTH} blocks, so it has at most 2049 nodes of 8 bytes.
-   */
+  /** Largest UDP payload over IPv4. An answer fits: its path has at most 2049 nodes of 8 bytes. */
   public static final int MAX_DATAGRAM_BYTES = 65_507;
 
   /**
-   * Largest request frame. A request frame is one UDP datagram, and this fits the 1232 bytes of
-   * payload that IPv6's minimum MTU guarantees, so a frame is never fragmented and one lost
-   * fragment never loses a whole batch.
+   * Largest request frame: the 1232 payload bytes IPv6's minimum MTU guarantees, so a frame is
+   * never fragmented.
    */
   public static final int MAX_REQUEST_FRAME_BYTES = 1200;
 
   /**
-   * Requests in one frame. Every request is encoded with all its fields, so they share one layout
-   * and a full frame fits {@link #MAX_REQUEST_FRAME_BYTES} whatever the values.
+   * Requests in one frame. All fields are always encoded, so a full frame fits {@link
+   * #MAX_REQUEST_FRAME_BYTES} whatever the values.
    */
   public static final int MAX_REQUESTS_PER_FRAME = 24;
 
-  /** Request ids in one cancel frame. A full frame fits {@link #MAX_REQUEST_FRAME_BYTES}. */
+  /** Request ids in one cancel frame, fitting {@link #MAX_REQUEST_FRAME_BYTES}. */
   public static final int MAX_CANCELS_PER_FRAME = 128;
 
-  /** Block changes in one delta. A delta of this many is 512 KiB, well below the frame limit. */
+  /** Block changes in one delta, 512 KiB at most. */
   public static final int MAX_CELLS_PER_DELTA = 1 << 16;
 
   private Frames() {}
@@ -105,8 +97,8 @@ public final class Frames {
   static final int COLUMNS_PER_CHUNK = Chunks.SIZE * Chunks.SIZE;
 
   /**
-   * One chunk's columns, run-length encoded. Each run is packed into one int as {@code (length <<
-   * 16) | (floor << 8) | pathType}, which avoids allocating an object per run.
+   * One chunk's columns, run-length encoded. A run packs into one int as {@code (length << 16) |
+   * (floor << 8) | pathType}.
    */
   public static final class ChunkRuns {
 
@@ -116,11 +108,9 @@ public final class Frames {
   }
 
   /**
-   * Reads one chunk from the world, or returns null if the source cannot read it now ({@link
-   * WorldSource#readable}). The world can only be read on the main thread, so this is separate from
-   * the encoding, which runs on another thread. A section the source reports as uniform is not read
-   * block by block, so the cost follows terrain complexity, not world height, and a section the
-   * source can read whole is read in one call. Only the returned runs are allocated per chunk.
+   * Reads one chunk on the main thread, or returns null if the source cannot read it now ({@link
+   * WorldSource#readable}). Uniform sections are not read block by block, so cost follows terrain
+   * complexity, not world height.
    */
   public static ChunkRuns readChunk(WorldSource world, int chunkX, int chunkZ) {
     if (!world.readable(chunkX, chunkZ)) {
@@ -185,9 +175,9 @@ public final class Frames {
   }
 
   /**
-   * Run-length encodes a chunk read a section at a time, from the bottom up. Each column keeps its
-   * open run. Runs are kept in the order they close and put in column order at the end, which keeps
-   * each column's runs in height order. Reused from chunk to chunk after {@link #reset}.
+   * Run-length encodes a chunk read a section at a time, bottom up. Each column keeps an open run;
+   * closed runs are put in column order at the end, keeping each column in height order. Reused
+   * after {@link #reset}.
    */
   private static final class RunBuilder {
 
@@ -196,8 +186,7 @@ public final class Frames {
     private final int[] openCell = new int[COLUMNS_PER_CHUNK];
     private final int[] openLength = new int[COLUMNS_PER_CHUNK];
     private final int[] next = new int[COLUMNS_PER_CHUNK];
-    // Each closed run as `(column << 32) | packed run`. Flat terrain has two runs per column, so
-    // most chunks fit the first size.
+    // Closed runs as `(column << 32) | packed run`. Flat terrain has two per column.
     private long[] closed = new long[COLUMNS_PER_CHUNK * 2];
     private int closedCount;
 
@@ -316,8 +305,8 @@ public final class Frames {
   }
 
   /**
-   * The first frame on a link's control connection. {@code link} counts the controller's attempts
-   * to connect to the node, so the node pairs the two connections of one attempt.
+   * The first frame on a link's control connection. {@code link} counts connect attempts, so the
+   * node pairs the two connections of one attempt.
    */
   public static byte[] joinControl(long run, long link) {
     FlatBufferBuilder builder = builder();
@@ -335,7 +324,7 @@ public final class Frames {
 
   /**
    * At most {@link #MAX_REQUESTS_PER_FRAME} requests, so the frame fits one datagram. {@code run}
-   * and {@code regionId} name the link and the area the requests are for.
+   * and {@code regionId} name the link and area.
    */
   public static byte[] requests(
       long run, int regionId, List<Request> batch, int originX, int originZ) {
@@ -344,8 +333,8 @@ public final class Frames {
           "a request frame carries at most " + MAX_REQUESTS_PER_FRAME);
     }
     FlatBufferBuilder builder = builder();
-    // A field equal to its default is left out unless forced, and requests leaving out different
-    // fields would each need their own layout, which a full frame has no room for.
+    // Defaults are omitted unless forced, and requests omitting different fields would need
+    // different layouts.
     builder.forceDefaults(true);
     int[] offsets = new int[batch.size()];
     for (int i = 0; i < batch.size(); i++) {
@@ -374,9 +363,8 @@ public final class Frames {
   }
 
   /**
-   * Requests the controller no longer wants, at most {@link #MAX_CANCELS_PER_FRAME}, so the frame
-   * fits one datagram. {@code run} and {@code regionId} name the link and the area, as for {@link
-   * #requests}.
+   * Requests no longer wanted, at most {@link #MAX_CANCELS_PER_FRAME}. {@code run} and {@code
+   * regionId} as for {@link #requests}.
    */
   public static byte[] cancels(long run, int regionId, List<Long> requestIds) {
     if (requestIds.size() > MAX_CANCELS_PER_FRAME) {
@@ -395,9 +383,9 @@ public final class Frames {
   }
 
   /**
-   * {@code size} is the side of the square area, a multiple of {@link Chunks#SIZE}. Every position
-   * in the area must fit the wire's 16 bits, as the node requires. {@code sequence} is where the
-   * region's stream stands, so its next frame is {@code sequence + 1}.
+   * {@code size} is the side of the square area, a multiple of {@link Chunks#SIZE}; every position
+   * in it must fit the wire's 16 bits. {@code sequence} is where the region's stream stands, so the
+   * next frame is {@code sequence + 1}.
    */
   public static byte[] assignment(
       long run, int regionId, int size, long sequence, boolean resume, WorldSource world) {
@@ -451,8 +439,7 @@ public final class Frames {
   }
 
   /**
-   * A node's answer. The controller never sends one, but recorded vanilla answers are stored in
-   * this form so they compare directly with what a node returns.
+   * A node's answer. Only for storing recorded vanilla answers in the node's form for comparison.
    */
   public static byte[] response(
       long run,
@@ -489,9 +476,8 @@ public final class Frames {
   }
 
   /**
-   * The reply in a response frame of controller run {@code run}, {@link Reply.Foreign} if it is
-   * another run's, or null for a body this controller does not know. Throws if the frame is
-   * malformed, as a datagram cut short or from something that is not a node may be.
+   * The reply in a response frame of run {@code run}, {@link Reply.Foreign} if another run's, or
+   * null for an unknown body. Throws on a malformed frame.
    */
   public static Reply readResponse(ByteBuffer frame, long run) {
     ResponseFrame response = ResponseFrame.getRootAsResponseFrame(frame);
@@ -501,7 +487,7 @@ public final class Frames {
     switch (response.bodyType()) {
       case ResponseMsg.PathResponse -> {
         PathResponse body = (PathResponse) response.body(new PathResponse());
-        // Not presized: the length is read from the datagram and may be garbage.
+        // Not presized: the length comes from the datagram and may be garbage.
         List<WorldOutput.Node> nodes = new ArrayList<>();
         PathNode scratch = new PathNode();
         for (int i = 0; i < body.nodesLength(); i++) {
@@ -549,8 +535,8 @@ public final class Frames {
   }
 
   /**
-   * Whether {@code pos} can be encoded relative to the corner {@code (originX, originZ)}. Encoding
-   * a position that cannot throws, and would throw again on every retry.
+   * Whether {@code pos} can be encoded relative to {@code (originX, originZ)}. Encoding one that
+   * cannot throws on every retry.
    */
   public static boolean fits(Pos pos, int originX, int originZ) {
     return fitsInt16((long) pos.x() - originX)
@@ -568,8 +554,8 @@ public final class Frames {
   }
 
   /**
-   * {@code packed}, a {@link Cells#pack packed} cell, checked. Throws if the cell is not one the
-   * wire carries, which a packed run could not show: a wide floor would spill into the run length.
+   * {@code packed}, a {@link Cells#pack packed} cell, checked. Throws for a cell the wire cannot
+   * carry, such as a floor that would spill into the run length.
    */
   private static int cell(int packed) {
     int floor = Cells.floorOf(packed);

@@ -9,9 +9,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The regions of one controller run and the nodes holding them. Ids come from a counter, so none is
- * reused. Regions never overlap. A node holds at most one region, because it holds one area, and a
- * region may have several holders, which are all sent its one world stream and share its requests.
+ * The regions of one run and the nodes holding them. Ids come from a counter and are never reused;
+ * regions never overlap. A node holds at most one region, and a region may have several holders,
+ * all sent its one world stream and sharing its requests.
  */
 public final class RegionMap {
 

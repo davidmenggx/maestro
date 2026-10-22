@@ -34,14 +34,10 @@ struct ServerOptions {
   serve::NodeOptions Node;
 };
 
-/// The network side of a compute node: two TCP acceptors, one for the world
-/// stream and one for control, a UDP socket for requests, the heartbeat
-/// timer, and the search threads, all reporting to a `serve::NodeCore`, which
-/// makes every decision. Each answer goes to the address its request came
-/// from.
-///
-/// Everything but the searches runs on the thread running the `io_context`,
-/// including applying world frames.
+/// The network side of a compute node: TCP acceptors for the world and control
+/// streams, a UDP socket for requests, the heartbeat timer and the search
+/// threads, all driving a `serve::NodeCore`. Everything but the searches runs
+/// on the `io_context` thread.
 class Server : private serve::NodeCore::Output {
 public:
   /// Binds every socket and starts the workers. Throws `std::system_error` if

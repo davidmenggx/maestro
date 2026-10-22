@@ -73,8 +73,7 @@ TEST(Framing, ALengthAtTheCapIsAccepted) {
 TEST(Framing, ALengthPastTheCapIsRefused) {
   EXPECT_EQ(peekHeader(header(MaxPayloadSize + 1)).Status,
             HeaderStatus::TooLarge);
-  // The largest length a header can declare, which a stream that lost its
-  // framing tends to produce.
+  // The largest declarable length, as a stream that lost framing tends to give.
   const auto Peeked = peekHeader(header(UINT32_MAX));
   EXPECT_EQ(Peeked.Status, HeaderStatus::TooLarge);
   EXPECT_EQ(Peeked.Length, UINT32_MAX);

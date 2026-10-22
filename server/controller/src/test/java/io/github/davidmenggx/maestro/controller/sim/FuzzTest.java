@@ -15,31 +15,19 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
- * Seed sweeps. The suite grows with {@code -Dmaestro.dst.runs}, not by adding cases, and a failing
- * seed is replayed with `make fuzz SEED=...`.
- *
- * <p>Each sweep has a tier in addition to the {@code fuzz} tag, and each tier runs as its own task
- * and CI job.
+ * Seed sweeps, each tier its own task and CI job. The suite grows with {@code -Dmaestro.dst.runs},
+ * and a failing seed is replayed with `make fuzz SEED=...`.
  */
 @Tag("fuzz")
 class FuzzTest {
 
-  /**
-   * One run per seed with every setting fixed. The seed changes only the event ordering and network
-   * behavior. Cheapest per seed, so this tier sweeps the most seeds.
-   */
+  /** One run per seed with every setting fixed. Cheapest, so it sweeps the most seeds. */
   static final String SHALLOW = "shallow";
 
-  /**
-   * Several runs per seed, or a run whose whole configuration is drawn from the seed. Costs a
-   * multiple of a shallow seed, so it sweeps proportionally fewer seeds.
-   */
+  /** Several runs per seed, or a run drawn wholly from the seed. Sweeps fewer seeds. */
   static final String DEEP = "deep";
 
-  /**
-   * Checks what the sampler reaches, not any one run, so its size is fixed and it neither shards
-   * nor grows with the run count.
-   */
+  /** Checks what the sampler reaches, so its size is fixed. */
   static final String COVERAGE = "coverage";
 
   private static final long TICKS = 150;
@@ -51,8 +39,7 @@ class FuzzTest {
   @Test
   @Tag(SHALLOW)
   void everySeedProducesItsOwnRun() {
-    // Catches the seed being ignored somewhere. Two runs matching by chance would
-    // need a 64-bit digest collision.
+    // Catches the seed being ignored somewhere.
     Set<Long> digests = new LinkedHashSet<>();
     for (int i = 0; i < SimRun.runCount(); i++) {
       digests.add(
@@ -139,8 +126,7 @@ class FuzzTest {
       scenarios.add(run.scenario);
       answered += run.out.answered();
 
-      // The SLO is checked only when the run fits the fleet's capacity and nothing
-      // in its fault plan can delay or lose a request.
+      // Held to the SLO only when the load fits and nothing can delay or lose a request.
       assertEquals(List.of(), run.violations(), run.describe());
       assertEquals(
           run.sim.digest().value(), SimRun.fuzzed(seed).go().sim.digest().value(), run.describe());
@@ -189,9 +175,7 @@ class FuzzTest {
     long checkpoints = 0;
     long deferredReads = 0;
 
-    // This checks what the sampler reaches, not any one run, so it uses its own size
-    // regardless of `maestro.dst.runs`. A few seeds cannot reach every outcome, and a
-    // very large sweep only repeats the result.
+    // Uses its own size: a few seeds miss outcomes, and a very large sweep only repeats them.
     int seeds = Math.clamp(SimRun.runCount(), MIN_COVERAGE_SEEDS, MAX_COVERAGE_SEEDS);
     for (int i = 0; i < seeds; i++) {
       SimRun run = SimRun.fuzzed(SimRun.baseSeed() + i).go();

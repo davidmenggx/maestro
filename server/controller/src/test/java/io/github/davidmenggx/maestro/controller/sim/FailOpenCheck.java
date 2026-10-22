@@ -11,20 +11,16 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Checks that a node which cannot answer stops being sent requests, so the mobs it would serve are
- * searched on the server instead of waiting on it again and again. This is judged from what the
- * controller puts on the wire, against when the node truly could not answer, which the controller
- * cannot see.
+ * Checks that a node which cannot answer stops being sent requests, so its mobs are searched on the
+ * server instead. Judged from what the controller puts on the wire, against when the node truly
+ * could not answer.
  *
- * <p>An episode is one stretch in which a node cannot answer, within one controller run. Once the
- * answers that were already on their way have arrived, the controller hears nothing more from the
- * node's request path. It may send the requests that show the path is quiet, {@link
- * NodeHealth#QUIET_REQUESTS} first sent within {@link NodeHealth#QUIET_WINDOW_TICKS} and the oldest
- * of them {@link NodeHealth#QUIET_TICKS} old, and the requests it admitted before it noticed, whose
- * encodes may take a few retries to leave. After that it may send only probes, each after a failed
- * probe and a backoff that doubles each time. A link the controller hears go down takes the
- * requests sent on it with it, and the node forgets them, so unless the controller had noticed by
- * then, only the requests sent since show anything.
+ * <p>An episode is one stretch in which a node cannot answer, within one controller run. Once
+ * earlier answers have arrived, the controller may send only the requests that show the path is
+ * quiet ({@link NodeHealth#QUIET_REQUESTS} within {@link NodeHealth#QUIET_WINDOW_TICKS}, the oldest
+ * {@link NodeHealth#QUIET_TICKS} old), those admitted before it noticed, and then probes, each
+ * after a failed probe and a doubling backoff. A link heard going down takes its requests with it,
+ * so only requests sent since show anything.
  */
 final class FailOpenCheck {
 
@@ -36,10 +32,7 @@ final class FailOpenCheck {
 
   private record Sent(long run, NodeId node, long requestId) {}
 
-  /**
-   * Ticks at which requests were first sent to the node during the episode, and at which the
-   * controller heard the node's link go down.
-   */
+  /** Ticks at which requests were first sent to the node, and at which its link was heard down. */
   private static final class Episode {
     final long run;
     final long start;
@@ -69,10 +62,7 @@ final class FailOpenCheck {
     }
   }
 
-  /**
-   * A new controller process started, which knows nothing of the old one's view of the fleet: each
-   * episode still open starts over for it.
-   */
+  /** A new controller process started; each open episode starts over for it. */
   void restarted(long run, long tick) {
     for (Map.Entry<NodeId, Episode> entry : List.copyOf(open.entrySet())) {
       judge(entry.getKey(), entry.getValue(), tick);
@@ -114,9 +104,8 @@ final class FailOpenCheck {
   }
 
   /**
-   * Probes a controller may send in {@code ticks} ticks: the first at any time, and each later one
-   * once the last has failed and a backoff twice the last has passed, less the ticks the last may
-   * have taken to leave.
+   * Probes a controller may send in {@code ticks} ticks: the first at any time, each later one
+   * after the last failed and a backoff twice the last has passed, less its encode delay.
    */
   static long probesAllowed(long ticks) {
     if (ticks < 0) {
@@ -137,9 +126,7 @@ final class FailOpenCheck {
 
   /**
    * The tick by which the controller noticed a quiet path from requests first sent at {@code
-   * blind}, or {@link Long#MAX_VALUE} if it could not have: the first ones close enough together
-   * that it kept all of them, once the oldest has gone unanswered long enough and those admitted
-   * before have had their encode tries.
+   * blind}, or {@link Long#MAX_VALUE} if it could not have.
    */
   static long noticed(List<Long> blind) {
     int last = NodeHealth.QUIET_REQUESTS - 1;

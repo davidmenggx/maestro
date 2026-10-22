@@ -178,8 +178,7 @@ TEST(WorldStore, IdenticalColumnsInAChunkShareOneCopy) {
 TEST(WorldStore, TheFirstFrameFollowsTheAssignment) {
   const DenseWorld World = flatWorld();
   WorldStore Store;
-  // The controller's sequence continues across a reassignment, so the
-  // assignment says where the stream stands.
+  // Sequences continue across a reassignment; the assignment gives where.
   ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 1, 0, 40)),
             ApplyStatus::Applied);
   EXPECT_EQ(test::applyBytes(Store, World.chunk(41, 0, 0)),
@@ -444,8 +443,7 @@ TEST(WorldStore, RejectsAChunkOutsideTheArea) {
 }
 
 TEST(WorldStore, RejectsADeltaThatBreaksTheContract) {
-  // The valid first edit is not applied either, because the whole frame is
-  // refused.
+  // The valid first edit is not applied: the whole frame is refused.
   const std::vector<CellEdit> Outside = {{1, 1, 1, Water}, {32, 1, 1, Water}};
   expectRefusedAndReset(test::delta(5, Outside), ApplyStatus::Malformed);
   const std::vector<CellEdit> AboveTheTop = {{1, 24, 1, Water}};
@@ -459,8 +457,8 @@ TEST(WorldStore, RejectsADeltaThatBreaksTheContract) {
 }
 
 TEST(WorldStore, MatchesADenseModelUnderRandomFrames) {
-  // `Server` is what the controller reads chunks from. `Expected` is what the
-  // node should hold after each frame.
+  // `Server` is the controller's chunk source; `Expected` is the node's state
+  // after each frame.
   constexpr int Size = 48;
   constexpr int MinY = -8;
   constexpr int Height = 24;
@@ -559,11 +557,9 @@ TEST(WorldStore, MatchesADenseModelUnderRandomFrames) {
 }
 
 TEST(WorldStore, ReadersSeeWholeFramesWhileFramesAreApplied) {
-  // Every delta sets two cells in different rows of chunks to a value derived
-  // from its sequence, so a reader that sees half a frame, or a version and
-  // sequence that disagree, fails. Searches run on the same pinned versions,
-  // so shared columns are read while new versions are built. Under
-  // ThreadSanitizer this also checks for data races.
+  // Each delta sets two cells in different chunk rows to a value derived from
+  // its sequence, so a half-applied frame or mismatched version fails.
+  // Searches read pinned versions while new ones are built. TSan checks races.
   constexpr std::uint64_t LastSequence = 2000;
   const auto ValueAt = [](std::uint64_t Sequence) {
     return Sequence % 2 == 0 ? Stone : Water;
@@ -572,8 +568,8 @@ TEST(WorldStore, ReadersSeeWholeFramesWhileFramesAreApplied) {
   WorldStore Store;
   load(Store, World);
 
-  // The changed cells are far above the floor the search walks on, so every
-  // version gives the same path, and a reader that saw a torn column would not.
+  // The changed cells sit far above the walked floor, so every version gives
+  // the same path unless a column was torn.
   search::Request Call;
   Call.Start = {2, 4, 2};
   Call.Target = {28, 4, 28};

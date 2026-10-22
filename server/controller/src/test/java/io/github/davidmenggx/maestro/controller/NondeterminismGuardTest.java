@@ -31,22 +31,19 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 /**
- * Reads the compiled controller and fails if it directly references a clock, a random source, a
- * thread pool, a socket or the host it runs on. These must come through {@code ControllerEnv}, or
- * replay breaks. So must math whose last bit may differ between platforms: {@code StrictMath} gives
- * the same result everywhere, and {@code Math} may not.
+ * Fails if the compiled controller directly references a clock, random source, thread pool, socket
+ * or host. These must come through {@code ControllerEnv}. So must math whose last bit may differ
+ * between platforms: use {@code StrictMath}, not {@code Math}.
  *
- * <p>It also refuses collections whose iteration order is neither insertion nor key order: hashed
- * ones, whose order follows identity hash codes for most keys, and the immutable {@code Set.of} and
- * {@code Map.of} family, whose order is randomized per JVM. The repeated-run digest in {@code
- * SimulationTest} catches the first kind but not the second, since both of its runs share a JVM.
+ * <p>It also refuses hashed collections and the immutable {@code Set.of}/{@code Map.of} family,
+ * whose iteration order is not insertion or key order. The repeated-run digest in {@code
+ * SimulationTest} misses the second kind, since both runs share a JVM.
  */
 class NondeterminismGuardTest {
 
   /**
-   * {@code owner} is an internal class name, or {@code *} for any class. {@code member} is a method
-   * or field name, or {@code *} for the whole type. {@code descriptor}, if not null, narrows the
-   * rule to one signature, as an unseeded constructor among seeded ones.
+   * {@code owner} is an internal class name or {@code *}. {@code member} is a method or field name
+   * or {@code *}. {@code descriptor}, if not null, narrows the rule to one signature.
    */
   private record Rule(String owner, String member, String descriptor) {
 
@@ -87,8 +84,7 @@ class NondeterminismGuardTest {
           new Rule("java/util/UUID", "randomUUID"),
           // Shuffles with a hidden random source unless given one, which the seam provides.
           new Rule("java/util/Collections", "shuffle"),
-          // A parallel stream's order of side effects depends on thread scheduling. The owner is
-          // whatever collection or stream type the call was made on.
+          // A parallel stream's side-effect order depends on thread scheduling.
           new Rule("*", "parallelStream"),
           new Rule("*", "parallel"),
           new Rule("java/util/concurrent/Executors", "*"),

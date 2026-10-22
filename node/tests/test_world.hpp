@@ -26,8 +26,8 @@ inline constexpr world::Cell IronDoor{world::PathType::DOOR_IRON_CLOSED,
 inline constexpr world::Cell OpenDoor{world::PathType::DOOR_OPEN,
                                       world::FullFloor};
 
-/// A dense, writable world for describing test terrain, which converts to the
-/// frames a controller would send. Positions use the wire's frame.
+/// A dense, writable test world that converts to controller frames. Positions
+/// are in wire coordinates.
 class DenseWorld {
 public:
   /// An all-air world.

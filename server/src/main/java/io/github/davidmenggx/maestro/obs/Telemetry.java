@@ -23,9 +23,8 @@ public final class Telemetry {
   private static final Duration EXPORT_TIMEOUT = Duration.ofSeconds(2);
 
   /**
-   * Held so the JUL level set below is not garbage collected. OpenTelemetry logs export failures
-   * through JUL at {@code SEVERE}, which would otherwise log on every cycle when no collector is
-   * running (the normal case in development), so the exporter's logging is turned off.
+   * Held so the JUL level set below is not garbage collected. Export failures log at {@code SEVERE}
+   * every cycle when no collector runs (normal in development), so it is turned off.
    */
   private static final Logger EXPORTER_LOGGER = Logger.getLogger("io.opentelemetry.exporter");
 

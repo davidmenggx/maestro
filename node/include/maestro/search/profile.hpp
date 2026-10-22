@@ -26,8 +26,7 @@ struct Profile {
   bool CanFloat = false;
   bool CanWalkOverFences = false;
 
-  /// Most cells the evaluator's footprint may hold. A search's cost grows
-  /// with it, and the server keeps the searches of a larger one.
+  /// Most cells the evaluator's footprint may hold.
   static constexpr std::int64_t FootprintLimit = 512;
   /// Highest step-up height, past that of every land mob vanilla can make.
   static constexpr float UpStepLimit = 16.0F;
