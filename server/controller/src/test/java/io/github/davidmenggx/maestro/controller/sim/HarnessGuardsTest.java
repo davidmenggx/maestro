@@ -69,9 +69,11 @@ class HarnessGuardsTest {
   void sampledScenariosSpanTheirRangeAndStayValid() {
     Map<Count, Span> counts = new EnumMap<>(Count.class);
     Map<Chance, Span> chances = new EnumMap<>(Chance.class);
+    int keptUp = 0;
 
     for (int seed = 0; seed < DRAWS; seed++) {
       Scenario scenario = Scenario.sample(SeededRng.of(seed).derive("fuzz"));
+      keptUp += scenario.chances().get(Chance.SLOW_TICK) == 0 ? 1 : 0;
       for (Count setting : Count.values()) {
         counts.computeIfAbsent(setting, unseen -> new Span()).see(scenario.counts().get(setting));
       }
@@ -87,6 +89,9 @@ class HarnessGuardsTest {
     for (Chance setting : Chance.values()) {
       chances.get(setting).assertCovers(setting, 0, setting.ceiling());
     }
+    // The latency SLO applies only to a server that keeps up, so most draws must, and some not.
+    assertTrue(keptUp > DRAWS / 2, keptUp + " of " + DRAWS + " servers kept up");
+    assertTrue(keptUp < DRAWS, "no sampled server fell behind");
   }
 
   @Test
@@ -149,8 +154,7 @@ class HarnessGuardsTest {
         kinds.add(fault.getClass().getSimpleName());
         assertTrue(fault.tick() >= 1 && fault.tick() < active, "fault at tick " + fault.tick());
         assertTrue(
-            fault instanceof FaultPlan.ControllerRestarted
-                || ((FaultPlan.NodeFault) fault).node().id() < 4,
+            !(fault instanceof FaultPlan.NodeFault nodeFault) || nodeFault.node().id() < 4,
             fault.toString());
         if (fault instanceof FaultPlan.NodeDied) {
           died++;
@@ -181,7 +185,8 @@ class HarnessGuardsTest {
             "Paused",
             "Blackholed",
             "LinkReset",
-            "ControllerRestarted"),
+            "ControllerRestarted",
+            "ServerStalled"),
         kinds);
     // Some faults outlast the detectors, or a node is never noticed and probed.
     assertTrue(
@@ -472,7 +477,7 @@ class HarnessGuardsTest {
   }
 
   @Test
-  void aMissIsARejectionForQueueDepthATimeoutOrAServableRequestLeftUnserved() {
+  void aMissIsARejectionForQueueDepthATimeoutANodeLostOrAServableRequestLeftUnserved() {
     RecordingOutput out = recorder(new SimWorld(Topology.DEFAULT, 1, SeededRng.of(1)));
     DropReason[] reasons = DropReason.values();
     for (int mob = 0; mob < reasons.length; mob++) {
@@ -486,18 +491,21 @@ class HarnessGuardsTest {
       }
     }
     assertEquals(List.of(), out.ledgerViolations());
-    assertEquals(2, out.sloMisses());
+    // Queue depth, a timeout and a node lost.
+    assertEquals(3, out.sloMisses());
 
-    // A request from a chunk loaded long enough to be on its node, dropped for want of one.
+    // Requests from a chunk loaded long enough to be on its node, dropped for want of one.
     SimWorld world = new SimWorld(Topology.DEFAULT, 1, SeededRng.of(1));
     world.loadChunk(Chunks.of(ORIGIN.x()), Chunks.of(ORIGIN.z()), 0);
     RecordingOutput servable = recorder(world);
     servable.issued(request(1, 1, ORIGIN));
-    servable.pathDropped(1, DropReason.NO_NODE);
+    servable.pathDropped(1, DropReason.UNAVAILABLE);
     servable.issued(request(2, 100, ORIGIN));
-    servable.pathDropped(2, DropReason.NO_NODE);
+    servable.pathDropped(2, DropReason.UNAVAILABLE);
+    servable.issued(request(3, 100, ORIGIN));
+    servable.pathDropped(3, DropReason.NO_NODE);
     assertEquals(List.of(), servable.ledgerViolations());
-    assertEquals(1, servable.sloMisses());
+    assertEquals(2, servable.sloMisses());
   }
 
   @Test
@@ -953,9 +961,9 @@ class HarnessGuardsTest {
     transport.listen(
         new Transport.Listener() {
           @Override
-          public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
+          public void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrived) {
             heardAt.add(sim.now());
-            counting.onFrame(node, channel, frame);
+            counting.onFrame(node, channel, frame, arrived);
           }
 
           @Override
@@ -1200,7 +1208,7 @@ class HarnessGuardsTest {
     }
 
     @Override
-    public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
+    public void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrived) {
       frames++;
     }
 
@@ -1220,7 +1228,7 @@ class HarnessGuardsTest {
   private static final class NoopListener implements Transport.Listener {
 
     @Override
-    public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {}
+    public void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrived) {}
 
     @Override
     public void onConnected(NodeId node) {}

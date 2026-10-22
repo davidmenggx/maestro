@@ -134,11 +134,16 @@ public final class SimTransport {
               return;
             }
             if (epoch.get(node) != attempt || isDead(node) || count(partitioned, node) > 0) {
-              hear("connect-failed:" + node, listener -> listener.onDisconnected(node));
+              hear("connect-failed:" + node, lost(node));
               return;
             }
             connected.add(node);
-            hear("connected:" + node, listener -> listener.onConnected(node));
+            hear(
+                "connected:" + node,
+                listener -> {
+                  sim.metrics().count("transport.connected", 1, "node", node.toString());
+                  listener.onConnected(node);
+                });
           });
     }
 
@@ -194,7 +199,7 @@ public final class SimTransport {
         sim.metrics().count("transport.link.dropped", 1, "node", node.toString());
         bumpEpoch(node);
         dropLink(node);
-        session.notify("link-dropped:" + node, listener -> listener.onDisconnected(node));
+        session.notify("link-dropped:" + node, lost(node));
       }
 
       @Override
@@ -219,6 +224,14 @@ public final class SimTransport {
     };
   }
 
+  /** Tells the listener the node's link is gone, and the fail-open check that it heard so. */
+  private Callback lost(NodeId node) {
+    return listener -> {
+      sim.linkLost(node);
+      listener.onDisconnected(node);
+    };
+  }
+
   /** Whether the node's process is running, whatever the state of its link. */
   public boolean alive(NodeId node) {
     return !isDead(node);
@@ -233,7 +246,7 @@ public final class SimTransport {
     heldAtNode.remove(node);
     nodes.get(node).kill();
     if (dropLink(node)) {
-      session.notify("reset:" + node, listener -> listener.onDisconnected(node));
+      session.notify("reset:" + node, lost(node));
     }
   }
 
@@ -254,7 +267,7 @@ public final class SimTransport {
     if (connected.contains(node)) {
       sim.metrics().count("transport.link.reset", 1, "node", node.toString());
       closeLink(node);
-      session.notify("link-reset:" + node, listener -> listener.onDisconnected(node));
+      session.notify("link-reset:" + node, lost(node));
     }
   }
 
@@ -439,11 +452,12 @@ public final class SimTransport {
       sim.metrics().count("transport.received", 1, "node", label, "channel", channel.name());
       // The process the frame reached reads it, unless a restart ended that process first.
       Session receiver = session;
+      long arrived = sim.env().clock().nowNanos();
       sim.toController(
           "received:" + channel,
           () -> {
             if (session == receiver && receiver.listener != null) {
-              receiver.listener.onFrame(node, channel, ByteBuffer.wrap(bytes));
+              receiver.listener.onFrame(node, channel, ByteBuffer.wrap(bytes), arrived);
             }
           });
       return;
@@ -508,7 +522,9 @@ public final class SimTransport {
   /** Each fragment is lost at the plan's rate, and a datagram is lost with any of its fragments. */
   private double lossChance(int bytes) {
     int fragments = (bytes + FRAGMENT_BYTES - 1) / FRAGMENT_BYTES;
-    return fragments <= 1 ? faults.dropRate() : 1 - Math.pow(1 - faults.dropRate(), fragments);
+    return fragments <= 1
+        ? faults.dropRate()
+        : 1 - StrictMath.pow(1 - faults.dropRate(), fragments);
   }
 
   private int latency() {

@@ -34,7 +34,8 @@ import java.util.TreeMap;
  * read past it, in a chunk loaded long enough for any backlog of chunk reads to have reached it.
  * Dropping a servable request for want of a node counts against the SLO, so a run cannot meet it by
  * turning work away, unless the chunk left meanwhile, since an answer then cannot show it was
- * searched while the chunk was there.
+ * searched while the chunk was there. So does losing a request with its node, which nothing in a
+ * run held to the SLO should cause.
  */
 public final class RecordingOutput implements WorldOutput {
 
@@ -165,7 +166,7 @@ public final class RecordingOutput implements WorldOutput {
     sim.digest().mix(sim.now()).mix("drop").mix(mobId).mix(reason.name());
     drops.merge(reason, 1, Integer::sum);
     Open request = close(mobId, reason);
-    if (reason == DropReason.NO_NODE
+    if ((reason == DropReason.NO_NODE || reason == DropReason.UNAVAILABLE)
         && request != null
         && request.servable()
         && world.loadedSince(Chunks.of(request.start().x()), Chunks.of(request.start().z()))
@@ -225,21 +226,19 @@ public final class RecordingOutput implements WorldOutput {
   }
 
   /**
-   * Requests the SLO counts as late: rejected for queue depth, never answered in time, or servable
-   * and dropped for want of a node.
+   * Requests the SLO counts as late: rejected for queue depth, never answered in time, lost with
+   * their node, or servable and dropped for want of a node.
    */
   public long sloMisses() {
-    return dropped(DropReason.QUEUE_DEPTH) + dropped(DropReason.TIMEOUT) + unservedServable;
+    return dropped(DropReason.QUEUE_DEPTH)
+        + dropped(DropReason.TIMEOUT)
+        + dropped(DropReason.NODE_LOST)
+        + unservedServable;
   }
 
   /** Answers the controller accepted although the node searched them over air. */
   public int answeredOverAir() {
     return answeredOverAir;
-  }
-
-  /** Servable requests dropped for want of a node. */
-  public int unservedServable() {
-    return unservedServable;
   }
 
   public int answered() {

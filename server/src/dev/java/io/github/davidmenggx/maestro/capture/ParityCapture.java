@@ -19,7 +19,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.SplittableRandom;
-import java.util.function.Supplier;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
@@ -387,8 +386,8 @@ final class ParityCapture implements Searches.Interceptor {
 
   /** Runs vanilla's search and records it. */
   @Override
-  public Path search(Mob mob, SearchCall call, Supplier<Path> search) {
-    Path vanilla = search.get();
+  public Path search(Mob mob, SearchCall call, Searches.Vanilla search) {
+    Path vanilla = search.search();
     record(call, vanilla);
     return vanilla;
   }

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.core.NodeLinks;
 import io.github.davidmenggx.maestro.controller.core.WorldStreams;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
@@ -248,17 +249,19 @@ class SimulationTest {
     // Encodes fail often, so a batch built before the node dies is still being retried
     // after it returns. Its requests were dropped with the old connection, and the
     // profiles they name are not registered on the new one, so sending it would ask the
-    // node for profiles it never received.
+    // node for profiles it never received. The node comes back on a tick the controller
+    // dials, so it reconnects while that batch may still be retried.
     NodeId victim = NodeId.of(0);
+    long back = 2 * NodeLinks.RECONNECT_TICKS;
     FaultPlan plan =
         FaultPlan.reliable()
             .withOffloadFailureRate(0.7)
             .with(
-                new FaultPlan.NodeDied(DEATH_TICK, victim),
-                new FaultPlan.NodeRecovered(DEATH_TICK + 1, victim));
+                new FaultPlan.NodeDied(back - 1, victim),
+                new FaultPlan.NodeRecovered(back, victim));
 
     long discarded = 0;
-    for (long seed = 1; seed <= 10; seed++) {
+    for (long seed = 1; seed <= 30; seed++) {
       SimRun run = SimRun.of(seed, plan, TICKS, Scenario.DEFAULT.with(Chance.REQUEST, 0.3)).go();
       assertEquals(List.of(), run.violations(), run.describe());
       assertEquals(0, run.sim.metrics().total("path.profile.unknown"), run.describe());
@@ -307,7 +310,7 @@ class SimulationTest {
     assertEquals(first.sim.digest().value(), second.sim.digest().value(), first.describe());
     assertEquals(List.of(), first.violations(), first.describe());
     assertTrue(
-        first.out.dropped(DropReason.NODE_LOST) + first.out.dropped(DropReason.NO_NODE) > 0,
+        first.out.dropped(DropReason.NODE_LOST) + first.out.dropped(DropReason.UNAVAILABLE) > 0,
         first.describe());
     // The world stream restarts with a new send instead of resuming into a gap, and
     // the rebuilt node state must equal a fresh recomputation of the same world.
@@ -477,6 +480,37 @@ class SimulationTest {
     assertTrue(run.sim.failOpenJudged() > 0, run.describe());
     // Its link never broke, so it kept its stream and nothing was sent twice.
     assertEquals(0, run.sim.metrics().total("world.resnapshot") - nodes(run), run.describe());
+  }
+
+  @Test
+  void aServerThatStallsTakesNoNodeOutOfService() {
+    // Heartbeats keep arriving while the server hears nothing, and are read by when they came.
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(new FaultPlan.ServerStalled(40, 3 * 20 * Simulation.STEPS_PER_TICK));
+
+    SimRun run = SimRun.of(17L, plan, 200, ALONE, Scenario.DEFAULT).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(run.fitsCapacity(), run.describe());
+    assertFalse(run.heldToTheSlo(), run.describe());
+    assertEquals(0, run.sim.metrics().total("node.suspected"), run.describe());
+    assertEquals(0, run.sim.metrics().total("node.quiet"), run.describe());
+    assertTrue(run.out.answered() > 0, run.describe());
+  }
+
+  @Test
+  void aServerThatFallsBehindTakesNoNodeOutOfService() {
+    SimRun run =
+        SimRun.of(
+                17L, FaultPlan.reliable(), 200, ALONE, Scenario.DEFAULT.with(Chance.SLOW_TICK, 0.2))
+            .go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(run.fitsCapacity(), run.describe());
+    assertEquals(0, run.sim.metrics().total("node.suspected"), run.describe());
+    assertEquals(0, run.sim.metrics().total("node.quiet"), run.describe());
+    assertTrue(run.out.answered() > 0, run.describe());
   }
 
   @Test

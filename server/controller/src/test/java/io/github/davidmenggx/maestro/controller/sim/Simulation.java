@@ -35,7 +35,10 @@ import maestro.fbs.WorldMsg;
  *
  * <p>The server works for the first part of each tick and then idles until the next one. The
  * controller runs on the server thread, so what the network and the offload workers produce for it
- * waits until the server hands over control: when a tick's work starts and just before it ends.
+ * waits until the server hands over control: when a tick's work starts and just before it ends. A
+ * tick whose work runs past its time delays the next, which starts as soon as it ends, and a server
+ * that falls far behind starts its schedule over, as Minecraft's does. The fleet keeps real time
+ * throughout.
  */
 public final class Simulation {
 
@@ -49,6 +52,12 @@ public final class Simulation {
 
   /** A server that works the whole tick still leaves its last step for the fleet. */
   static final int MAX_BUSY_STEPS = STEPS_PER_TICK - 2;
+
+  /** A slow tick works between one and this many ticks' worth of steps. */
+  static final int MAX_SLOW_TICKS = 3;
+
+  /** Behind by more than 2 s, the server stops catching up, as Minecraft's does. */
+  static final long MAX_CATCH_UP_STEPS = 40L * STEPS_PER_TICK;
 
   private record Scheduled(long time, long order, String name, Runnable action)
       implements Comparable<Scheduled> {
@@ -69,6 +78,7 @@ public final class Simulation {
   private record Checkpoint(long run, long region, long sequence) {}
 
   private final SeededRng rng;
+  private final Rng serverRng;
   private final Rng offloadRng;
   private final Rng runRng;
   private final Rng controllerRng;
@@ -118,8 +128,21 @@ public final class Simulation {
   /** Steps from the start of a tick to the end of the server's work in it. */
   private int busySteps = MAX_BUSY_STEPS;
 
+  /** The chance that a tick's work runs past its time. */
+  private double slowTickChance;
+
+  /** Steps the current tick's work takes at least, from a stall in the fault plan. */
+  private long stallSteps;
+
+  /** The step the next tick is due at. */
+  private long due;
+
+  /** The last step of the previous tick. */
+  private long lastTickEnd = -1;
+
   public Simulation(long seed, FaultPlan faults) {
     this.rng = SeededRng.of(seed);
+    this.serverRng = rng.derive("server");
     this.offloadRng = rng.derive("offload");
     this.runRng = rng.derive("run");
     this.controllerRng = rng.derive("controller");
@@ -185,6 +208,17 @@ public final class Simulation {
       throw new IllegalArgumentException("a tick's work takes 1 to " + MAX_BUSY_STEPS + " steps");
     }
     busySteps = steps;
+  }
+
+  /**
+   * The chance that a tick's work runs past its time, taking between one and {@link
+   * #MAX_SLOW_TICKS} ticks' worth of steps.
+   */
+  public void slowTicks(double chance) {
+    if (!(chance >= 0 && chance <= 1)) {
+      throw new IllegalArgumentException("a chance is in [0, 1]: " + chance);
+    }
+    slowTickChance = chance;
   }
 
   /**
@@ -262,6 +296,11 @@ public final class Simulation {
   void unresponsive(NodeId node, boolean active) {
     digest.mix(now).mix("unresponsive:" + node + ":" + active);
     failOpen.unresponsive(node, env.run(), tick, active);
+  }
+
+  /** The controller heard that the node's link is gone, which forgets the requests sent on it. */
+  void linkLost(NodeId node) {
+    failOpen.linkLost(node, env.run(), tick);
   }
 
   /** Records each request a request frame to {@code node} carries, for {@link FailOpenCheck}. */
@@ -395,11 +434,16 @@ public final class Simulation {
     Objects.requireNonNull(workload, "workload");
     for (long i = 0; i < ticks; i++) {
       tick++;
-      now = tick * STEPS_PER_TICK;
-      long tickClose = now + busySteps;
-      long tickEnd = now + STEPS_PER_TICK - 1;
-
+      now = Math.max(due, lastTickEnd + 1);
       applyFaults(tick);
+      long tickClose = now + workSteps();
+      due += STEPS_PER_TICK;
+      if (tickClose - due > MAX_CATCH_UP_STEPS) {
+        due = tickClose;
+      }
+      long tickEnd = Math.max(due, tickClose + 1) - 1;
+      lastTickEnd = tickEnd;
+
       handOver();
       deliver(controller, new WorldEvent.TickBegan(tick));
       workload.tick(tick, event -> deliver(controller, event));
@@ -411,6 +455,21 @@ public final class Simulation {
       drainUntil(tickEnd);
       afterTick.accept(tick);
     }
+  }
+
+  /**
+   * Steps the current tick's work takes: the server's usual share of a tick, more if the tick is
+   * slow, and at least what a stall in the fault plan holds it for.
+   */
+  private long workSteps() {
+    long work = busySteps;
+    // Drawn only when slow ticks are possible, so a run without them replays unchanged.
+    if (slowTickChance > 0 && serverRng.nextDouble() < slowTickChance) {
+      work = STEPS_PER_TICK + serverRng.nextInt((MAX_SLOW_TICKS - 1) * STEPS_PER_TICK + 1);
+    }
+    work = Math.max(work, stallSteps);
+    stallSteps = 0;
+    return work;
   }
 
   private void applyFaults(long tick) {
@@ -426,6 +485,7 @@ public final class Simulation {
         case FaultPlan.Paused paused -> transport.pause(paused.node(), paused.active());
         case FaultPlan.Blackholed blackholed ->
             transport.blackhole(blackholed.node(), blackholed.active());
+        case FaultPlan.ServerStalled stalled -> stallSteps = Math.max(stallSteps, stalled.steps());
         case FaultPlan.ControllerRestarted restarted -> {
           startController();
           onRestart.run();

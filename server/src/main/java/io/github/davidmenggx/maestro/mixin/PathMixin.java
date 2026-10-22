@@ -9,11 +9,13 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/** Lets a path be held in place. See {@link HeldPaths}. */
+/** Lets a path be held in place, and dates it. See {@link HeldPaths}. */
 @Mixin(Path.class)
-public abstract class PathMixin implements HeldPaths.Holdable {
+public abstract class PathMixin implements HeldPaths.Marks {
 
   @Unique private long maestro$heldUntil = HeldPaths.NOT_HELD;
+
+  @Unique private long maestro$madeAt = HeldPaths.UNKNOWN;
 
   @Override
   public long maestro$heldUntil() {
@@ -23,6 +25,16 @@ public abstract class PathMixin implements HeldPaths.Holdable {
   @Override
   public void maestro$setHeldUntil(long tick) {
     maestro$heldUntil = tick;
+  }
+
+  @Override
+  public long maestro$madeAt() {
+    return maestro$madeAt;
+  }
+
+  @Inject(method = "<init>", at = @At("RETURN"))
+  private void maestro$date(CallbackInfo ci) {
+    maestro$madeAt = HeldPaths.now();
   }
 
   @Inject(method = "isDone", at = @At("HEAD"), cancellable = true)

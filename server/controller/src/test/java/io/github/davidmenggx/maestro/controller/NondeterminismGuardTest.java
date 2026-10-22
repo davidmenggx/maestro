@@ -25,13 +25,16 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
+import java.util.random.RandomGenerator;
+import java.util.random.RandomGeneratorFactory;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 /**
  * Reads the compiled controller and fails if it directly references a clock, a random source, a
  * thread pool, a socket or the host it runs on. These must come through {@code ControllerEnv}, or
- * replay breaks.
+ * replay breaks. So must math whose last bit may differ between platforms: {@code StrictMath} gives
+ * the same result everywhere, and {@code Math} may not.
  *
  * <p>It also refuses collections whose iteration order is neither insertion nor key order: hashed
  * ones, whose order follows identity hash codes for most keys, and the immutable {@code Set.of} and
@@ -42,9 +45,21 @@ class NondeterminismGuardTest {
 
   /**
    * {@code owner} is an internal class name, or {@code *} for any class. {@code member} is a method
-   * or field name, or {@code *} for the whole type.
+   * or field name, or {@code *} for the whole type. {@code descriptor}, if not null, narrows the
+   * rule to one signature, as an unseeded constructor among seeded ones.
    */
-  private record Rule(String owner, String member) {}
+  private record Rule(String owner, String member, String descriptor) {
+
+    Rule(String owner, String member) {
+      this(owner, member, null);
+    }
+  }
+
+  /** {@code Math} functions that may round differently on another platform. */
+  private static final List<String> PLATFORM_MATH =
+      List.of(
+          "exp", "expm1", "log", "log10", "log1p", "pow", "sin", "cos", "tan", "asin", "acos",
+          "atan", "atan2", "sinh", "cosh", "tanh", "cbrt", "hypot");
 
   private static final List<Rule> RULES =
       List.of(
@@ -60,6 +75,13 @@ class NondeterminismGuardTest {
           new Rule("java/time/LocalDateTime", "now"),
           new Rule("java/time/ZonedDateTime", "now"),
           new Rule("java/util/Random", "*"),
+          new Rule("java/util/SplittableRandom", "<init>", "()V"),
+          new Rule("java/util/random/RandomGenerator", "getDefault"),
+          new Rule("java/util/random/RandomGenerator", "of"),
+          new Rule(
+              "java/util/random/RandomGeneratorFactory",
+              "create",
+              "()Ljava/util/random/RandomGenerator;"),
           new Rule("java/util/concurrent/ThreadLocalRandom", "*"),
           new Rule("java/security/SecureRandom", "*"),
           new Rule("java/util/UUID", "randomUUID"),
@@ -99,6 +121,11 @@ class NondeterminismGuardTest {
           new Rule("java/util/stream/Collectors", "toUnmodifiableMap"),
           new Rule("java/util/stream/Collectors", "groupingBy"));
 
+  private static final List<Rule> ALL_RULES =
+      Stream.concat(
+              RULES.stream(), PLATFORM_MATH.stream().map(name -> new Rule("java/lang/Math", name)))
+          .toList();
+
   /** flatc output is not controller code, so the rule does not apply. */
   private static final String GENERATED = "maestro/fbs/";
 
@@ -110,6 +137,9 @@ class NondeterminismGuardTest {
           InstantClock.class,
           Randomness.class,
           CoinFlip.class,
+          DefaultGenerator.class,
+          UnseededFactory.class,
+          PlatformMath.class,
           Identity.class,
           OwnThread.class,
           ThreadPool.class,
@@ -144,7 +174,7 @@ class NondeterminismGuardTest {
 
   @Test
   void everyRuleIsWellFormed() {
-    for (Rule rule : RULES) {
+    for (Rule rule : ALL_RULES) {
       assertFalse(rule.owner().contains("."), "owners are internal names: " + rule.owner());
       assertFalse(rule.member().isBlank(), "empty member in " + rule.owner());
       // Any member of any class would match everything.
@@ -186,6 +216,27 @@ class NondeterminismGuardTest {
   static final class CoinFlip {
     double draw() {
       return Math.random();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class DefaultGenerator {
+    long draw() {
+      return RandomGenerator.getDefault().nextLong();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class UnseededFactory {
+    long draw() {
+      return RandomGeneratorFactory.of("L64X128MixRandom").create().nextLong();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  static final class PlatformMath {
+    double odds(double phi) {
+      return Math.pow(10, -phi);
     }
   }
 
@@ -265,6 +316,14 @@ class NondeterminismGuardTest {
     long now(Clock clock) {
       return clock.tick() + clock.nowNanos();
     }
+
+    long draw(long seed) {
+      return RandomGeneratorFactory.of("L64X128MixRandom").create(seed).nextLong();
+    }
+
+    double odds(double phi) {
+      return StrictMath.pow(10, -phi) + Math.sqrt(phi) + Math.max(phi, 1);
+    }
   }
 
   private static Path classesRoot(Class<?> anchor) throws URISyntaxException {
@@ -305,9 +364,11 @@ class NondeterminismGuardTest {
       }
       String owner = ref.owner().asInternalName();
       String member = ref.name().stringValue();
-      for (Rule rule : RULES) {
+      String descriptor = ref.type().stringValue();
+      for (Rule rule : ALL_RULES) {
         if ((rule.owner().equals("*") || rule.owner().equals(owner))
-            && (rule.member().equals("*") || rule.member().equals(member))) {
+            && (rule.member().equals("*") || rule.member().equals(member))
+            && (rule.descriptor() == null || rule.descriptor().equals(descriptor))) {
           findings.add(label + " references " + owner + "." + member);
         }
       }

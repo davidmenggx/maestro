@@ -19,6 +19,8 @@ class NodeHealthTest {
 
   private static final long NANOS_PER_TICK = 50_000_000L;
 
+  private static final long PROBE = 7;
+
   /** Heartbeats the node sends at its own interval of 1 s. */
   private static final int HEARTBEAT_TICKS = 20;
 
@@ -76,17 +78,33 @@ class NodeHealthTest {
   }
 
   @Test
-  void heartbeatsHandedOverTogetherCountAsOneArrival() {
+  void heartbeatsHeardDuringAServerStallKeepTheTimesTheyArrived() {
+    health.greeted(NODE, nanos());
+    // The server stalls for 5 s, and hears the heartbeats of that time at once afterwards.
+    long stalledFrom = nanos();
+    // No tick is judged while the server stalls.
+    tick += 5 * HEARTBEAT_TICKS;
+    for (int beat = 1; beat <= 5; beat++) {
+      health.heartbeat(NODE, stalledFrom + beat * HEARTBEAT_TICKS * NANOS_PER_TICK);
+    }
+    assertEquals(7, health.samples(NODE));
+    assertEquals(List.of(), ticks(1));
+
+    // The intervals it learned are 1 s, not 5, so a node that stops now is found as soon as one
+    // whose server never stalled.
+    assertEquals(List.of(), ticks(2 * HEARTBEAT_TICKS));
+    assertEquals(List.of(NODE), ticks(2 * HEARTBEAT_TICKS));
+  }
+
+  @Test
+  void aHeartbeatNoLaterThanTheLastIsIgnored() {
     health.greeted(NODE, nanos());
     ticks(HEARTBEAT_TICKS);
-    // A stalled server hears several heartbeats at once.
-    health.heartbeat(NODE, nanos());
-    health.heartbeat(NODE, nanos());
-    health.heartbeat(NODE, nanos());
+    long arrived = nanos();
+    health.heartbeat(NODE, arrived);
+    health.heartbeat(NODE, arrived);
+    health.heartbeat(NODE, arrived - 1);
     assertEquals(3, health.samples(NODE));
-    health.handedOver();
-    health.heartbeat(NODE, nanos() + 1);
-    assertEquals(4, health.samples(NODE));
   }
 
   @Test
@@ -129,6 +147,39 @@ class NodeHealthTest {
   }
 
   @Test
+  void anOldUnansweredRequestDoesNotTakeTheNodeOutWithTheNextOne() {
+    // A request whose answer was lost, long ago.
+    quietRequests(1);
+    ticks(NodeHealth.QUIET_WINDOW_TICKS + 1);
+    quietRequests(1);
+    assertEquals(List.of(), ticks(1));
+    // The quiet is judged from the newer requests alone.
+    quietRequests(1);
+    assertEquals(List.of(), ticks(NodeHealth.QUIET_TICKS - 2));
+    assertEquals(List.of(NODE), ticks(1));
+  }
+
+  @Test
+  void twoUnansweredRequestsWithinTheWindowAreEnough() {
+    quietRequests(1);
+    ticks(NodeHealth.QUIET_WINDOW_TICKS - 1);
+    // The older one is long past its budget, so the newer one shows the path is still quiet.
+    quietRequests(1);
+    assertEquals(List.of(NODE), ticks(1));
+  }
+
+  @Test
+  void aLostLinkForgetsTheRequestsSentOnIt() {
+    health.greeted(NODE, nanos());
+    quietRequests(1);
+    health.disconnected(NODE);
+    health.greeted(NODE, nanos());
+    quietRequests(1);
+    assertEquals(List.of(), ticks(5 * NodeHealth.QUIET_TICKS));
+    assertEquals(Circuit.CLOSED, health.circuit(NODE));
+  }
+
+  @Test
   void anAnswerInTimeEndsTheQuiet() {
     quietRequests(NodeHealth.QUIET_REQUESTS);
     ticks(NodeHealth.QUIET_TICKS - 1);
@@ -150,7 +201,7 @@ class NodeHealthTest {
     assertEquals(Circuit.HALF_OPEN, health.circuit(NODE));
     assertTrue(health.admits(NODE));
 
-    health.admitted(NODE, tick);
+    health.admitted(NODE, PROBE, tick);
     assertEquals(Circuit.PROBING, health.circuit(NODE));
     assertFalse(health.admits(NODE));
     // The probe is out, so the node stays in service and its probe is not dropped.
@@ -160,6 +211,30 @@ class NodeHealthTest {
     assertEquals(Circuit.CLOSED, health.circuit(NODE));
     assertTrue(health.admits(NODE));
     assertEquals(1, metrics.counter("node.circuit", "node", NODE.toString(), "state", "closed"));
+  }
+
+  @Test
+  void aProbeWithdrawnBeforeItLeftLetsTheNextRequestProbe() {
+    quietRequests(NodeHealth.QUIET_REQUESTS);
+    ticks(NodeHealth.QUIET_TICKS);
+    ticks(NodeHealth.FIRST_BACKOFF_TICKS);
+    health.admitted(NODE, PROBE, tick);
+
+    // Another request going changes nothing.
+    health.withdrawn(NODE, PROBE + 1);
+    assertEquals(Circuit.PROBING, health.circuit(NODE));
+    health.withdrawn(NODE, PROBE);
+    assertEquals(Circuit.HALF_OPEN, health.circuit(NODE));
+    assertTrue(health.admits(NODE));
+
+    // The next one probes, and its failure is the first.
+    health.admitted(NODE, PROBE + 2, tick);
+    ticks(NodeHealth.PROBE_TICKS + 1);
+    assertEquals(Circuit.OPEN, health.circuit(NODE));
+    ticks(2 * NodeHealth.FIRST_BACKOFF_TICKS - 1);
+    assertEquals(Circuit.OPEN, health.circuit(NODE));
+    ticks(1);
+    assertEquals(Circuit.HALF_OPEN, health.circuit(NODE));
   }
 
   @Test
@@ -173,7 +248,7 @@ class NodeHealthTest {
       assertEquals(Circuit.OPEN, health.circuit(NODE), "probe " + probe);
       ticks(1);
       assertEquals(Circuit.HALF_OPEN, health.circuit(NODE), "probe " + probe);
-      health.admitted(NODE, tick);
+      health.admitted(NODE, PROBE + probe, tick);
       assertEquals(List.of(), ticks(NodeHealth.PROBE_TICKS));
       // Its time runs out, and the node goes out of service again.
       assertEquals(List.of(NODE), ticks(1));
@@ -187,10 +262,10 @@ class NodeHealthTest {
     quietRequests(NodeHealth.QUIET_REQUESTS);
     ticks(NodeHealth.QUIET_TICKS);
     ticks(NodeHealth.FIRST_BACKOFF_TICKS);
-    health.admitted(NODE, tick);
+    health.admitted(NODE, PROBE, tick);
     ticks(NodeHealth.PROBE_TICKS + 1);
     ticks(2 * NodeHealth.FIRST_BACKOFF_TICKS);
-    health.admitted(NODE, tick);
+    health.admitted(NODE, PROBE + 1, tick);
     health.answered(NODE);
 
     quietRequests(NodeHealth.QUIET_REQUESTS);
@@ -203,14 +278,29 @@ class NodeHealthTest {
   @Test
   void aNodeAlreadyOutOfServiceIsNotReportedAgain() {
     health.greeted(NODE, nanos());
-    ticks(3 * HEARTBEAT_TICKS);
-    // Requests it took before it went silent are still unanswered.
+    ticks(2 * HEARTBEAT_TICKS);
     quietRequests(NodeHealth.QUIET_REQUESTS);
+    assertEquals(List.of(NODE), ticks(NodeHealth.QUIET_TICKS));
+    // Its heartbeats are overdue too, while its circuit is still open.
+    assertEquals(List.of(), ticks(HEARTBEAT_TICKS - 2));
+    assertTrue(health.suspected(NODE));
+    assertEquals(Circuit.OPEN, health.circuit(NODE));
+  }
+
+  @Test
+  void requestsLeftWhenANodeIsSuspectedShowNothingOnceItIsBack() {
+    health.greeted(NODE, nanos());
+    ticks(3 * HEARTBEAT_TICKS);
+    // A request it took before it went silent, which is canceled when it is suspected.
+    quietRequests(1);
     assertEquals(List.of(NODE), ticks(HEARTBEAT_TICKS / 2));
     assertTrue(health.suspected(NODE));
 
-    assertEquals(List.of(), ticks(NodeHealth.QUIET_TICKS));
-    assertEquals(Circuit.OPEN, health.circuit(NODE));
+    health.heartbeat(NODE, nanos());
+    assertEquals(List.of(), ticks(1));
+    quietRequests(1);
+    assertEquals(List.of(), ticks(NodeHealth.QUIET_TICKS - 1));
+    assertEquals(Circuit.CLOSED, health.circuit(NODE));
   }
 
   /** {@code count} requests leave for the node in this tick, each for the first time. */
@@ -223,9 +313,7 @@ class NodeHealthTest {
     List<NodeId> lost = new ArrayList<>();
     for (int i = 0; i < count; i++) {
       tick++;
-      health.handedOver();
       lost.addAll(health.evaluate(tick, nanos()));
-      health.handedOver();
     }
     return lost;
   }

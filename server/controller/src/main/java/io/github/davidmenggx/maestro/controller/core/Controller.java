@@ -101,7 +101,6 @@ public final class Controller implements WorldInput, Transport.Listener {
   public void accept(WorldEvent event) {
     switch (event) {
       case WorldEvent.TickBegan began -> {
-        health.handedOver();
         requests.expire(began.tick());
         for (NodeId node : health.evaluate(began.tick(), env.clock().nowNanos())) {
           requests.outOfService(node);
@@ -109,7 +108,6 @@ public final class Controller implements WorldInput, Transport.Listener {
         links.dial(began.tick());
       }
       case WorldEvent.TickEnded ended -> {
-        health.handedOver();
         // Block changes first, while the chunks about to be read are still marked.
         streams.flushCells();
         streams.flushChunks();
@@ -154,7 +152,7 @@ public final class Controller implements WorldInput, Transport.Listener {
   }
 
   @Override
-  public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
+  public void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrivedNanos) {
     if (!links.inFleet(node)) {
       env.metrics().count("transport.unknown.node", 1);
       return;
@@ -179,12 +177,12 @@ public final class Controller implements WorldInput, Transport.Listener {
       case Reply.Refusal refusal -> requests.refusal(node, refusal);
       case Reply.Greeting greeting -> {
         links.greeted(node, greeting.pathfinder());
-        health.greeted(node, env.clock().nowNanos());
+        health.greeted(node, arrivedNanos);
         streams.hello(node, greeting);
       }
       case Reply.Depth depth -> {
         requests.depth(node, depth.queueDepth());
-        health.heartbeat(node, env.clock().nowNanos());
+        health.heartbeat(node, arrivedNanos);
         // The only view of a node's backlog in production.
         env.metrics().record("node.queue.reported", depth.queueDepth(), "node", node.toString());
         env.metrics().gauge("node.queue.depth", depth.queueDepth(), "node", node.toString());

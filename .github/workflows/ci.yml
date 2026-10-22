@@ -55,8 +55,6 @@ jobs:
         env:
           STARTUP_TIMEOUT: "600"
 
-      # The node built by the unit tests serves a real server, first in shadow mode,
-      # whose answers must match vanilla's, then with its answers moving the mobs.
       - name: End to end
         run: make test-e2e MAESTRO_WITH_OTEL=OFF
         env:

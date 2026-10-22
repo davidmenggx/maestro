@@ -100,7 +100,8 @@ public final class Fleet implements AutoCloseable {
       run = entropy.nextLong();
     }
     OtelMetrics metrics = new OtelMetrics();
-    NettyTransport transport = new NettyTransport(nodes, NettyTransport.MAX_PENDING_BYTES);
+    NettyTransport transport =
+        new NettyTransport(nodes, NettyTransport.MAX_PENDING_BYTES, clock::nowNanos);
     PoolOffload offload = new PoolOffload(OFFLOAD_THREADS);
     ControllerEnv env =
         new ControllerEnv(

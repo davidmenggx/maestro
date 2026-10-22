@@ -15,10 +15,10 @@ import java.util.Set;
  * Each node's link: dialing it, the {@code Join} and {@code Hello} handshake, and the profiles sent
  * on it. Every frame to a node leaves through {@link #send}.
  */
-final class NodeLinks {
+public final class NodeLinks {
 
   /** How often a disconnected node is dialed again. */
-  static final int RECONNECT_TICKS = 20;
+  public static final int RECONNECT_TICKS = 20;
 
   private static final class Link {
 

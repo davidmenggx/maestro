@@ -18,9 +18,11 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.IntFunction;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.level.Level;
@@ -37,8 +39,13 @@ import org.slf4j.LoggerFactory;
  * <p>An offloaded call sends a request. While it waits, the call returns the mob's live path if it
  * is following one, so a mob chasing a moving target keeps moving, or else a held path at its own
  * block ({@link HeldPaths}). The answer replaces either when it arrives, if the mob still follows
- * it. A request the controller refuses at once is searched by vanilla instead. One dropped later
- * ends a held path, and the mob's goal asks again. A mob that no longer follows its placeholder
+ * it. A request the controller refuses at once is searched on the server instead: by the {@link
+ * Failover} if the region's nodes cannot take it now, and otherwise by vanilla in the same call.
+ * One dropped later ends a held path, and the mob's goal asks again.
+ *
+ * <p>A mob waits for its answer only while it follows its placeholder and its navigation was handed
+ * it after the call, so a caller that searched but did not take the path, as a goal whose {@code
+ * canUse} declines after its search, does not have the answer applied. A mob that does not wait
  * when the tick's work ends cancels its request. Judging this at the end of the tick, not when the
  * navigation drops the placeholder, lets a goal that replaces another stop the navigation and hand
  * it the same path back, as the goal selector does when the new goal's {@code canUse} searched.
@@ -132,7 +139,8 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
 
   /**
    * A request waiting for its answer. {@code placeholder} is the path handed out meanwhile, and
-   * {@code vanilla} is vanilla's answer in shadow mode. Each is null otherwise.
+   * {@code vanilla} is vanilla's answer in shadow mode. Each is null otherwise. {@code handed} is
+   * whether the navigation was handed the placeholder since it was handed out.
    */
   private static final class Pending {
 
@@ -140,6 +148,7 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     final BlockPos target;
     final VanillaPath vanilla;
     Path placeholder;
+    boolean handed;
 
     Pending(BlockPos start, BlockPos target, VanillaPath vanilla) {
       this.start = start;
@@ -181,6 +190,7 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
   private final Metrics metrics;
   private final ProfileTable profiles;
   private final Offload mode;
+  private final Failover failover;
   private final Int2ObjectMap<MobState> mobs = new Int2ObjectOpenHashMap<>();
 
   /** Mobs with a request waiting in {@link Offload#ON} mode, in the order they asked. */
@@ -196,7 +206,8 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
   /** The mob whose request the controller is admitting now, or {@link #NO_MOB}. */
   private int admitting = NO_MOB;
 
-  private boolean refused;
+  /** Why the controller refused the request it is admitting, or null if it has not. */
+  private DropReason refusal;
 
   /** Offloads the searches of mobs in {@code level} that start in one of {@code regions}. */
   public PathOffload(
@@ -211,17 +222,24 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
         regions,
         id -> level.getEntity(id) instanceof Mob mob ? new MobNavigator(mob) : null,
         clock,
+        System::nanoTime,
+        () -> players(level),
         metrics,
         profiles,
         mode);
   }
 
-  /** {@code navigators} finds a mob's navigation by its id, or null if the mob is gone. */
+  /**
+   * {@code navigators} finds a mob's navigation by its id, or null if the mob is gone. {@code
+   * nanos} times the server's own searches, and {@code players} gives where the players stand.
+   */
   PathOffload(
       Level level,
       RegionMap regions,
       IntFunction<Navigator> navigators,
       Clock clock,
+      LongSupplier nanos,
+      Supplier<List<Vec3>> players,
       Metrics metrics,
       ProfileTable profiles,
       Offload mode) {
@@ -232,6 +250,18 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     this.metrics = metrics;
     this.profiles = profiles;
     this.mode = mode;
+    this.failover = new Failover(navigators, clock, nanos, players, metrics);
+  }
+
+  /** Where the players who can be near a mob stand. */
+  private static List<Vec3> players(ServerLevel level) {
+    List<Vec3> positions = new ArrayList<>();
+    for (ServerPlayer player : level.players()) {
+      if (!player.isSpectator()) {
+        positions.add(player.position());
+      }
+    }
+    return positions;
   }
 
   /** Sends requests to {@code controller} from now on. Until then no call is taken. */
@@ -258,11 +288,24 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
   }
 
   @Override
-  public Path search(Mob mob, SearchCall call, Supplier<Path> vanilla) {
+  public Path search(Mob mob, SearchCall call, Searches.Vanilla vanilla) {
     return search(mob.getId(), new MobNavigator(mob), call, vanilla);
   }
 
-  Path search(int mobId, Navigator navigator, SearchCall call, Supplier<Path> vanilla) {
+  @Override
+  public void handed(Mob mob, Path path) {
+    handed(mob.getId(), path);
+  }
+
+  /** The mob's navigation was handed {@code path}, so if it is a placeholder, it is followed. */
+  void handed(int mobId, Path path) {
+    MobState state = mobs.get(mobId);
+    if (state != null && state.pending != null && path == state.pending.placeholder) {
+      state.pending.handed = true;
+    }
+  }
+
+  Path search(int mobId, Navigator navigator, SearchCall call, Searches.Vanilla vanilla) {
     MobState state = mobs.computeIfAbsent(mobId, id -> new MobState());
     BlockPos start = call.start();
     BlockPos target = call.target();
@@ -280,18 +323,22 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     Pending pending = state.pending;
     if (pending != null && pending.matches(start, target)) {
       // Asked again for the answer it already waits for.
-      return mode == Offload.SHADOW ? vanilla.get() : placeholder(navigator, pending);
+      return mode == Offload.SHADOW ? vanilla.search() : placeholder(navigator, pending);
     }
 
     if (mode == Offload.SHADOW) {
-      Path path = vanilla.get();
-      if (request(mobId, navigator, state, call)) {
+      Path path = vanilla.search();
+      if (request(mobId, navigator, state, call) == null) {
         state.pending = new Pending(start, target, VanillaPath.of(path));
       }
       return path;
     }
-    if (!request(mobId, navigator, state, call)) {
-      return vanilla.get();
+    DropReason refused = request(mobId, navigator, state, call);
+    if (refused == DropReason.UNAVAILABLE) {
+      return failover.serve(mobId, navigator, target, vanilla);
+    }
+    if (refused != null) {
+      return vanilla.search();
     }
     Pending sent = new Pending(start, target, null);
     state.pending = sent;
@@ -300,16 +347,16 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
   }
 
   /**
-   * Sends the call's request, which replaces any the mob has waiting. Returns whether the
-   * controller took it. One it refuses at once is reported dropped during the call.
+   * Sends the call's request, which replaces any the mob has waiting. Returns null if the
+   * controller took it, or why it refused it, which it reports during the call.
    */
-  private boolean request(int mobId, Navigator navigator, MobState state, SearchCall call) {
+  private DropReason request(int mobId, Navigator navigator, MobState state, SearchCall call) {
     record(Outcome.REQUESTED);
     Pending replaced = state.pending;
     state.pending = null;
     waiting.remove(mobId);
     admitting = mobId;
-    refused = false;
+    refusal = null;
     try {
       controller.accept(
           new WorldEvent.PathRequested(
@@ -322,53 +369,58 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     } finally {
       admitting = NO_MOB;
     }
-    if (refused) {
+    if (refusal != null) {
       record(Outcome.REFUSED);
       if (replaced != null) {
         endHold(navigator);
       }
-      return false;
     }
-    return true;
+    return refusal;
   }
 
   /**
    * What the mob follows while it waits: its live path if it has one, or else a held path at the
-   * start node. A held path it already follows there keeps being held.
+   * start node. A held path it already follows there keeps being held. A placeholder that changes
+   * must be handed to the navigation again.
    */
   private static Path placeholder(Navigator navigator, Pending pending) {
     Path current = navigator.path();
-    if (current != null && !current.isDone()) {
-      if (!HeldPaths.isHeld(current)) {
-        pending.placeholder = current;
-        return current;
-      }
-      if (current.getNodeCount() == 1 && current.getNode(0).asBlockPos().equals(pending.start)) {
-        HeldPaths.renew(current);
-        pending.placeholder = current;
-        return current;
-      }
+    Path chosen;
+    if (current != null && !current.isDone() && !HeldPaths.isHeld(current)) {
+      chosen = current;
+    } else if (current != null
+        && !current.isDone()
+        && current.getNodeCount() == 1
+        && current.getNode(0).asBlockPos().equals(pending.start)) {
+      HeldPaths.renew(current);
+      chosen = current;
+    } else {
+      chosen = HeldPaths.hold(pending.start, pending.target);
     }
-    pending.placeholder = HeldPaths.hold(pending.start, pending.target);
-    return pending.placeholder;
+    if (chosen != pending.placeholder) {
+      pending.placeholder = chosen;
+      pending.handed = false;
+    }
+    return chosen;
   }
 
   /**
-   * Whether a mob following {@code current} still waits for {@code pending}: it follows the
-   * placeholder, or is held, which it only ever is while a request is out.
+   * Whether a mob following {@code current} still waits for {@code pending}: its navigation was
+   * handed the placeholder, and it follows it or is held, which it only ever is while a request is
+   * out.
    */
   private static boolean waitsFor(Pending pending, Path current) {
-    return current != null && (current == pending.placeholder || HeldPaths.isHeld(current));
+    return pending.handed
+        && current != null
+        && (current == pending.placeholder || HeldPaths.isHeld(current));
   }
 
   /**
-   * The tick's work is done. Each mob that no longer follows its placeholder cancels its request,
-   * since its answer would not be used, and a mob that left cancels it too.
+   * The tick's work is done. Each mob that no longer waits for its answer cancels its request,
+   * since its answer would not be used, and a mob that left cancels it too. A hold left without a
+   * request ends. Then the failover runs the full searches whose turn it is.
    */
   public void tickEnding() {
-    if (waiting.isEmpty()) {
-      return;
-    }
     List<Integer> displaced = new ArrayList<>();
     for (int mobId : waiting) {
       MobState state = mobs.get(mobId);
@@ -382,7 +434,12 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
       mobs.get(mobId).pending = null;
       record(Outcome.CANCELED);
       controller.accept(new WorldEvent.PathCanceled(clock.tick(), mobId));
+      Navigator navigator = navigators.apply(mobId);
+      if (navigator != null) {
+        endHold(navigator);
+      }
     }
+    failover.tickEnding();
   }
 
   @Override
@@ -448,9 +505,9 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
   public void pathDropped(int mobId, DropReason reason) {
     if (mobId == admitting) {
       // The request being admitted replaces the one superseded, and its own refusal means
-      // vanilla searches instead.
+      // the server searches instead.
       if (reason != DropReason.SUPERSEDED) {
-        refused = true;
+        refusal = reason;
       }
       return;
     }
@@ -472,6 +529,7 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
   public void mobRemoved(int mobId) {
     mobs.remove(mobId);
     waiting.remove(mobId);
+    failover.mobRemoved(mobId);
   }
 
   /** A held path the mob follows ends, so its goal finishes and asks again later. */
@@ -546,6 +604,10 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     return outcomes.getOrDefault(Outcome.valueOf(outcome), 0L);
   }
 
+  Failover failover() {
+    return failover;
+  }
+
   /** Counts of what became of the requests so far, and how late their answers were. */
   public String summary() {
     StringBuilder text = new StringBuilder();
@@ -555,7 +617,7 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
           .append(outcomes.getOrDefault(outcome, 0L))
           .append(' ');
     }
-    text.append("ticks_late=");
+    text.append(failover.summary()).append(" ticks_late=");
     String separator = "";
     for (int ticks = 0; ticks < ticksLate.length; ticks++) {
       if (ticksLate[ticks] > 0) {

@@ -9,7 +9,10 @@ public interface Workload {
 
   /**
    * Announces the world as it stands, as a starting server would to a new controller process: every
-   * loaded chunk, mob and player.
+   * loaded chunk, mob and player. A workload that cannot refuses, so a restarted controller is
+   * never left unaware of the world.
    */
-  default void replayState(long tick, WorldInput input) {}
+  default void replayState(long tick, WorldInput input) {
+    throw new UnsupportedOperationException("this workload cannot replay the world");
+  }
 }

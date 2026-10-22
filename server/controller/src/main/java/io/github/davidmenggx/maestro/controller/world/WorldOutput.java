@@ -9,17 +9,23 @@ import java.util.Objects;
  */
 public interface WorldOutput {
 
-  /** Why a request will not produce a computed path. The server then computes its own. */
+  /**
+   * Why a request will not produce a computed path. The server then finds the mob a path itself.
+   */
   enum DropReason {
     /** Rejected before sending because the owning node would answer past the tick budget. */
     QUEUE_DEPTH,
     /**
-     * No node can take the request now: none owns the region, the search could read past the
-     * region, the owner has not been sent the chunk the search starts in or is out of service, or a
-     * position does not fit the wire. Also an answer the node searched before that chunk reached
-     * it.
+     * No node serves the request from here: it starts outside every region, its search could read
+     * past its region, or a position does not fit the wire. Also an answer the node searched before
+     * the chunk the search starts in reached it.
      */
     NO_NODE,
+    /**
+     * The region's holders cannot take the request now: none is linked, in service, and holding the
+     * chunk the search starts in, as while a node is down or its region is sent again.
+     */
+    UNAVAILABLE,
     /**
      * The owning node did not have this mob profile yet. It is registered as part of the send, and
      * if the request still arrives before the registration, the node answers that it is unknown.

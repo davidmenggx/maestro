@@ -42,7 +42,11 @@ public interface Transport {
   /** Callbacks run on the controller thread, never inside a call into the transport. */
   interface Listener {
 
-    void onFrame(NodeId node, Channel channel, ByteBuffer frame);
+    /**
+     * {@code arrivedNanos} is when the transport heard the frame, on the scale of {@link
+     * Clock#nowNanos}. The callback may run much later, as after a server stall.
+     */
+    void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrivedNanos);
 
     void onConnected(NodeId node);
 

@@ -52,11 +52,18 @@ class PathOffloadTest {
           new MobClass.Abilities(false, false, true, false),
           new float[PathTypes.count()]);
 
+  /** What one full search costs the server thread, by the test's clock. */
+  private static final long SEARCH_NANOS = 400_000;
+
   private final TestClock clock = new TestClock();
   private final FakeController controller = new FakeController();
   private final Map<Integer, FakeNavigator> navigators = new LinkedHashMap<>();
-  private final FakeNavigator navigator = new FakeNavigator();
+  private final FakeNavigator navigator = new FakeNavigator(MOB);
   private final List<Path> vanillaCalls = new ArrayList<>();
+  private final List<Double> vanillaShares = new ArrayList<>();
+  private final List<Integer> laterSearches = new ArrayList<>();
+  private final List<Vec3> players = new ArrayList<>();
+  private long nanos;
 
   private PathOffload offload;
 
@@ -98,6 +105,7 @@ class PathOffloadTest {
     navigator.follow(live, START);
 
     assertSame(live, search(START, TARGET));
+    navigator.follow(live, TARGET);
 
     // It walked on to x = 2 while it waited.
     navigator.position = new Vec3(2.5, 64, 0.5);
@@ -201,6 +209,35 @@ class PathOffloadTest {
     Path other = navigator.path;
     offload.pathComputed(answer(START, TARGET, line(0, 6)));
     assertSame(other, navigator.path);
+  }
+
+  @Test
+  void aCallerThatDoesNotTakeItsPlaceholderHasItsRequestCanceled() {
+    // A goal's `canUse` searches, gets the stroll path the mob follows, and declines. The mob
+    // strolls on along that same path, so only what the navigation was handed shows it.
+    Path stroll = path(line(-4, 0));
+    navigator.follow(stroll, START);
+    assertSame(stroll, search(START, TARGET));
+
+    offload.tickEnding();
+
+    assertEquals(1, controller.cancels());
+    offload.pathComputed(answer(START, TARGET, line(0, 6)));
+    assertSame(stroll, navigator.path);
+    assertEquals(0, offload.outcomes("APPLIED"));
+  }
+
+  @Test
+  void aCallerThatDeclinesWhileTheMobIsHeldEndsTheHold() {
+    Path held = search(START, TARGET);
+    navigator.follow(held, TARGET);
+    // The new request replaces the one the hold was for, and the caller does not take it.
+    assertSame(held, search(START, new BlockPos(0, 64, 9)));
+
+    offload.tickEnding();
+
+    assertEquals(1, controller.cancels());
+    assertTrue(held.isDone());
   }
 
   @Test
@@ -329,6 +366,122 @@ class PathOffloadTest {
   }
 
   @Test
+  void aMobWhoseNodeCannotTakeItKeepsAPathMadeRecently() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    Path recent = path(line(-4, 0));
+    navigator.follow(recent, START);
+    clock.tick += Failover.RECENT_TICKS;
+
+    assertSame(recent, search(START, TARGET));
+
+    assertEquals(List.of(), vanillaCalls);
+    assertEquals(1, offload.failover().outcomes(Failover.Outcome.RECENT));
+  }
+
+  @Test
+  void aMobWhoseNodeCannotTakeItIsSearchedInFullWhileNoOtherWaits() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    Path old = path(line(-4, 0));
+    navigator.follow(old, START);
+    clock.tick += Failover.RECENT_TICKS + 1;
+
+    Path path = search(START, TARGET);
+
+    assertSame(vanillaCalls.get(0), path);
+    assertEquals(List.of(1.0), vanillaShares);
+    assertEquals(1, offload.failover().outcomes(Failover.Outcome.FULL));
+  }
+
+  @Test
+  void pastTheBudgetAMobGetsACheapPathAndItsFullSearchWhenTheBudgetRefills() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    int searches = (int) (Failover.BUDGET_NANOS / SEARCH_NANOS) + 1;
+    for (int mob = 0; mob < searches; mob++) {
+      search(mob, navigator(mob), START, TARGET);
+    }
+    // The last full search ran past the budget, so the next mob gets a cheap path and waits.
+    Path cheap = search(searches, navigator(searches), START, TARGET);
+    navigator(searches).follow(cheap, TARGET);
+    assertEquals(Failover.CHEAP_SHARE, vanillaShares.get(vanillaShares.size() - 1), 1e-6);
+    assertTrue(offload.failover().waits(searches));
+
+    // Nothing is left of this tick's budget.
+    offload.tickEnding();
+    assertEquals(List.of(), laterSearches);
+
+    clock.tick++;
+    offload.tickEnding();
+    assertEquals(List.of(searches), laterSearches);
+    assertFalse(offload.failover().waits(searches));
+    assertNotSame(cheap, navigator(searches).path);
+    assertEquals(1, offload.failover().outcomes(Failover.Outcome.LATER));
+  }
+
+  @Test
+  void theMobNearestAPlayerHasTheFirstTurn() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    spendTheBudget();
+    FakeNavigator far = navigator(1);
+    FakeNavigator near = navigator(2);
+    near.position = new Vec3(200.5, 64, 0.5);
+    players.add(new Vec3(210, 64, 0));
+    far.follow(search(1, far, START, TARGET), TARGET);
+    near.follow(search(2, near, START, TARGET), TARGET);
+
+    clock.tick++;
+    offload.tickEnding();
+
+    assertEquals(List.of(2, 1), laterSearches);
+  }
+
+  @Test
+  void aMobThatHasWaitedLongerThanItsDistanceCostsGoesFirstWhereverItIs() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    spendTheBudget();
+    FakeNavigator far = navigator(1);
+    FakeNavigator near = navigator(2);
+    near.position = new Vec3(200.5, 64, 0.5);
+    players.add(new Vec3(210, 64, 0));
+    // The far mob is about 13 turns' worth of blocks further, and asked 14 ticks sooner.
+    far.follow(search(1, far, START, TARGET), TARGET);
+    clock.tick += 14;
+    near.follow(search(2, near, START, TARGET), TARGET);
+
+    clock.tick++;
+    offload.tickEnding();
+
+    assertEquals(List.of(1, 2), laterSearches);
+  }
+
+  @Test
+  void aMobThatStopsFollowingItsCheapPathLosesItsTurn() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    spendTheBudget();
+    navigator.follow(search(START, TARGET), TARGET);
+    assertTrue(offload.failover().waits(MOB));
+    navigator.stop();
+
+    clock.tick += 2;
+    offload.tickEnding();
+
+    assertEquals(List.of(), laterSearches);
+    assertFalse(offload.failover().waits(MOB));
+    assertEquals(1, offload.failover().outcomes(Failover.Outcome.MOVED_ON));
+  }
+
+  @Test
+  void otherRefusalsAreSearchedByVanillaWithoutTheFailover() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    spendTheBudget();
+    controller.refuseWith = DropReason.QUEUE_DEPTH;
+
+    search(START, TARGET);
+
+    assertEquals(1.0, vanillaShares.get(vanillaShares.size() - 1));
+    assertFalse(offload.failover().waits(MOB));
+  }
+
+  @Test
   void anAnswerBecomesThePathVanillasSearchWouldHaveReturned() {
     WorldOutput.PathResult answer =
         new WorldOutput.PathResult(
@@ -370,6 +523,8 @@ class PathOffloadTest {
             RegionLayout.spiral(List.of(NodeId.of(0))),
             navigators::get,
             clock,
+            () -> nanos,
+            () -> players,
             new NoMetrics(),
             new ProfileTable(),
             mode);
@@ -378,18 +533,52 @@ class PathOffloadTest {
     return built;
   }
 
-  /** A call from {@code start} to {@code target}, whose vanilla search finds a straight line. */
+  /** The navigation of another mob, which follows nothing yet. */
+  private FakeNavigator navigator(int mob) {
+    return navigators.computeIfAbsent(mob, FakeNavigator::new);
+  }
+
+  /**
+   * Full searches in the failover, by mobs that never wait, until this tick's budget is gone. The
+   * last runs past it.
+   */
+  private void spendTheBudget() {
+    long before = offload.failover().outcomes(Failover.Outcome.FULL);
+    long searches = Failover.BUDGET_NANOS / SEARCH_NANOS + 1;
+    for (int i = 0; i < searches; i++) {
+      int mob = 100 + (int) before + i;
+      search(mob, navigator(mob), START, TARGET);
+    }
+    assertEquals(before + searches, offload.failover().outcomes(Failover.Outcome.FULL));
+  }
+
   private Path search(BlockPos start, BlockPos target) {
+    return search(MOB, navigator, start, target);
+  }
+
+  /**
+   * A call from {@code start} to {@code target}, whose vanilla search finds a straight line and
+   * costs {@link #SEARCH_NANOS} in full.
+   */
+  private Path search(int mob, FakeNavigator from, BlockPos start, BlockPos target) {
     SearchCall call = new SearchCall(PROFILE, start, target, new WorldEvent.Search(1, 16f, 256, 3));
     return offload.search(
-        MOB,
-        navigator,
+        mob,
+        from,
         call,
-        () -> {
-          Path vanilla = path(line(start.getX(), target.getX()));
-          vanillaCalls.add(vanilla);
-          return vanilla;
-        });
+        new Searches.Vanilla(
+            share -> {
+              Path vanilla = path(line(start.getX(), target.getX()));
+              vanillaCalls.add(vanilla);
+              vanillaShares.add(share);
+              nanos += (long) (SEARCH_NANOS * share);
+              return vanilla;
+            },
+            () -> {
+              laterSearches.add(mob);
+              nanos += SEARCH_NANOS;
+              return path(line(start.getX(), target.getX() + 1));
+            }));
   }
 
   private WorldOutput.PathResult answer(BlockPos start, BlockPos target, List<BlockPos> nodes) {
@@ -426,11 +615,19 @@ class PathOffloadTest {
     return new Path(nodes, blocks.get(blocks.size() - 1), true);
   }
 
-  /** A navigation that takes a path the way vanilla's does: one with the same nodes is kept. */
-  private static final class FakeNavigator implements PathOffload.Navigator {
+  /**
+   * A navigation that takes a path the way vanilla's does: one with the same nodes is kept. It
+   * tells the offload what it was handed, as the navigation mixin does.
+   */
+  private final class FakeNavigator implements PathOffload.Navigator {
+    final int mob;
     Path path;
     BlockPos target;
     Vec3 position = Vec3.atBottomCenterOf(START);
+
+    FakeNavigator(int mob) {
+      this.mob = mob;
+    }
 
     @Override
     public Path path() {
@@ -444,6 +641,9 @@ class PathOffloadTest {
 
     @Override
     public void follow(Path next, BlockPos target) {
+      if (offload != null) {
+        offload.handed(mob, next);
+      }
       this.target = target;
       if (!next.sameAs(path)) {
         path = next;

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.util.EnumSet;
@@ -67,7 +68,7 @@ class FuzzTest {
     for (int i = 0; i < SimRun.runCount(); i++) {
       SimRun run = SimRun.of(SimRun.baseSeed() + i, FaultPlan.reliable(), TICKS).go();
       assertEquals(List.of(), run.violations(), run.describe());
-      heldToTheSlo += run.fitsCapacity() ? 1 : 0;
+      heldToTheSlo += run.heldToTheSlo() ? 1 : 0;
       assertTrue(run.out.answered() > 0, run.describe());
       assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
       assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
@@ -170,6 +171,8 @@ class FuzzTest {
     long emptyServers = 0;
     long heldToTheSlo = 0;
     long heldAtTheEdge = 0;
+    long healthyThroughAStall = 0;
+    long healthyThroughSlowTicks = 0;
     long abandonedAnswers = 0;
     long answersBehindTheirChunk = 0;
     long canceledInQueue = 0;
@@ -195,7 +198,8 @@ class FuzzTest {
       assertEquals(List.of(), run.violations(), run.describe());
 
       drops.addAll(run.out.drops().keySet());
-      boolean held = run.fitsCapacity() && run.out.answered() > 0;
+      boolean held = run.heldToTheSlo() && run.out.answered() > 0;
+      boolean judgedHealthy = run.fitsCapacity() && run.out.answered() > 0;
       heldToTheSlo += held ? 1 : 0;
       heldAtTheEdge +=
           held
@@ -203,6 +207,14 @@ class FuzzTest {
                       == FaultPlan.edgeLatency(run.scenario.maxCostSteps(run.topology.nodeCount()))
               ? 1
               : 0;
+      healthyThroughAStall +=
+          judgedHealthy
+                  && run.faults.faults().stream()
+                      .anyMatch(fault -> fault instanceof FaultPlan.ServerStalled)
+              ? 1
+              : 0;
+      healthyThroughSlowTicks +=
+          judgedHealthy && run.scenario.chances().get(Chance.SLOW_TICK) > 0 ? 1 : 0;
       abandonedAnswers += run.sim.metrics().total("path.response.abandoned");
       answersBehindTheirChunk += run.sim.metrics().total("path.response.behind");
       replicated.add(run.topology.replicated());
@@ -257,6 +269,9 @@ class FuzzTest {
     assertTrue(nodesCompared > 0, "no node ever caught up far enough to compare its state");
     assertTrue(heldToTheSlo > 0, "no run that answered requests was held to the latency SLO");
     assertTrue(heldAtTheEdge > 0, "no run at the latency edge was held to the SLO");
+    assertTrue(healthyThroughAStall > 0, "no healthy fleet was judged through a stalled server");
+    assertTrue(
+        healthyThroughSlowTicks > 0, "no healthy fleet was judged through a server falling behind");
     assertTrue(abandonedAnswers > 0, "no node ever answered a request after it was abandoned");
     assertTrue(answersBehindTheirChunk > 0, "no node ever searched before its start chunk arrived");
     assertTrue(canceledInQueue > 0, "no cancel ever reached a request still waiting on its node");

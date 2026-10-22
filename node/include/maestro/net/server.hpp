@@ -99,6 +99,11 @@ private:
   std::array<std::uint8_t, 65536> Received{};
   asio::ip::udp::endpoint Sender;
 
+  /// Datagrams that could not be sent, and when that was last logged. A full
+  /// send buffer fails many at once, so the log is paced.
+  std::uint64_t Unsent = 0;
+  std::chrono::steady_clock::time_point LastUnsentLog{};
+
   serve::NodeCore Core;
   /// Last, so it is destroyed first, and `~Workers` stops its threads before
   /// anything they use is destroyed.

@@ -33,7 +33,8 @@ public abstract class PathFinderMixin {
   /**
    * Wraps the search itself, which runs after the evaluator's {@code prepare} has resolved the
    * start node and before its {@code done}, so the mob's profile is read as the search sees it. A
-   * call the interceptor takes is answered by it, which runs vanilla's search only if it chooses.
+   * call the interceptor takes is answered by it, which runs vanilla's search only if it chooses,
+   * in full or on a share of its node budget, and may run it again after the call.
    */
   @WrapOperation(
       method =
@@ -80,8 +81,17 @@ public abstract class PathFinderMixin {
     return interceptor.search(
         mob,
         call,
-        () ->
-            search.call(
-                finder, from, targets, maxPathLength, reachRange, maxVisitedNodesMultiplier));
+        new Searches.Vanilla(
+            share ->
+                search.call(
+                    finder,
+                    from,
+                    targets,
+                    maxPathLength,
+                    reachRange,
+                    (float) (maxVisitedNodesMultiplier * share)),
+            () ->
+                Searches.searchAgain(
+                    finder, mob, target, maxPathLength, reachRange, maxVisitedNodesMultiplier)));
   }
 }

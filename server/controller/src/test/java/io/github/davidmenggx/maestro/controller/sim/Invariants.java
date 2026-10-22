@@ -41,6 +41,24 @@ public final class Invariants {
     violations.addAll(run.retiredViolations());
     violations.addAll(run.controller.selfCheck());
 
+    // A node is sent each profile at most once per link, so the controller forgets none it sent.
+    int classes = run.scenario.counts().get(Scenario.Count.MOB_CLASSES);
+    for (ModeledNode node : run.sim.nodes()) {
+      String label = node.id().toString();
+      long registered = run.sim.metrics().counter("mobclass.registered", "node", label);
+      long links = run.sim.metrics().counter("transport.connected", "node", label);
+      if (registered > classes * links) {
+        violations.add(
+            label
+                + " was sent "
+                + registered
+                + " profiles over "
+                + links
+                + " links, but the world has "
+                + classes);
+      }
+    }
+
     // Every frame fits its channel: a request frame one datagram, a world frame what
     // the node reads.
     long oversize = run.sim.metrics().total("transport.oversize");
@@ -112,10 +130,12 @@ public final class Invariants {
     // and a probe now and then, so its mobs are searched on the server instead.
     violations.addAll(run.sim.failOpenViolations());
 
-    if (run.fitsCapacity()) {
+    if (run.heldToTheSlo()) {
       violations.addAll(checkSlo(run.out.latencies(), run.out.sloMisses()));
-      // Nothing in such a run stops a node from answering in time, so taking one out of
-      // service would be a false alarm.
+    }
+    if (run.fitsCapacity()) {
+      // Nothing in such a run stops a node from answering in time, a server that stalls or
+      // falls behind included, so taking one out of service would be a false alarm.
       long suspected = run.sim.metrics().total("node.suspected");
       long opened = run.sim.metrics().total("node.quiet");
       if (suspected + opened > 0) {

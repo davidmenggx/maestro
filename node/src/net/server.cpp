@@ -264,9 +264,18 @@ void Server::sendTo(const udp::endpoint &To,
   asio::error_code Error;
   Requests.send_to(asio::buffer(Datagram.data(), Datagram.size()), To, 0,
                    Error);
-  if (Error)
-    std::clog << "maestro-node: a datagram to " << To
-              << " was not sent: " << Error.message() << '\n';
+  if (!Error)
+    return;
+  ++Unsent;
+  // At most a line a second, so an overloaded node is not slowed further by
+  // its own log.
+  const auto At = std::chrono::steady_clock::now();
+  if (At - LastUnsentLog < std::chrono::seconds(1))
+    return;
+  LastUnsentLog = At;
+  std::clog << "maestro-node: " << Unsent
+            << " datagrams not sent so far, the last to " << To << ": "
+            << Error.message() << '\n';
 }
 
 void Server::linkDropped(std::string_view Reason) {

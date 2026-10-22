@@ -34,6 +34,7 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,7 +48,7 @@ import org.slf4j.LoggerFactory;
  * <p>Frames are sent without being copied, so a caller must not change one it has sent.
  *
  * <p>The network runs on one thread of its own. What it hears waits in a queue until {@link #drain}
- * hands it to the listener on the server thread.
+ * hands it to the listener on the server thread, with the time it was heard.
  */
 public final class NettyTransport implements Transport, AutoCloseable {
 
@@ -91,6 +92,7 @@ public final class NettyTransport implements Transport, AutoCloseable {
 
   private final Map<NodeId, Endpoints> endpoints = new LinkedHashMap<>();
   private final int maxPendingBytes;
+  private final LongSupplier nanoTime;
   private final EventLoopGroup group;
 
   /** Each node's request socket. */
@@ -104,12 +106,15 @@ public final class NettyTransport implements Transport, AutoCloseable {
   private volatile Listener listener;
 
   /**
-   * Resolves every node's addresses and binds each node's request socket. Throws {@link
-   * IllegalArgumentException} if a host does not resolve, or two nodes take requests at one
+   * Resolves every node's addresses and binds each node's request socket. {@code nanoTime} stamps
+   * each frame when it is heard, on the controller clock's scale, from the network thread. Throws
+   * {@link IllegalArgumentException} if a host does not resolve, or two nodes take requests at one
    * address.
    */
-  public NettyTransport(Map<NodeId, NodeAddress> nodes, int maxPendingBytes) {
+  public NettyTransport(
+      Map<NodeId, NodeAddress> nodes, int maxPendingBytes, LongSupplier nanoTime) {
     this.maxPendingBytes = maxPendingBytes;
+    this.nanoTime = nanoTime;
     Set<InetSocketAddress> requestAddresses = new HashSet<>();
     for (Map.Entry<NodeId, NodeAddress> entry : nodes.entrySet()) {
       NodeAddress address = entry.getValue();
@@ -350,6 +355,7 @@ public final class NettyTransport implements Transport, AutoCloseable {
 
     @Override
     protected void channelRead0(ChannelHandlerContext context, ByteBuf frame) {
+      long arrived = nanoTime.getAsLong();
       byte[] bytes = ByteBufUtil.getBytes(frame);
       heard.add(
           () -> {
@@ -359,7 +365,7 @@ public final class NettyTransport implements Transport, AutoCloseable {
               live = !link.ended;
             }
             if (live) {
-              listener.onFrame(link.node, channel, ByteBuffer.wrap(bytes));
+              listener.onFrame(link.node, channel, ByteBuffer.wrap(bytes), arrived);
             }
           });
     }
@@ -385,8 +391,10 @@ public final class NettyTransport implements Transport, AutoCloseable {
 
     @Override
     protected void channelRead0(ChannelHandlerContext context, DatagramPacket packet) {
+      long arrived = nanoTime.getAsLong();
       byte[] bytes = ByteBufUtil.getBytes(packet.content());
-      heard.add(() -> listener.onFrame(node, Transport.Channel.REQUEST, ByteBuffer.wrap(bytes)));
+      heard.add(
+          () -> listener.onFrame(node, Transport.Channel.REQUEST, ByteBuffer.wrap(bytes), arrived));
     }
 
     @Override

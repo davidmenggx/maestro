@@ -103,6 +103,25 @@ class HeldPathsTest {
     assertTrue(path.isDone());
   }
 
+  @Test
+  void everyPathKnowsTheTickItWasMadeOn() {
+    Path path = new Path(new ArrayList<>(List.of(new Node(0, 64, 0))), TARGET, true);
+
+    clock.tick += 10;
+    assertTrue(HeldPaths.madeWithin(path, 10));
+    clock.tick++;
+    assertFalse(HeldPaths.madeWithin(path, 10));
+  }
+
+  @Test
+  void aPathMadeWithNoClockIsNeverRecent() {
+    HeldPaths.clock(null);
+    Path path = new Path(new ArrayList<>(List.of(new Node(0, 64, 0))), TARGET, true);
+    HeldPaths.clock(clock);
+
+    assertFalse(HeldPaths.madeWithin(path, Integer.MAX_VALUE));
+  }
+
   private static final class TestClock implements Clock {
     long tick = 100;
 

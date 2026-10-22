@@ -24,7 +24,10 @@ import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.function.LongSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -105,6 +108,35 @@ class NettyTransportTest {
   }
 
   @Test
+  void aFrameCarriesTheTimeItWasHeardNotTheTimeItWasHandedOver() throws Exception {
+    FakeNode node = fakeNode();
+    AtomicLong now = new AtomicLong(7);
+    AtomicInteger stamps = new AtomicInteger();
+    NettyTransport transport =
+        transport(
+            node.address(),
+            NettyTransport.MAX_PENDING_BYTES,
+            () -> {
+              stamps.incrementAndGet();
+              return now.get();
+            });
+    Recorder heard = listen(transport);
+
+    try (DatagramSocket sender = new DatagramSocket(0, InetAddress.getLoopbackAddress())) {
+      sender.send(new DatagramPacket(new byte[] {1}, 1, transport.requestSocket(NODE)));
+    }
+    // The server stalls after the network heard the datagram, before it is handed over.
+    long deadline = System.nanoTime() + WAIT_MILLIS * 1_000_000;
+    while (stamps.get() == 0 && System.nanoTime() < deadline) {
+      Thread.sleep(5);
+    }
+    now.set(99);
+
+    awaitHeard(transport, () -> heard.frames.size() == 1);
+    assertEquals(List.of(7L), heard.arrived);
+  }
+
+  @Test
   void anAnswerFromAnotherAddressOfTheNodeIsStillItsNodes() throws Exception {
     // As from a node behind NAT, or one with several addresses that answers from another.
     FakeNode first = fakeNode();
@@ -113,7 +145,8 @@ class NettyTransportTest {
     NettyTransport transport =
         new NettyTransport(
             Map.of(NODE, first.address(), other, second.address()),
-            NettyTransport.MAX_PENDING_BYTES);
+            NettyTransport.MAX_PENDING_BYTES,
+            System::nanoTime);
     closing.add(transport);
     Recorder heard = listen(transport);
 
@@ -222,13 +255,15 @@ class NettyTransportTest {
         () ->
             new NettyTransport(
                 Map.of(NODE, new NodeAddress("no-such-host.invalid", 1, 2, 3)),
-                NettyTransport.MAX_PENDING_BYTES));
+                NettyTransport.MAX_PENDING_BYTES,
+                System::nanoTime));
     assertThrows(
         IllegalArgumentException.class,
         () ->
             new NettyTransport(
                 Map.of(NODE, node.address(), NodeId.of(1), node.address()),
-                NettyTransport.MAX_PENDING_BYTES));
+                NettyTransport.MAX_PENDING_BYTES,
+                System::nanoTime));
   }
 
   /** The node's side of a link. */
@@ -274,16 +309,18 @@ class NettyTransportTest {
     final List<NodeId> nodes = new ArrayList<>();
     final List<Channel> channels = new ArrayList<>();
     final List<byte[]> frames = new ArrayList<>();
+    final List<Long> arrived = new ArrayList<>();
     int connected;
     int disconnected;
 
     @Override
-    public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
+    public void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrivedNanos) {
       byte[] bytes = new byte[frame.remaining()];
       frame.get(bytes);
       nodes.add(node);
       channels.add(channel);
       frames.add(bytes);
+      arrived.add(arrivedNanos);
     }
 
     @Override
@@ -308,7 +345,11 @@ class NettyTransportTest {
   }
 
   private NettyTransport transport(NodeAddress address, int cap) {
-    NettyTransport transport = new NettyTransport(Map.of(NODE, address), cap);
+    return transport(address, cap, System::nanoTime);
+  }
+
+  private NettyTransport transport(NodeAddress address, int cap, LongSupplier nanoTime) {
+    NettyTransport transport = new NettyTransport(Map.of(NODE, address), cap, nanoTime);
     closing.add(transport);
     return transport;
   }

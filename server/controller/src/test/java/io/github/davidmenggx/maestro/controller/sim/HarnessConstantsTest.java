@@ -69,6 +69,18 @@ class HarnessConstantsTest {
   }
 
   @Test
+  void theQuietWindowKeepsARequestPastItsBudget() {
+    // The oldest request must still count when it has gone unanswered long enough.
+    assertTrue(NodeHealth.QUIET_WINDOW_TICKS > NodeHealth.QUIET_TICKS);
+    // A probe is judged after its batch leaves and the tick budget passes.
+    assertTrue(NodeHealth.PROBE_TICKS >= RequestTracker.SEND_TICKS + RequestTracker.MAX_TICKS_LATE);
+    // A later probe is never allowed to leave before the one before it.
+    assertTrue(
+        NodeHealth.PROBE_TICKS + 1 + 2 * NodeHealth.FIRST_BACKOFF_TICKS
+            > FailOpenCheck.LATE_SEND_TICKS);
+  }
+
+  @Test
   void answersSentBeforeANodeStopsAreHeardWithinTheStrayWindow() {
     // The slowest datagram arrives within a tick, and waits at most a tick more to be
     // handed over.

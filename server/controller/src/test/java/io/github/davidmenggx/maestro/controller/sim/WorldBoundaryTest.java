@@ -106,7 +106,7 @@ class WorldBoundaryTest {
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    assertEquals(1, run.out.dropped(DropReason.NO_NODE), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.UNAVAILABLE), run.describe());
     for (ModeledNode node : run.sim.nodes()) {
       assertFalse(node.hasState(), run.describe());
     }
@@ -181,7 +181,7 @@ class WorldBoundaryTest {
 
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(4, run.controller.requestsIssued(), run.describe());
-    assertEquals(1, run.out.dropped(DropReason.NO_NODE), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.UNAVAILABLE), run.describe());
     assertEquals(2, run.out.answered(), run.describe());
     // One frame to clear the chunk and one to fill it again, with no new snapshot.
     assertEquals(
@@ -279,21 +279,34 @@ class WorldBoundaryTest {
     NodeId owner = holders(run, HERE).get(0);
 
     run.controller.onFrame(
-        owner, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST, 200));
+        owner,
+        Channel.REQUEST,
+        answer(run.controller.run(), FIRST_REQUEST, 200),
+        run.sim.env().clock().nowNanos());
     // A datagram that is not a frame at all, as from a sender that is not a node.
-    run.controller.onFrame(owner, Channel.REQUEST, ByteBuffer.wrap(new byte[] {9, 0, 0, 0, 1}));
+    run.controller.onFrame(
+        owner,
+        Channel.REQUEST,
+        ByteBuffer.wrap(new byte[] {9, 0, 0, 0, 1}),
+        run.sim.env().clock().nowNanos());
     assertEquals(1, run.controller.outstandingCount(), run.describe());
     assertEquals(2, run.sim.metrics().total("controller.malformed.frame"), run.describe());
 
     // A well-formed answer from a node the request did not go to.
     NodeId other = holders(run, THERE).get(0);
     run.controller.onFrame(
-        other, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE));
+        other,
+        Channel.REQUEST,
+        answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE),
+        run.sim.env().clock().nowNanos());
     assertEquals(1, run.controller.outstandingCount(), run.describe());
     assertEquals(1, run.sim.metrics().total("path.response.misrouted"), run.describe());
 
     run.controller.onFrame(
-        owner, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE));
+        owner,
+        Channel.REQUEST,
+        answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE),
+        run.sim.env().clock().nowNanos());
     assertEquals(0, run.controller.outstandingCount(), run.describe());
     assertEquals(1, run.out.answered(), run.describe());
   }
@@ -308,7 +321,10 @@ class WorldBoundaryTest {
     NodeId owner = holders(run, HERE).get(0);
 
     run.controller.onFrame(
-        owner, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE, 0));
+        owner,
+        Channel.REQUEST,
+        answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE, 0),
+        run.sim.env().clock().nowNanos());
 
     assertEquals(0, run.controller.outstandingCount(), run.describe());
     assertEquals(0, run.out.answered(), run.describe());
@@ -336,12 +352,18 @@ class WorldBoundaryTest {
     assertEquals(2, run.controller.outstandingCount(), run.describe());
 
     run.controller.onFrame(
-        owner, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE));
+        owner,
+        Channel.REQUEST,
+        answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE),
+        run.sim.env().clock().nowNanos());
     assertEquals(1, run.controller.outstandingCount(), run.describe());
     assertEquals(0, run.out.answered(), run.describe());
 
     run.controller.onFrame(
-        owner, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST + 1, PathType.WALKABLE));
+        owner,
+        Channel.REQUEST,
+        answer(run.controller.run(), FIRST_REQUEST + 1, PathType.WALKABLE),
+        run.sim.env().clock().nowNanos());
     assertEquals(0, run.controller.outstandingCount(), run.describe());
     assertEquals(1, run.out.answered(), run.describe());
     assertEquals(List.of(), run.controller.selfCheck(), run.describe());

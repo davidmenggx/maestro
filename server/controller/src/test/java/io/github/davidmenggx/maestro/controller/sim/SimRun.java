@@ -1,6 +1,8 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.core.Controller;
+import io.github.davidmenggx.maestro.controller.core.NodeLinks;
+import io.github.davidmenggx.maestro.controller.core.WorldStreams;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
@@ -9,6 +11,7 @@ import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionMap;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
+import io.github.davidmenggx.maestro.controller.world.WorldInput;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -26,6 +29,12 @@ public final class SimRun {
    * Quiet ticks at the end, so every in-flight request resolves before the invariants are checked.
    */
   public static final long DRAIN_TICKS = 25;
+
+  /**
+   * Ticks past a reconnect and a full send of every loaded chunk that a node may still need to
+   * catch up: its greeting, the last encodes, and their delivery.
+   */
+  static final long SETTLE_MARGIN_TICKS = 5;
 
   /**
    * The SLO: p99 latency must be below this many ticks. Tighter than the admission bound in
@@ -51,7 +60,10 @@ public final class SimRun {
   static final long MAX_FUZZED_TICKS = 320;
 
   public final long seed;
+
+  /** Ticks the run was asked for. It runs longer if its nodes need longer to settle. */
   public final long ticks;
+
   public final FaultPlan faults;
   public final Topology topology;
   public final Scenario scenario;
@@ -74,6 +86,11 @@ public final class SimRun {
   /** What the self-check of each controller process a restart replaced found. */
   private final List<String> retiredViolations = new ArrayList<>();
 
+  /** The tick the workload stops changing the world, or {@link #ticks} if it never does. */
+  private final long quietAfter;
+
+  private long ticksRun;
+
   private final Rng checkpointRng;
 
   /**
@@ -90,12 +107,14 @@ public final class SimRun {
       BiFunction<SimWorld, Rng, Workload> workloadFactory) {
     this.seed = seed;
     this.ticks = ticks;
+    this.quietAfter = quietAfter;
     this.faults = faults;
     this.topology = topology;
     this.scenario = scenario;
     this.sim = new Simulation(seed, faults);
     sim.settleFrom(quietAfter);
     sim.serverBusySteps(scenario.serverBusySteps());
+    sim.slowTicks(scenario.chances().get(Scenario.Chance.SLOW_TICK));
 
     List<NodeId> nodes = new ArrayList<>();
     for (int i = 0; i < topology.nodeCount(); i++) {
@@ -197,7 +216,7 @@ public final class SimRun {
   public SimRun go() {
     // A request enters the ledger before the controller sees it, because a drop can come
     // back within the same call.
-    sim.run(
+    WorldInput input =
         event -> {
           if (event instanceof WorldEvent.PathRequested requested) {
             offer(requested);
@@ -207,11 +226,35 @@ public final class SimRun {
           } else {
             controller.accept(event);
           }
-        },
-        workload,
-        ticks,
-        this::afterTick);
+        };
+    sim.run(input, workload, ticks, this::afterTick);
+    ticksRun = ticks;
+    long more = settledBy() - ticks;
+    if (more > 0) {
+      sim.run(input, workload, more, this::afterTick);
+      ticksRun += more;
+    }
     return this;
+  }
+
+  /**
+   * The tick by which every live node of a run with a quiet tail has caught up: after the last
+   * fault, or the last encode that could fail, the next dial reconnects a node, every loaded chunk
+   * is read again at the read budget, and the margin covers the rest. Scripted runs end where their
+   * script says.
+   */
+  private long settledBy() {
+    if (quietAfter >= ticks) {
+      return ticks;
+    }
+    long from = faults.offloadFailureRate() > 0 ? quietAfter : 0;
+    for (FaultPlan.Fault fault : faults.faults()) {
+      from = Math.max(from, fault.tick());
+    }
+    long reads =
+        (world.mostLoaded() + WorldStreams.MAX_CHUNK_READS_PER_TICK - 1)
+            / WorldStreams.MAX_CHUNK_READS_PER_TICK;
+    return from + NodeLinks.RECONNECT_TICKS + reads + SETTLE_MARGIN_TICKS;
   }
 
   private void offer(WorldEvent.PathRequested requested) {
@@ -250,12 +293,12 @@ public final class SimRun {
   }
 
   /**
-   * Whether the run is one the latency SLO applies to, decided from what went in, not from what the
-   * controller did: nothing in the fault plan could delay or lose a request, and every node can
-   * serve what it was offered in time. A tick's batch leaves when the next tick starts, or at the
-   * latest when that tick's work ends, and its answers must reach the controller a tick after that,
-   * so each tick's requests to a node, served by its workers at their highest cost with the slowest
-   * latency each way, must fit one tick.
+   * Whether the run's load fits its fleet, decided from what went in, not from what the controller
+   * did: nothing in the fault plan could delay or lose a request, and every node can serve what it
+   * was offered in time. A tick's batch leaves when the next tick starts, or at the latest when
+   * that tick's work ends, and its answers must reach the controller a tick after that, so each
+   * tick's requests to a node, served by its workers at their highest cost with the slowest latency
+   * each way, must fit one tick.
    */
   public boolean fitsCapacity() {
     if (!faults.clean()) {
@@ -272,6 +315,21 @@ public final class SimRun {
       }
     }
     return true;
+  }
+
+  /**
+   * Whether every tick of the run had its own time. A server that falls behind runs the ticks it
+   * owes back to back, so an answer that takes one tick's time arrives ticks later by the count,
+   * and the latency SLO, which counts ticks, cannot apply.
+   */
+  public boolean serverKeptUp() {
+    return scenario.chances().get(Scenario.Chance.SLOW_TICK) == 0
+        && faults.faults().stream().noneMatch(fault -> fault instanceof FaultPlan.ServerStalled);
+  }
+
+  /** Whether the latency SLO applies to the run: it fits the fleet, and the server kept up. */
+  public boolean heldToTheSlo() {
+    return fitsCapacity() && serverKeptUp();
   }
 
   /** The most chunks loaded at once, which is at least the frames of one full send of them. */
@@ -293,7 +351,7 @@ public final class SimRun {
     return "seed="
         + seed
         + " ticks="
-        + ticks
+        + ticksRun
         + " issued="
         + out.issuedCount()
         + " controllers="

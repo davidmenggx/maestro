@@ -147,6 +147,16 @@ public final class RequestTracker {
   /** Each mob's live request. */
   private final Map<Integer, Long> requestByMob = new LinkedHashMap<>();
 
+  /** A request given up on that no longer counts against its node, and when it was issued. */
+  private record GivenUp(NodeId node, long issuedTick) {}
+
+  /**
+   * Requests given up on that stopped counting against their node once their answer was due, by id,
+   * until their tick budget ends. The answer may still come a little late, and one that comes
+   * within the budget shows the node's request path works.
+   */
+  private final Map<Long, GivenUp> givenUp = new LinkedHashMap<>();
+
   private long nextRequestId = 1;
   private int requestsIssued;
 
@@ -262,7 +272,7 @@ public final class RequestTracker {
       // the server instead of waiting on a node that cannot answer.
       boolean unavailable = holderFor(mobId, region, startChunk, false) != null;
       env.metrics().count("path.rejected", 1, "reason", unavailable ? "unavailable" : "not_ready");
-      drop(mobId, DropReason.NO_NODE);
+      drop(mobId, DropReason.UNAVAILABLE);
       return;
     }
 
@@ -299,7 +309,7 @@ public final class RequestTracker {
         new Outstanding(
             mobId, node, region, startChunk, event.tick(), request, NOT_SENT, 0, false));
     load.batch.put(requestId, request);
-    health.admitted(node, event.tick());
+    health.admitted(node, requestId, event.tick());
   }
 
   /**
@@ -327,6 +337,11 @@ public final class RequestTracker {
     if (request == null) {
       // A retry, or the answer to a request that was already settled.
       env.metrics().count("path.response.stale", 1);
+      GivenUp gone = givenUp.remove(answer.requestId());
+      if (gone != null && gone.node().equals(node)) {
+        answered(node);
+        health.answered(node);
+      }
       return;
     }
     if (!request.node().equals(node)) {
@@ -456,6 +471,7 @@ public final class RequestTracker {
    * stops at the first younger entry.
    */
   void expire(long tick) {
+    givenUp.values().removeIf(gone -> tick - gone.issuedTick() > MAX_TICKS_LATE);
     Iterator<Map.Entry<Long, Outstanding>> entries = outstanding.entrySet().iterator();
     while (entries.hasNext()) {
       Outstanding request = entries.next().getValue();
@@ -476,7 +492,8 @@ public final class RequestTracker {
   /**
    * Acts on every request whose answer is due by now, in issue order. A live one is added to its
    * node's batch again, so a lost request or answer costs a few ticks rather than a timeout. An
-   * abandoned one stops counting against its node, which has served it by now.
+   * abandoned one stops counting against its node, which has served it by now, though its answer
+   * may still be on its way.
    */
   void settleDue(long tick) {
     TreeSet<Long> due = new TreeSet<>();
@@ -493,6 +510,7 @@ public final class RequestTracker {
       Outstanding request = outstanding.get(requestId);
       if (request.abandoned()) {
         remove(requestId);
+        givenUp.put(requestId, new GivenUp(request.node(), request.issuedTick()));
         continue;
       }
       if (request.resends() >= MAX_RESENDS) {
@@ -648,9 +666,11 @@ public final class RequestTracker {
   /**
    * Reports a live request dropped because its mob no longer wants it. One whose first copy is
    * still waiting for its batch never leaves and is simply removed. Otherwise a copy may be on its
-   * way to the node or in the node's queue, so the node is told to drop it, and the request keeps
-   * counting against the node until its answer is due or arrives, since the cancel may be lost or
-   * come too late.
+   * way to the node or in the node's queue, and the request keeps counting against the node until
+   * its answer is due or arrives. The node is told to drop a copy already sent, though the cancel
+   * may be lost or come too late. A first copy still being encoded is not canceled: it leaves
+   * anyway, a cancel would only race it, and a node that honored one would leave unanswered a
+   * request the controller takes as a sign of its health.
    */
   private void abandon(long requestId, DropReason reason) {
     Outstanding request = outstanding.get(requestId);
@@ -662,8 +682,12 @@ public final class RequestTracker {
     boolean waiting = load.batch.remove(requestId) != null;
     if (waiting && request.resends() == 0) {
       remove(requestId);
+      health.withdrawn(request.node(), requestId);
     } else {
-      load.cancels.add(requestId);
+      boolean encoding = !waiting && request.dueTick() == NOT_SENT && request.resends() == 0;
+      if (!encoding) {
+        load.cancels.add(requestId);
+      }
       put(requestId, request.abandon());
     }
     drop(request.mobId(), reason);

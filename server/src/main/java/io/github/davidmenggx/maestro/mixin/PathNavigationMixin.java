@@ -8,18 +8,23 @@ import io.github.davidmenggx.maestro.bridge.PathOffload;
 import io.github.davidmenggx.maestro.bridge.Searches;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.control.MoveControl;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(PathNavigation.class)
 public abstract class PathNavigationMixin implements PathOffload.NavigationAccess {
+
+  @Shadow @Final protected Mob mob;
 
   @Shadow protected Path path;
 
@@ -75,6 +80,16 @@ public abstract class PathNavigationMixin implements PathOffload.NavigationAcces
     } finally {
       Searches.leave();
     }
+  }
+
+  /**
+   * The navigation is handed a path to follow, so a search's placeholder handed here is followed on
+   * purpose, not merely left in place by a caller that did not take it.
+   */
+  @Inject(method = "moveTo(Lnet/minecraft/world/level/pathfinder/Path;D)Z", at = @At("HEAD"))
+  private void maestro$handed(
+      Path newPath, double speedModifier, CallbackInfoReturnable<Boolean> cir) {
+    Searches.handed(mob, newPath);
   }
 
   /** A held path stands still on purpose, so it is neither stuck nor late to its node. */

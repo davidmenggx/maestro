@@ -72,6 +72,13 @@ public record FaultPlan(
    */
   public record ControllerRestarted(long tick) implements Fault {}
 
+  /**
+   * The server's work in this tick takes {@code steps}, as in a long collection pause or a burst of
+   * chunk generation. The controller hears nothing meanwhile, while the fleet carries on. It cannot
+   * delay or lose a request in ticks, so a plan with only these is still clean.
+   */
+  public record ServerStalled(long tick, int steps) implements Fault {}
+
   public FaultPlan {
     if (minLatencySteps < 1 || maxLatencySteps < minLatencySteps) {
       throw new IllegalArgumentException("latency range must be positive and ordered");
@@ -113,6 +120,14 @@ public record FaultPlan(
 
   static final int MAX_LONG_FAULT_SPAN_TICKS = 160;
 
+  /** Share of plans, clean ones included, whose server stalls once. */
+  static final double STALL_CHANCE = 0.3;
+
+  static final int MIN_STALL_STEPS = 20 * Simulation.STEPS_PER_TICK;
+
+  /** The longest stall, 5 s. */
+  static final int MAX_STALL_STEPS = 100 * Simulation.STEPS_PER_TICK;
+
   /** A node that dies this often is never brought back, so a run ends with one node fewer. */
   private static final double PERMANENT_LOSS_CHANCE = 0.15;
 
@@ -140,10 +155,12 @@ public record FaultPlan(
 
   /**
    * Whether nothing in the plan can delay or lose a request: no loss, no failed encode, and no
-   * fleet fault. Latency and duplicates are allowed, because neither can.
+   * fleet or controller fault. Latency, duplicates and server stalls are allowed, because none can.
    */
   public boolean clean() {
-    return dropRate == 0 && offloadFailureRate == 0 && faults.isEmpty();
+    return dropRate == 0
+        && offloadFailureRate == 0
+        && faults.stream().allMatch(fault -> fault instanceof ServerStalled);
   }
 
   /**
@@ -164,19 +181,27 @@ public record FaultPlan(
    * that leave a link up but its node unable to answer last up to {@link
    * #MAX_LONG_FAULT_SPAN_TICKS}. One plan in {@link #CLEAN_CHANCE} has only latency and
    * duplication, and a share {@link #EDGE_CHANCE} of those has latency at the edge for a fleet
-   * whose slowest request costs {@code maxCostSteps}.
+   * whose slowest request costs {@code maxCostSteps}. A share {@link #STALL_CHANCE} of all plans
+   * stall the server once.
    */
   public static FaultPlan sample(Rng rng, int nodeCount, long activeTicks, int maxCostSteps) {
     int minLatency = 1 + rng.nextInt(MAX_MIN_LATENCY_STEPS);
     int maxLatency = minLatency + rng.nextInt(MAX_LATENCY_SPAN_STEPS);
     double duplicateRate = rng.nextDouble() * MAX_SAMPLED_RATE;
+    List<Fault> stalls = new ArrayList<>();
+    if (rng.nextDouble() < STALL_CHANCE && activeTicks > 1) {
+      stalls.add(
+          new ServerStalled(
+              1 + rng.nextLong(activeTicks - 1),
+              MIN_STALL_STEPS + rng.nextInt(MAX_STALL_STEPS - MIN_STALL_STEPS + 1)));
+    }
     if (rng.nextDouble() < CLEAN_CHANCE) {
       int edge = edgeLatency(maxCostSteps);
       if (rng.nextDouble() < EDGE_CHANCE && edge > EDGE_SPAN_STEPS) {
         maxLatency = edge;
         minLatency = maxLatency - rng.nextInt(EDGE_SPAN_STEPS);
       }
-      return new FaultPlan(minLatency, maxLatency, 0.0, duplicateRate, 0.0, List.of());
+      return new FaultPlan(minLatency, maxLatency, 0.0, duplicateRate, 0.0, stalls);
     }
     FaultPlan plan =
         new FaultPlan(
@@ -185,7 +210,7 @@ public record FaultPlan(
             rng.nextDouble() * MAX_SAMPLED_RATE,
             duplicateRate,
             rng.nextDouble() * MAX_SAMPLED_RATE,
-            List.of());
+            stalls);
     if (nodeCount < 1 || activeTicks <= MAX_FAULT_SPAN_TICKS) {
       return plan;
     }

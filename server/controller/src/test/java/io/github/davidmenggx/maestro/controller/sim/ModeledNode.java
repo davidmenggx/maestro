@@ -219,7 +219,6 @@ public final class ModeledNode {
 
   private long duplicateRequests;
   private long canceledRequests;
-  private long staleRequests;
   private long servedRequests;
   private boolean backlogged;
 
@@ -261,11 +260,6 @@ public final class ModeledNode {
 
   public long servedRequests() {
     return servedRequests;
-  }
-
-  /** Requests dropped because they waited past {@link #MAX_WAIT_STEPS}. */
-  public long staleRequests() {
-    return staleRequests;
   }
 
   /** Whether a request ever waited for a worker. */
@@ -639,6 +633,7 @@ public final class ModeledNode {
     if (request.start() == null || request.target() == null) {
       return;
     }
+    checkReach(request, frameRun, frameRegion);
     expire();
     Settled earlier = settled.get(requestId);
     if (earlier != null) {
@@ -665,6 +660,36 @@ public final class ModeledNode {
             generation,
             host.now()));
     startWorkers();
+  }
+
+  /**
+   * Records a request for this node's area whose search could read past it, worked out from the
+   * spec's rule: {@code ceil(maxPathLength) + floor(width + 1) + 1} blocks around the start on
+   * either horizontal axis. Positions on the wire are relative to the area, so its corner is the
+   * origin.
+   */
+  private void checkReach(PathRequest request, long frameRun, long frameRegion) {
+    if (!holdsArea || run != frameRun || regionId != frameRegion) {
+      return;
+    }
+    float width = knownClasses.get((short) request.classId()).width();
+    int reach = (int) Math.ceil(request.maxPathLength()) + (int) Math.floor(width + 1.0f) + 1;
+    int x = request.start().x();
+    int z = request.start().z();
+    if (x - reach < 0 || x + reach >= size || z - reach < 0 || z + reach >= size) {
+      violations.add(
+          id
+              + ": request "
+              + request.requestId()
+              + " from "
+              + x
+              + ","
+              + z
+              + " reads "
+              + reach
+              + " blocks around it, past an area of "
+              + size);
+    }
   }
 
   /**
@@ -697,7 +722,6 @@ public final class ModeledNode {
       waitingCount--;
       if (host.now() - next.admitted() > MAX_WAIT_STEPS) {
         open.remove(next.requestId());
-        staleRequests++;
         expire();
         record(next.requestId(), null);
         continue;
@@ -795,8 +819,9 @@ public final class ModeledNode {
     PathResponse.addRequestId(builder, job.requestId());
     PathResponse.addReached(builder, reached);
     PathResponse.addNodes(builder, nodes);
+    // Searched with nothing of the region under it, which the controller must never accept.
     PathResponse.addCost(
-        builder, matches && overAir(job.start()) ? SEARCHED_OVER_AIR : path.size());
+        builder, !matches || overAir(job.start()) ? SEARCHED_OVER_AIR : path.size());
     PathResponse.addWorldSequence(builder, matches ? lastSequence : 0);
     int response = PathResponse.endPathResponse(builder);
 

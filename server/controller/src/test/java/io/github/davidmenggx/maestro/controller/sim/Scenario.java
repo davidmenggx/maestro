@@ -69,7 +69,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     PLAYER_CHURN(0.1),
     STRAY_REQUEST(0.1),
     /** A mob that asks again in the same tick, as when a goal changes mid-tick. */
-    REPEAT_REQUEST(0.1);
+    REPEAT_REQUEST(0.1),
+    /** A tick whose work runs past its time, so the server falls behind and catches up. */
+    SLOW_TICK(0.2);
 
     private final double ceiling;
 
@@ -122,7 +124,8 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
               Chance.CHUNK_CHURN, 0.0,
               Chance.PLAYER_CHURN, 0.01,
               Chance.STRAY_REQUEST, 0.0,
-              Chance.REPEAT_REQUEST, 0.0));
+              Chance.REPEAT_REQUEST, 0.0,
+              Chance.SLOW_TICK, 0.0));
 
   /** Far more demand than the fleet can serve, so pre-send rejection must limit the load. */
   public static final Scenario SATURATED =
@@ -137,7 +140,16 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
    */
   public static final Scenario CHURN = DEFAULT.with(Chance.CHUNK_CHURN, 0.08);
 
-  /** One draw from the full range of every setting, including loads the fleet cannot serve. */
+  /**
+   * Share of sampled runs whose server falls behind at all. The rest keep up with their ticks, so
+   * the latency SLO, which counts ticks, can apply to them.
+   */
+  static final double SLOW_SERVER_SHARE = 0.3;
+
+  /**
+   * One draw from the full range of every setting, including loads the fleet cannot serve. Only a
+   * share {@link #SLOW_SERVER_SHARE} of draws have slow ticks.
+   */
   public static Scenario sample(Rng rng) {
     Map<Count, Integer> counts = new EnumMap<>(Count.class);
     for (Count setting : Count.values()) {
@@ -146,6 +158,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     Map<Chance, Double> chances = new EnumMap<>(Chance.class);
     for (Chance setting : Chance.values()) {
       chances.put(setting, rng.nextDouble() * setting.ceiling());
+    }
+    if (rng.nextDouble() >= SLOW_SERVER_SHARE) {
+      chances.put(Chance.SLOW_TICK, 0.0);
     }
     return new Scenario(counts, chances);
   }
