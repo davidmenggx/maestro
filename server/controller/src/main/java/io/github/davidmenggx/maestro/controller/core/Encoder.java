@@ -11,14 +11,14 @@ import java.util.function.Supplier;
  * so a retry builds the same bytes. A world frame keeps its sequence number, because skipping a
  * number would leave a gap for the node.
  */
-final class Encoder {
+public final class Encoder {
 
   /**
    * Tries at one encode. A batch of requests given up on goes back to its node's next batch. A
    * world frame given up on leaves a gap no later frame can cross, so its region's stream starts
    * over.
    */
-  static final int MAX_ATTEMPTS = 5;
+  public static final int MAX_ATTEMPTS = 5;
 
   private final ControllerEnv env;
 

@@ -177,6 +177,12 @@ class FuzzTest {
     long lostToRestart = 0;
     long foreignAnswers = 0;
     long pausedRuns = 0;
+    long blackholedRuns = 0;
+    long suspicions = 0;
+    long quietPaths = 0;
+    long probesAnswered = 0;
+    long refusedUnavailable = 0;
+    long failOpenJudged = 0;
     long checkpoints = 0;
     long deferredReads = 0;
 
@@ -217,6 +223,15 @@ class FuzzTest {
       foreignAnswers += run.sim.metrics().total("path.response.foreign");
       pausedRuns +=
           run.faults.faults().stream().anyMatch(fault -> fault instanceof FaultPlan.Paused) ? 1 : 0;
+      blackholedRuns +=
+          run.faults.faults().stream().anyMatch(fault -> fault instanceof FaultPlan.Blackholed)
+              ? 1
+              : 0;
+      suspicions += run.sim.metrics().total("node.suspected");
+      quietPaths += run.sim.metrics().total("node.quiet");
+      probesAnswered += run.sim.metrics().total("node.circuit", "state", "closed");
+      refusedUnavailable += run.sim.metrics().counter("path.rejected", "reason", "unavailable");
+      failOpenJudged += run.sim.failOpenJudged();
       checkpoints += run.sim.checkpointsCompared();
       deferredReads += run.sim.metrics().total("world.chunks.deferred");
       for (ModeledNode node : run.sim.nodes()) {
@@ -249,6 +264,12 @@ class FuzzTest {
     assertTrue(lostToRestart > 0, "no request was open when its controller restarted");
     assertTrue(foreignAnswers > 0, "no answer for an earlier controller run reached a new one");
     assertTrue(pausedRuns > 0, "no node process was ever paused");
+    assertTrue(blackholedRuns > 0, "no node ever lost its datagrams with its link up");
+    assertTrue(suspicions > 0, "no node's heartbeats were ever overdue enough to suspect it");
+    assertTrue(quietPaths > 0, "no node's request path ever went quiet");
+    assertTrue(probesAnswered > 0, "no probe ever brought a node back into service");
+    assertTrue(refusedUnavailable > 0, "no request was ever refused for a node out of service");
+    assertTrue(failOpenJudged > 0, "no node that could not answer was sent enough to judge");
     assertTrue(checkpoints > 0, "no node ever reached a mid-run checkpoint");
     assertTrue(deferredReads > 0, "chunk reads never ran past one tick's budget");
     System.out.println(

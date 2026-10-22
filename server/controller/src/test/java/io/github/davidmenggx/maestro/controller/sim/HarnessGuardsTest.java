@@ -132,6 +132,7 @@ class HarnessGuardsTest {
     Span failureRate = new Span();
     boolean sawPermanentLoss = false;
     boolean sawEdge = false;
+    long longestSpan = 0;
 
     for (int seed = 0; seed < DRAWS; seed++) {
       FaultPlan plan = FaultPlan.sample(SeededRng.of(seed).derive("fuzz"), 4, active, COST);
@@ -158,11 +159,19 @@ class HarnessGuardsTest {
         }
       }
       sawPermanentLoss |= died > recovered;
+      // A fault with a start and an end is drawn as a pair.
+      for (int i = 0; i + 1 < plan.faults().size(); i++) {
+        FaultPlan.Fault start = plan.faults().get(i);
+        FaultPlan.Fault end = plan.faults().get(i + 1);
+        if (start.getClass() == end.getClass() && !(start instanceof FaultPlan.NodeDied)) {
+          longestSpan = Math.max(longestSpan, end.tick() - start.tick());
+        }
+      }
     }
 
-    // Process death, a silent partition, a stalled stream, a frozen process, a link
-    // reset and a controller restart need different recoveries, so the sweep must
-    // cover all of them.
+    // Process death, a silent partition, a stalled stream, a frozen process, lost
+    // datagrams, a link reset and a controller restart need different recoveries, so the
+    // sweep must cover all of them.
     assertEquals(
         Set.of(
             "NodeDied",
@@ -170,9 +179,14 @@ class HarnessGuardsTest {
             "Partitioned",
             "Stalled",
             "Paused",
+            "Blackholed",
             "LinkReset",
             "ControllerRestarted"),
         kinds);
+    // Some faults outlast the detectors, or a node is never noticed and probed.
+    assertTrue(
+        longestSpan > FaultPlan.MAX_FAULT_SPAN_TICKS,
+        "no fault outlasted " + FaultPlan.MAX_FAULT_SPAN_TICKS + " ticks: " + longestSpan);
     // Faults must be able to accumulate on one node, or the sweep can never cover a
     // second failure during a recovery. A paired fault adds two entries, so the
     // count only needs to exceed the number of faults drawn.

@@ -60,6 +60,13 @@ public record FaultPlan(
   public record Paused(long tick, NodeId node, boolean active) implements NodeFault {}
 
   /**
+   * Every datagram to and from the node is lost while its links and heartbeats carry on, as when a
+   * firewall blocks the request port or the node answers from an address the controller does not
+   * know. Only the missing answers show it.
+   */
+  public record Blackholed(long tick, NodeId node, boolean active) implements NodeFault {}
+
+  /**
    * The controller process restarts with a new run id. Its links and everything it had in flight
    * are gone, and the nodes keep their world state from the old run.
    */
@@ -97,6 +104,14 @@ public record FaultPlan(
   static final int MAX_FAULTS = 5;
 
   static final int MAX_FAULT_SPAN_TICKS = 15;
+
+  /**
+   * Share of partitions, pauses and blackholes that last long enough for the heartbeat detector to
+   * suspect the node, and for a quiet request path to fail a probe and be probed again.
+   */
+  static final double LONG_FAULT_CHANCE = 0.3;
+
+  static final int MAX_LONG_FAULT_SPAN_TICKS = 160;
 
   /** A node that dies this often is never brought back, so a run ends with one node fewer. */
   private static final double PERMANENT_LOSS_CHANCE = 0.15;
@@ -145,9 +160,11 @@ public record FaultPlan(
    * One draw from the full range of latency, loss, duplication and encode failure, plus up to
    * {@link #MAX_FAULTS} faults that may overlap on one node or hit several nodes at once. Each
    * fault starts inside {@code activeTicks} and, unless the node is permanently lost, ends there
-   * too, so the quiet tail of the run can settle. One plan in {@link #CLEAN_CHANCE} has only
-   * latency and duplication, and a share {@link #EDGE_CHANCE} of those has latency at the edge for
-   * a fleet whose slowest request costs {@code maxCostSteps}.
+   * too, so the quiet tail of the run can settle. A share {@link #LONG_FAULT_CHANCE} of the faults
+   * that leave a link up but its node unable to answer last up to {@link
+   * #MAX_LONG_FAULT_SPAN_TICKS}. One plan in {@link #CLEAN_CHANCE} has only latency and
+   * duplication, and a share {@link #EDGE_CHANCE} of those has latency at the edge for a fleet
+   * whose slowest request costs {@code maxCostSteps}.
    */
   public static FaultPlan sample(Rng rng, int nodeCount, long activeTicks, int maxCostSteps) {
     int minLatency = 1 + rng.nextInt(MAX_MIN_LATENCY_STEPS);
@@ -177,17 +194,25 @@ public record FaultPlan(
       NodeId node = NodeId.of(rng.nextInt(nodeCount));
       long start = 1 + rng.nextLong(activeTicks - MAX_FAULT_SPAN_TICKS);
       long end = start + 1 + rng.nextInt(MAX_FAULT_SPAN_TICKS - 1);
+      long room = Math.min(MAX_LONG_FAULT_SPAN_TICKS, activeTicks - 1 - start);
+      long longEnd =
+          rng.nextDouble() < LONG_FAULT_CHANCE && room > MAX_FAULT_SPAN_TICKS
+              ? start + MAX_FAULT_SPAN_TICKS + rng.nextLong(room - MAX_FAULT_SPAN_TICKS + 1)
+              : end;
       plan =
-          switch (rng.nextInt(6)) {
+          switch (rng.nextInt(7)) {
             case 0 ->
                 rng.nextDouble() < PERMANENT_LOSS_CHANCE
                     ? plan.with(new NodeDied(start, node))
                     : plan.with(new NodeDied(start, node), new NodeRecovered(end, node));
             case 1 ->
-                plan.with(new Partitioned(start, node, true), new Partitioned(end, node, false));
+                plan.with(
+                    new Partitioned(start, node, true), new Partitioned(longEnd, node, false));
             case 2 -> plan.with(new Stalled(start, node, true), new Stalled(end, node, false));
-            case 3 -> plan.with(new Paused(start, node, true), new Paused(end, node, false));
+            case 3 -> plan.with(new Paused(start, node, true), new Paused(longEnd, node, false));
             case 4 -> plan.with(new ControllerRestarted(start));
+            case 5 ->
+                plan.with(new Blackholed(start, node, true), new Blackholed(longEnd, node, false));
             default -> plan.with(new LinkReset(start, node));
           };
     }

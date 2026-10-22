@@ -48,6 +48,7 @@ public final class Fleet implements AutoCloseable {
   private static Fleet active;
 
   private final ServerLevel level;
+  private final RegionMap regions;
   private final ServerClock clock;
   private final Thread serverThread;
   private final NettyTransport transport;
@@ -58,12 +59,14 @@ public final class Fleet implements AutoCloseable {
 
   private Fleet(
       ServerLevel level,
+      RegionMap regions,
       ServerClock clock,
       NettyTransport transport,
       PoolOffload offload,
       PathOffload paths,
       Controller controller) {
     this.level = level;
+    this.regions = regions;
     this.clock = clock;
     this.serverThread = Thread.currentThread();
     this.transport = transport;
@@ -103,7 +106,8 @@ public final class Fleet implements AutoCloseable {
         new ControllerEnv(
             clock, SeededRng.of(entropy.nextLong()), offload, transport, metrics, run);
     ProfileTable profiles = new ProfileTable();
-    PathOffload paths = new PathOffload(overworld, clock, metrics, profiles, config.offload());
+    PathOffload paths =
+        new PathOffload(overworld, regions, clock, metrics, profiles, config.offload());
     Controller controller =
         new Controller(
             env, new LevelWorldSource(overworld, profiles), paths, regions, config.nodeCapacity());
@@ -111,7 +115,7 @@ public final class Fleet implements AutoCloseable {
     HeldPaths.clock(clock);
     Searches.intercept(paths);
 
-    active = new Fleet(overworld, clock, transport, offload, paths, controller);
+    active = new Fleet(overworld, regions, clock, transport, offload, paths, controller);
     for (Region region : regions.regions()) {
       LOG.info(
           "Maestro: region {} at x {}..{}, z {}..{} is held by {} at {}",
@@ -137,9 +141,13 @@ public final class Fleet implements AutoCloseable {
     controller.accept(new WorldEvent.TickBegan(clock.tick()));
   }
 
-  /** A server tick's work ends: what arrived during it is handed over, then the tick closes. */
+  /**
+   * A server tick's work ends: what arrived during it is handed over, mobs that stopped waiting for
+   * their answers cancel them, then the tick closes.
+   */
   public void tickEnding() {
     handOver();
+    paths.tickEnding();
     controller.accept(new WorldEvent.TickEnded(clock.tick()));
     if (clock.tick() % SELF_CHECK_TICKS == 0) {
       selfCheck();
@@ -180,16 +188,22 @@ public final class Fleet implements AutoCloseable {
     }
   }
 
+  /** The mob's requests end with it. It is forgotten first, so their drops are not counted. */
   public void entityUnloaded(Entity entity, ServerLevel from) {
     if (from == level && entity instanceof Mob) {
-      controller.accept(new WorldEvent.MobRemoved(clock.tick(), entity.getId()));
       paths.mobRemoved(entity.getId());
+      controller.accept(new WorldEvent.MobRemoved(clock.tick(), entity.getId()));
     }
   }
 
-  /** Whether a block change in the chunk, made now, is reported. */
+  /**
+   * Whether a block change in the chunk, made now, is reported: the chunk is in a region, which
+   * holds whole chunks, and the change is made on the server thread.
+   */
   public boolean watches(LevelChunk chunk) {
-    return chunk.getLevel() == level && Thread.currentThread() == serverThread;
+    return chunk.getLevel() == level
+        && Thread.currentThread() == serverThread
+        && regions.regionAt(chunk.getPos().getMinBlockX(), chunk.getPos().getMinBlockZ()) != null;
   }
 
   /** The block's cell as the node holds it. */

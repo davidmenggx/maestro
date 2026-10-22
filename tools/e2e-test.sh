@@ -6,7 +6,9 @@
 # the summary the mod logs when it stops.
 #
 # OFFLOAD=shadow (the default) keeps vanilla's paths and compares the node's
-# answers with them. OFFLOAD=on lets the node's answers move the mobs.
+# answers with them, every one of which must match. OFFLOAD=on lets the node's
+# answers move the mobs. Either way no request may be dropped once admitted,
+# since nothing fails on loopback.
 
 set -euo pipefail
 
@@ -24,9 +26,10 @@ SHUTDOWN_TIMEOUT="${SHUTDOWN_TIMEOUT:-120}"
 # node's tick budget into a few milliseconds.
 RUN_SECONDS="${RUN_SECONDS:-20}"
 # The fewest answers the run must get, and in shadow mode the share of them that
-# must match vanilla's path.
+# must match vanilla's path. The world changes only before the mobs arrive, so
+# the node searches the world vanilla searched and every answer must match.
 MIN_ANSWERS="${MIN_ANSWERS:-20}"
-MIN_MATCH_PERCENT="${MIN_MATCH_PERCENT:-80}"
+MIN_MATCH_PERCENT="${MIN_MATCH_PERCENT:-100}"
 
 WORLD_PORT=25710
 CONTROL_PORT=25711
@@ -144,6 +147,13 @@ for ((attempt = 0; ; attempt++)); do
   ((attempt < 120)) || fail "the spawn area did not load"
   sleep 0.5
 done
+# Mobs a failed run left behind would race the block changes below.
+run_command "kill @e[tag=$MOB_TAG]" "Killed|No entity was found"
+# A few block changes, which reach the node as deltas. They are made before any
+# mob exists, so no search races them. The dev world is kept between runs, so a
+# block may already be in place.
+run_command "setblock ~2 ~ ~8 minecraft:oak_fence" "Changed the block|Could not set the block"
+run_command "setblock ~-8 ~ ~2 minecraft:cobblestone" "Changed the block|Could not set the block"
 for offset in "-12 ~ -8" "10 ~ -10" "-6 ~ 12" "14 ~ 6"; do
   read -r dx _ dz <<<"$offset"
   run_command "summon minecraft:villager ~$dx ~ ~$dz {Tags:[\"$MOB_TAG\"]}" "Summoned new"
@@ -153,11 +163,6 @@ for offset in "0 ~ 0" "3 ~ 3" "-3 ~ 3" "3 ~ -3" "-3 ~ -3" "6 ~ 0" "-6 ~ 0" "0 ~ 
   run_command "summon minecraft:husk ~$dx ~ ~$dz {Tags:[\"$MOB_TAG\"],DeathLootTable:\"minecraft:empty\"}" \
     "Summoned new"
 done
-# A few block changes while the mobs move, which reach the node as deltas.
-# The dev world is kept between runs, so a block may already be in place.
-run_command "setblock ~2 ~ ~8 minecraft:oak_fence" "Changed the block|Could not set the block"
-run_command "setblock ~-8 ~ ~2 minecraft:cobblestone" "Changed the block|Could not set the block"
-
 echo "e2e-test: letting the mobs run for ${RUN_SECONDS}s"
 sleep "$RUN_SECONDS"
 kill -0 "$NODE_PID" 2>/dev/null || fail "the node exited during the run"
@@ -194,14 +199,19 @@ count() {
 
 ANSWERED="$(count answered)"
 ((ANSWERED >= MIN_ANSWERS)) || fail "only $ANSWERED answers, expected at least $MIN_ANSWERS"
+DROPPED="$(count dropped)"
+((DROPPED == 0)) || fail "$DROPPED admitted requests were dropped instead of answered"
 if [[ "$OFFLOAD" == "shadow" ]]; then
   MATCHED="$(count shadow_matched)"
   DIFFERED="$(count shadow_differed)"
-  ((MATCHED * 100 >= (MATCHED + DIFFERED) * MIN_MATCH_PERCENT)) ||
+  if ((MATCHED * 100 < (MATCHED + DIFFERED) * MIN_MATCH_PERCENT)); then
+    grep -F "Maestro shadow mismatch" "$LOG" >&2 || true
     fail "$MATCHED of $((MATCHED + DIFFERED)) answers matched vanilla, below ${MIN_MATCH_PERCENT}%"
+  fi
 else
   APPLIED="$(count applied)"
-  ((APPLIED > 0)) || fail "no answer moved a mob"
+  # An answer is not applied only when its mob stopped waiting for it in the tick it arrived.
+  ((APPLIED * 2 >= ANSWERED)) || fail "only $APPLIED of $ANSWERED answers moved a mob"
 fi
 
 echo "e2e-test: PASS (offload=$OFFLOAD)"

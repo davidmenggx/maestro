@@ -15,7 +15,7 @@ public final class SimMetrics implements Metrics {
 
   private final Map<String, Long> counters = new TreeMap<>();
   private final Map<String, List<Double>> distributions = new TreeMap<>();
-  private final Map<String, Long> gauges = new TreeMap<>();
+  private final Map<String, Double> gauges = new TreeMap<>();
 
   @Override
   public void count(String name, long delta, String... labels) {
@@ -28,13 +28,13 @@ public final class SimMetrics implements Metrics {
   }
 
   @Override
-  public void gauge(String name, long value, String... labels) {
+  public void gauge(String name, double value, String... labels) {
     gauges.put(key(name, labels), value);
   }
 
   /** The last value the gauge was set to, or 0 if it never was. */
-  public long gauge(String name, String... labels) {
-    return gauges.getOrDefault(key(name, labels), 0L);
+  public double gauge(String name, String... labels) {
+    return gauges.getOrDefault(key(name, labels), 0.0);
   }
 
   public long counter(String name, String... labels) {
@@ -46,6 +46,21 @@ public final class SimMetrics implements Metrics {
     long sum = 0;
     for (Map.Entry<String, Long> entry : counters.entrySet()) {
       if (entry.getKey().equals(name) || entry.getKey().startsWith(name + "{")) {
+        sum += entry.getValue();
+      }
+    }
+    return sum;
+  }
+
+  /** Every labeled series of one counter that has {@code key} set to {@code value}, summed. */
+  public long total(String name, String key, String value) {
+    String label = key + "=" + value;
+    long sum = 0;
+    for (Map.Entry<String, Long> entry : counters.entrySet()) {
+      String series = entry.getKey();
+      if (series.startsWith(name + "{")
+          && List.of(series.substring(name.length() + 1, series.length() - 1).split(","))
+              .contains(label)) {
         sum += entry.getValue();
       }
     }

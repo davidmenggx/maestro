@@ -8,23 +8,18 @@ import io.github.davidmenggx.maestro.bridge.PathOffload;
 import io.github.davidmenggx.maestro.bridge.Searches;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.control.MoveControl;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
-import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(PathNavigation.class)
 public abstract class PathNavigationMixin implements PathOffload.NavigationAccess {
-
-  @Shadow @Final protected Mob mob;
 
   @Shadow protected Path path;
 
@@ -101,23 +96,5 @@ public abstract class PathNavigationMixin implements PathOffload.NavigationAcces
   private boolean maestro$stayPutWhileHeld(
       MoveControl control, double x, double y, double z, double speedModifier) {
     return path == null || !HeldPaths.isHeld(path);
-  }
-
-  @Inject(method = "stop", at = @At("HEAD"))
-  private void maestro$stopped(CallbackInfo ci) {
-    displaced(null);
-  }
-
-  @Inject(method = "moveTo(Lnet/minecraft/world/level/pathfinder/Path;D)Z", at = @At("HEAD"))
-  private void maestro$replaced(
-      Path newPath, double speedModifier, CallbackInfoReturnable<Boolean> cir) {
-    displaced(newPath);
-  }
-
-  private void displaced(Path next) {
-    Searches.Interceptor interceptor = Searches.interceptor();
-    if (interceptor != null && path != null && next != path) {
-      interceptor.displaced(mob, path, next);
-    }
   }
 }

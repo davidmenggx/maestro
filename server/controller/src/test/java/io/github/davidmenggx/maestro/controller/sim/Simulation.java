@@ -20,7 +20,10 @@ import java.util.function.Consumer;
 import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 import maestro.fbs.ChunkSnapshot;
+import maestro.fbs.PathRequestBatch;
 import maestro.fbs.RegionAssignment;
+import maestro.fbs.RequestFrame;
+import maestro.fbs.RequestMsg;
 import maestro.fbs.WorldDelta;
 import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
@@ -96,6 +99,7 @@ public final class Simulation {
   private final Map<Checkpoint, Long> checkpoints = new LinkedHashMap<>();
 
   private final List<String> streamViolations = new ArrayList<>();
+  private final FailOpenCheck failOpen = new FailOpenCheck();
   private final SimMetrics metrics = new SimMetrics();
   private final Digest digest = new Digest();
   private final SimTransport transport;
@@ -214,6 +218,7 @@ public final class Simulation {
             transport.restart(),
             metrics,
             run);
+    failOpen.restarted(run, tick);
   }
 
   /**
@@ -251,6 +256,34 @@ public final class Simulation {
                 + Long.toHexString(expected));
       }
     }
+  }
+
+  /** The node started or stopped being able to answer requests, whatever its links show. */
+  void unresponsive(NodeId node, boolean active) {
+    digest.mix(now).mix("unresponsive:" + node + ":" + active);
+    failOpen.unresponsive(node, env.run(), tick, active);
+  }
+
+  /** Records each request a request frame to {@code node} carries, for {@link FailOpenCheck}. */
+  void requestFrameSent(NodeId node, byte[] bytes) {
+    RequestFrame frame = RequestFrame.getRootAsRequestFrame(ByteBuffer.wrap(bytes));
+    if (frame.bodyType() != RequestMsg.PathRequestBatch) {
+      return;
+    }
+    PathRequestBatch batch = (PathRequestBatch) frame.body(new PathRequestBatch());
+    for (int i = 0; i < batch.requestsLength(); i++) {
+      failOpen.requestSent(node, frame.run(), batch.requests(i).requestId(), tick);
+    }
+  }
+
+  /** Every node that could not answer and was still sent more than probes, as of now. */
+  public List<String> failOpenViolations() {
+    return failOpen.violations(tick);
+  }
+
+  /** Stretches in which a node could not answer that were long enough to judge. */
+  public long failOpenJudged() {
+    return failOpen.judged();
   }
 
   /** Records that a node took a fresh assignment, from which its own copy starts over. */
@@ -391,6 +424,8 @@ public final class Simulation {
             transport.partition(partitioned.node(), partitioned.active());
         case FaultPlan.Stalled stalled -> transport.stall(stalled.node(), stalled.active());
         case FaultPlan.Paused paused -> transport.pause(paused.node(), paused.active());
+        case FaultPlan.Blackholed blackholed ->
+            transport.blackhole(blackholed.node(), blackholed.active());
         case FaultPlan.ControllerRestarted restarted -> {
           startController();
           onRestart.run();

@@ -23,7 +23,11 @@ import java.util.Set;
  * <p>Process death resets the connection, so the controller sees it. A partition does not, so only
  * a failure detector can find it. A stall holds only the ordered channels, like TCP holding a
  * stream during a retransmit, so unordered frames can overtake the held ones. A paused process
- * keeps its connections but handles nothing, so what reaches it waits until it resumes.
+ * keeps its connections but handles nothing, so what reaches it waits until it resumes. A blackhole
+ * loses every datagram to and from the node while its links carry on.
+ *
+ * <p>A node that is partitioned, paused or blackholed cannot answer a request, whatever its links
+ * show. The simulation is told when that starts and ends ({@link Simulation#unresponsive}).
  *
  * <p>Overlapping faults of one kind on one node are counted, so a fault ends only when every
  * interval of it has.
@@ -60,6 +64,7 @@ public final class SimTransport {
   private final Map<NodeId, Integer> partitioned = new LinkedHashMap<>();
   private final Map<NodeId, Integer> stalled = new LinkedHashMap<>();
   private final Map<NodeId, Integer> paused = new LinkedHashMap<>();
+  private final Map<NodeId, Integer> blackholed = new LinkedHashMap<>();
 
   /** Counts each node's connect attempts and link changes. A frame is valid only in its own. */
   private final Map<NodeId, Integer> epoch = new LinkedHashMap<>();
@@ -255,7 +260,33 @@ public final class SimTransport {
 
   /** Ordered frames are held and replayed when the partition ends. Unordered ones are lost. */
   public void partition(NodeId node, boolean active) {
+    boolean before = unresponsive(node);
     hold(partitioned, node, active);
+    responsiveness(node, before);
+  }
+
+  /** Unordered frames to and from the node are lost. Ordered ones flow. */
+  public void blackhole(NodeId node, boolean active) {
+    boolean before = unresponsive(node);
+    if (active) {
+      increment(blackholed, node);
+    } else {
+      release(blackholed, node);
+    }
+    responsiveness(node, before);
+  }
+
+  /** Whether the node cannot answer a request now: it is partitioned, paused or blackholed. */
+  public boolean unresponsive(NodeId node) {
+    return count(partitioned, node) + count(paused, node) + count(blackholed, node) > 0;
+  }
+
+  /** Tells the simulation if the node started or stopped being able to answer. */
+  private void responsiveness(NodeId node, boolean before) {
+    boolean after = unresponsive(node);
+    if (after != before) {
+      sim.unresponsive(node, after);
+    }
   }
 
   /** Ordered frames are held and replayed when the stall ends. Unordered ones still flow. */
@@ -265,6 +296,12 @@ public final class SimTransport {
 
   /** The node's process freezes: its links stay up, and frames that reach it wait. */
   public void pause(NodeId node, boolean active) {
+    boolean before = unresponsive(node);
+    pauseProcess(node, active);
+    responsiveness(node, before);
+  }
+
+  private void pauseProcess(NodeId node, boolean active) {
     if (active) {
       if (increment(paused, node) == 1) {
         nodes.get(node).pause(true);
@@ -359,7 +396,10 @@ public final class SimTransport {
       return;
     }
 
-    if (isDead(node) || count(partitioned, node) > 0) {
+    if (channel == Transport.Channel.REQUEST && direction == Direction.TO_NODE) {
+      sim.requestFrameSent(node, bytes);
+    }
+    if (isDead(node) || count(partitioned, node) > 0 || count(blackholed, node) > 0) {
       sim.metrics().count("transport.lost", 1, "node", nodeLabel, "channel", channel.name());
       return;
     }

@@ -14,5 +14,5 @@ public interface Metrics {
   /** One observation of a distribution, such as ticks late or bytes per frame. */
   void record(String name, double value, String... labels);
 
-  void gauge(String name, long value, String... labels);
+  void gauge(String name, double value, String... labels);
 }

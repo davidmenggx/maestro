@@ -66,8 +66,12 @@ class NettyTransportTest {
     Recorder heard = listen(transport);
     Link link = up(transport, node, heard);
 
-    transport.send(NODE, Channel.WORLD, ByteBuffer.wrap(new byte[] {1, 2, 3}));
+    // Only what remains of the buffer is sent, and the buffer is left as it was.
+    ByteBuffer world = ByteBuffer.wrap(new byte[] {0, 1, 2, 3, 9}, 1, 3);
+    transport.send(NODE, Channel.WORLD, world);
     transport.send(NODE, Channel.CONTROL, ByteBuffer.wrap(new byte[] {4}));
+    assertEquals(1, world.position());
+    assertEquals(3, world.remaining());
     assertArrayEquals(new byte[] {1, 2, 3}, readFrame(link.world.getInputStream()));
     assertArrayEquals(new byte[] {4}, readFrame(link.control.getInputStream()));
 
@@ -78,7 +82,7 @@ class NettyTransportTest {
   }
 
   @Test
-  void requestsAreDatagramsAndAnAnswerIsMatchedByItsSender() throws Exception {
+  void requestsAreDatagramsAndAnAnswerComesBackToItsNodesSocket() throws Exception {
     FakeNode node = fakeNode();
     NettyTransport transport = transport(node.address(), NettyTransport.MAX_PENDING_BYTES);
     Recorder heard = listen(transport);
@@ -88,18 +92,40 @@ class NettyTransportTest {
     DatagramPacket request = new DatagramPacket(new byte[64], 64);
     node.requests.receive(request);
     assertEquals(3, request.getLength());
+    assertEquals(transport.requestSocket(NODE).getPort(), request.getPort());
 
-    // A datagram from anywhere else is not the node's.
-    try (DatagramSocket stranger = new DatagramSocket(0, InetAddress.getLoopbackAddress())) {
-      stranger.send(new DatagramPacket(new byte[] {6}, 1, request.getSocketAddress()));
-    }
     byte[] answer = new byte[20_000];
     answer[0] = 5;
     node.requests.send(new DatagramPacket(answer, answer.length, request.getSocketAddress()));
 
     awaitHeard(transport, () -> heard.frames.size() == 1);
     assertEquals(Channel.REQUEST, heard.channels.get(0));
+    assertEquals(NODE, heard.nodes.get(0));
     assertArrayEquals(answer, heard.frames.get(0), "a large answer arrives whole");
+  }
+
+  @Test
+  void anAnswerFromAnotherAddressOfTheNodeIsStillItsNodes() throws Exception {
+    // As from a node behind NAT, or one with several addresses that answers from another.
+    FakeNode first = fakeNode();
+    FakeNode second = fakeNode();
+    NodeId other = NodeId.of(1);
+    NettyTransport transport =
+        new NettyTransport(
+            Map.of(NODE, first.address(), other, second.address()),
+            NettyTransport.MAX_PENDING_BYTES);
+    closing.add(transport);
+    Recorder heard = listen(transport);
+
+    try (DatagramSocket elsewhere = new DatagramSocket(0, InetAddress.getLoopbackAddress())) {
+      elsewhere.send(new DatagramPacket(new byte[] {1}, 1, transport.requestSocket(other)));
+      elsewhere.send(new DatagramPacket(new byte[] {2}, 1, transport.requestSocket(NODE)));
+    }
+
+    awaitHeard(transport, () -> heard.frames.size() == 2);
+    for (int i = 0; i < 2; i++) {
+      assertEquals(heard.frames.get(i)[0] == 1 ? other : NODE, heard.nodes.get(i));
+    }
   }
 
   @Test
@@ -197,6 +223,12 @@ class NettyTransportTest {
             new NettyTransport(
                 Map.of(NODE, new NodeAddress("no-such-host.invalid", 1, 2, 3)),
                 NettyTransport.MAX_PENDING_BYTES));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new NettyTransport(
+                Map.of(NODE, node.address(), NodeId.of(1), node.address()),
+                NettyTransport.MAX_PENDING_BYTES));
   }
 
   /** The node's side of a link. */
@@ -239,6 +271,7 @@ class NettyTransportTest {
 
   /** Everything the transport reported, in order. */
   private static final class Recorder implements Transport.Listener {
+    final List<NodeId> nodes = new ArrayList<>();
     final List<Channel> channels = new ArrayList<>();
     final List<byte[]> frames = new ArrayList<>();
     int connected;
@@ -248,6 +281,7 @@ class NettyTransportTest {
     public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
       byte[] bytes = new byte[frame.remaining()];
       frame.get(bytes);
+      nodes.add(node);
       channels.add(channel);
       frames.add(bytes);
     }

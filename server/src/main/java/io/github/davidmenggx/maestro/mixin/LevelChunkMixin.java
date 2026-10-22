@@ -13,7 +13,8 @@ public abstract class LevelChunkMixin {
 
   /**
    * Every block change in a loaded chunk passes here. One that changes the block's cell is reported
-   * to the fleet, whatever made it.
+   * to the fleet, whatever made it. The cell is compared even when vanilla reports no change, since
+   * it also reports none when a change made while removing the old block replaced the new one.
    */
   @WrapMethod(
       method =
@@ -28,9 +29,7 @@ public abstract class LevelChunkMixin {
     BlockPos at = pos.immutable();
     int before = Fleet.cell(chunk, at);
     BlockState previous = original.call(pos, state, flags);
-    if (previous != null) {
-      fleet.blockChanged(chunk, at, before);
-    }
+    fleet.blockChanged(chunk, at, before);
     return previous;
   }
 }

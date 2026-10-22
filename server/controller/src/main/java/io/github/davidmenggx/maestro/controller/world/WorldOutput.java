@@ -15,8 +15,9 @@ public interface WorldOutput {
     QUEUE_DEPTH,
     /**
      * No node can take the request now: none owns the region, the search could read past the
-     * region, the owner has not been sent the chunk the search starts in, or a position does not
-     * fit the wire. Also an answer the node searched before that chunk reached it.
+     * region, the owner has not been sent the chunk the search starts in or is out of service, or a
+     * position does not fit the wire. Also an answer the node searched before that chunk reached
+     * it.
      */
     NO_NODE,
     /**
@@ -24,7 +25,10 @@ public interface WorldOutput {
      * if the request still arrives before the registration, the node answers that it is unknown.
      */
     CLASS_UNREGISTERED,
-    /** The owning node died before answering. */
+    /**
+     * The owning node was lost before answering: its link went, or it stopped answering and was
+     * taken out of service.
+     */
     NODE_LOST,
     /**
      * No answer arrived in time, resends included: the request or its answers were lost, or the

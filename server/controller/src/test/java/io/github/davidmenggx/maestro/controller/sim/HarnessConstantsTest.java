@@ -3,6 +3,7 @@ package io.github.davidmenggx.maestro.controller.sim;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.core.NodeHealth;
 import io.github.davidmenggx.maestro.controller.core.RequestTracker;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import org.junit.jupiter.api.Test;
@@ -42,6 +43,38 @@ class HarnessConstantsTest {
         SimRun.MIN_FUZZED_TICKS - SimRun.DRAIN_TICKS > FaultPlan.MAX_FAULT_SPAN_TICKS,
         "the shortest fuzzed run has no room for a fault");
     assertTrue(SimRun.MAX_FUZZED_TICKS >= SimRun.MIN_FUZZED_TICKS, "run length range is inverted");
+  }
+
+  @Test
+  void aLongFaultOutlastsBothWaysOfNoticingIt() {
+    // A node whose heartbeats stop is suspected within this many ticks, judged against the
+    // interval the detector assumes before it has seen any.
+    double mean = NodeHealth.FIRST_INTERVAL_NANOS + NodeHealth.ACCEPTABLE_PAUSE_NANOS;
+    double deviation =
+        Math.max(NodeHealth.FIRST_INTERVAL_NANOS / 4, NodeHealth.MIN_DEVIATION_NANOS);
+    long suspectedAfter = 0;
+    while (NodeHealth.phi(suspectedAfter * Simulation.NANOS_PER_TICK, mean, deviation)
+        < NodeHealth.PHI_THRESHOLD) {
+      suspectedAfter++;
+    }
+    assertTrue(
+        FaultPlan.MAX_LONG_FAULT_SPAN_TICKS > 2 * suspectedAfter,
+        "a long fault ends before its node can be suspected: " + suspectedAfter + " ticks");
+    // A quiet request path is noticed, waits out its backoff, and fails a probe.
+    assertTrue(
+        FaultPlan.MAX_LONG_FAULT_SPAN_TICKS
+            > NodeHealth.QUIET_TICKS + NodeHealth.FIRST_BACKOFF_TICKS + NodeHealth.PROBE_TICKS + 1,
+        "a long fault ends before a probe can fail");
+    assertTrue(FaultPlan.MAX_LONG_FAULT_SPAN_TICKS > FaultPlan.MAX_FAULT_SPAN_TICKS);
+  }
+
+  @Test
+  void answersSentBeforeANodeStopsAreHeardWithinTheStrayWindow() {
+    // The slowest datagram arrives within a tick, and waits at most a tick more to be
+    // handed over.
+    int slowest = FaultPlan.MAX_MIN_LATENCY_STEPS + FaultPlan.MAX_LATENCY_SPAN_STEPS;
+    assertTrue(slowest < Simulation.STEPS_PER_TICK, "a datagram can take more than a tick");
+    assertTrue(FailOpenCheck.STRAY_ANSWER_TICKS >= 2);
   }
 
   @Test

@@ -28,12 +28,6 @@ public final class Searches {
      * returns its answer, which may be null. It may be called once, and only before this returns.
      */
     Path search(Mob mob, SearchCall call, Supplier<Path> vanilla);
-
-    /**
-     * The mob's navigation is about to stop following {@code current}, for {@code next}, or for
-     * nothing if null.
-     */
-    default void displaced(Mob mob, Path current, Path next) {}
   }
 
   private static Interceptor interceptor;

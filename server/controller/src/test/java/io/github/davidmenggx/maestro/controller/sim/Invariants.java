@@ -108,8 +108,24 @@ public final class Invariants {
           run.controller.outstandingCount() + " requests still outstanding at end of run");
     }
 
+    // A node that cannot answer stops being sent requests, past the few that show it
+    // and a probe now and then, so its mobs are searched on the server instead.
+    violations.addAll(run.sim.failOpenViolations());
+
     if (run.fitsCapacity()) {
       violations.addAll(checkSlo(run.out.latencies(), run.out.sloMisses()));
+      // Nothing in such a run stops a node from answering in time, so taking one out of
+      // service would be a false alarm.
+      long suspected = run.sim.metrics().total("node.suspected");
+      long opened = run.sim.metrics().total("node.quiet");
+      if (suspected + opened > 0) {
+        violations.add(
+            "a healthy node was taken out of service: "
+                + suspected
+                + " suspicions, "
+                + opened
+                + " quiet request paths");
+      }
     }
 
     return violations;

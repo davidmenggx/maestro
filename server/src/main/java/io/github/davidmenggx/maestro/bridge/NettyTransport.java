@@ -26,10 +26,12 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
@@ -37,9 +39,12 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Production {@link Transport}. A link is two TCP connections, one per ordered channel, whose
- * frames each carry a 4-byte little-endian length. Requests travel as UDP datagrams from one socket
- * shared by every link, so a datagram in flight when a link changes still arrives, and an answer is
- * matched to its node by the address it came from.
+ * frames each carry a 4-byte little-endian length. Requests travel as UDP datagrams, each node's
+ * from a socket of its own that outlives its links, so a datagram in flight when a link changes
+ * still arrives. An answer comes back to the socket its request left from, which names its node
+ * whatever address the node answers from, as a node behind NAT or with several addresses may.
+ *
+ * <p>Frames are sent without being copied, so a caller must not change one it has sent.
  *
  * <p>The network runs on one thread of its own. What it hears waits in a queue until {@link #drain}
  * hands it to the listener on the server thread.
@@ -85,10 +90,12 @@ public final class NettyTransport implements Transport, AutoCloseable {
   }
 
   private final Map<NodeId, Endpoints> endpoints = new LinkedHashMap<>();
-  private final Map<InetSocketAddress, NodeId> byRequestAddress = new HashMap<>();
   private final int maxPendingBytes;
   private final EventLoopGroup group;
-  private final io.netty.channel.Channel datagrams;
+
+  /** Each node's request socket. */
+  private final Map<NodeId, io.netty.channel.Channel> datagrams = new LinkedHashMap<>();
+
   private final Queue<Runnable> heard = new ConcurrentLinkedQueue<>();
 
   /** Guarded by {@code this}. */
@@ -97,11 +104,13 @@ public final class NettyTransport implements Transport, AutoCloseable {
   private volatile Listener listener;
 
   /**
-   * Resolves every node's addresses and binds the request socket. Throws {@link
-   * IllegalArgumentException} if a host does not resolve.
+   * Resolves every node's addresses and binds each node's request socket. Throws {@link
+   * IllegalArgumentException} if a host does not resolve, or two nodes take requests at one
+   * address.
    */
   public NettyTransport(Map<NodeId, NodeAddress> nodes, int maxPendingBytes) {
     this.maxPendingBytes = maxPendingBytes;
+    Set<InetSocketAddress> requestAddresses = new HashSet<>();
     for (Map.Entry<NodeId, NodeAddress> entry : nodes.entrySet()) {
       NodeAddress address = entry.getValue();
       Endpoints node =
@@ -110,26 +119,37 @@ public final class NettyTransport implements Transport, AutoCloseable {
               resolve(address.host(), address.controlPort()),
               resolve(address.host(), address.requestPort()));
       endpoints.put(entry.getKey(), node);
-      if (byRequestAddress.put(node.request(), entry.getKey()) != null) {
+      if (!requestAddresses.add(node.request())) {
         throw new IllegalArgumentException("two nodes take requests at " + node.request());
       }
     }
     group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
     try {
-      datagrams =
-          new Bootstrap()
-              .group(group)
-              .channel(NioDatagramChannel.class)
-              // Read a whole datagram at once. The default buffer would cut an answer short.
-              .option(ChannelOption.RCVBUF_ALLOCATOR, new FixedRecvByteBufAllocator(1 << 16))
-              .handler(new Datagrams())
-              .bind(0)
-              .syncUninterruptibly()
-              .channel();
+      for (NodeId node : endpoints.keySet()) {
+        datagrams.put(
+            node,
+            new Bootstrap()
+                .group(group)
+                .channel(NioDatagramChannel.class)
+                // Read a whole datagram at once. The default buffer would cut an answer short.
+                .option(ChannelOption.RCVBUF_ALLOCATOR, new FixedRecvByteBufAllocator(1 << 16))
+                .handler(new Datagrams(node))
+                .bind(0)
+                .syncUninterruptibly()
+                .channel());
+      }
     } catch (RuntimeException e) {
+      for (io.netty.channel.Channel bound : datagrams.values()) {
+        bound.close();
+      }
       group.shutdownGracefully(0, 0, TimeUnit.SECONDS);
       throw e;
     }
+  }
+
+  /** The local address of the node's request socket, which its answers come back to. */
+  InetSocketAddress requestSocket(NodeId node) {
+    return (InetSocketAddress) datagrams.get(node).localAddress();
   }
 
   private static InetSocketAddress resolve(String host, int port) {
@@ -274,8 +294,6 @@ public final class NettyTransport implements Transport, AutoCloseable {
 
   @Override
   public void send(NodeId node, Transport.Channel channel, ByteBuffer frame) {
-    byte[] bytes = new byte[frame.remaining()];
-    frame.duplicate().get(bytes);
     Link link;
     synchronized (this) {
       link = links.get(node);
@@ -283,17 +301,16 @@ public final class NettyTransport implements Transport, AutoCloseable {
         return;
       }
     }
+    ByteBuf payload = Unpooled.wrappedBuffer(frame.duplicate());
     if (channel == Transport.Channel.REQUEST) {
-      datagrams.writeAndFlush(
-          new DatagramPacket(Unpooled.wrappedBuffer(bytes), endpoints.get(node).request()));
+      datagrams.get(node).writeAndFlush(new DatagramPacket(payload, endpoints.get(node).request()));
       return;
     }
     io.netty.channel.Channel connection =
         channel == Transport.Channel.WORLD ? link.world : link.control;
-    ByteBuf framed = connection.alloc().buffer(HEADER_BYTES + bytes.length);
-    framed.writeIntLE(bytes.length);
-    framed.writeBytes(bytes);
-    connection.writeAndFlush(framed);
+    ByteBuf header =
+        Unpooled.buffer(HEADER_BYTES, HEADER_BYTES).writeIntLE(payload.readableBytes());
+    connection.writeAndFlush(Unpooled.wrappedBuffer(header, payload));
     if (!connection.isWritable()) {
       LOG.warn(
           "Maestro: {} holds more than {} unsent bytes on its {} connection; closing its link",
@@ -304,7 +321,7 @@ public final class NettyTransport implements Transport, AutoCloseable {
     }
   }
 
-  /** Closes every link and the request socket. Nothing more is reported. */
+  /** Closes every link and request socket. Nothing more is reported. */
   @Override
   public void close() {
     synchronized (this) {
@@ -313,7 +330,9 @@ public final class NettyTransport implements Transport, AutoCloseable {
         end(link, false);
       }
     }
-    datagrams.close().syncUninterruptibly();
+    for (io.netty.channel.Channel socket : datagrams.values()) {
+      socket.close().syncUninterruptibly();
+    }
     group.shutdownGracefully(0, 1, TimeUnit.SECONDS).syncUninterruptibly();
     heard.clear();
   }
@@ -352,15 +371,20 @@ public final class NettyTransport implements Transport, AutoCloseable {
     }
   }
 
-  /** Answers on the request socket, from whichever node sent them. */
+  /**
+   * Answers on one node's request socket. A datagram from anything else that reaches it is dropped
+   * by the controller, which accepts only answers for its own run.
+   */
   private final class Datagrams extends SimpleChannelInboundHandler<DatagramPacket> {
+
+    private final NodeId node;
+
+    Datagrams(NodeId node) {
+      this.node = node;
+    }
 
     @Override
     protected void channelRead0(ChannelHandlerContext context, DatagramPacket packet) {
-      NodeId node = byRequestAddress.get(packet.sender());
-      if (node == null) {
-        return;
-      }
       byte[] bytes = ByteBufUtil.getBytes(packet.content());
       heard.add(() -> listener.onFrame(node, Transport.Channel.REQUEST, ByteBuffer.wrap(bytes)));
     }

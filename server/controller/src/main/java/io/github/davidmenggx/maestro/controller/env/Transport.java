@@ -54,9 +54,9 @@ public interface Transport {
   }
 
   /**
-   * Frames are copied or fully consumed before returning, so the caller may reuse the buffer. A
-   * send to a node that is not connected is discarded, with no error return, because backpressure
-   * is decided from the node's reported queue depth, not the socket.
+   * The transport may read the frame after this returns, so the caller must not change it. A send
+   * to a node that is not connected is discarded, with no error return, because backpressure is
+   * decided from the node's reported queue depth, not the socket.
    */
   void send(NodeId node, Channel channel, ByteBuffer frame);
 

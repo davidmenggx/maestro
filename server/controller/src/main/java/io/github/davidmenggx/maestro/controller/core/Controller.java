@@ -19,14 +19,16 @@ import java.util.Objects;
 /**
  * The controller. It streams each region's world to the nodes holding it ({@link WorldStreams}),
  * admits, batches, resends and cancels path requests and applies their answers ({@link
- * RequestTracker}), and keeps a link to every node ({@link NodeLinks}). Failover, resharding and
- * the failure detector are not built.
+ * RequestTracker}), keeps a link to every node ({@link NodeLinks}), and takes a node that stopped
+ * answering out of service ({@link NodeHealth}). Failover to another node and resharding are not
+ * built.
  */
 public final class Controller implements WorldInput, Transport.Listener {
 
   private final ControllerEnv env;
   private final Violations violations = new Violations();
   private final NodeLinks links;
+  private final NodeHealth health;
   private final WorldStreams streams;
   private final RequestTracker requests;
 
@@ -41,10 +43,21 @@ public final class Controller implements WorldInput, Transport.Listener {
     this.run = env.run();
     Encoder encoder = new Encoder(env);
     this.links = new NodeLinks(env, run, regions.nodes());
+    this.health = new NodeHealth(env.metrics(), regions.nodes());
     this.streams = new WorldStreams(env, world, regions, links, encoder, violations, run);
     this.requests =
         new RequestTracker(
-            env, world, out, regions, links, streams, encoder, violations, run, nodeCapacity);
+            env,
+            world,
+            out,
+            regions,
+            links,
+            health,
+            streams,
+            encoder,
+            violations,
+            run,
+            nodeCapacity);
     env.transport().listen(this);
   }
 
@@ -88,10 +101,15 @@ public final class Controller implements WorldInput, Transport.Listener {
   public void accept(WorldEvent event) {
     switch (event) {
       case WorldEvent.TickBegan began -> {
+        health.handedOver();
         requests.expire(began.tick());
+        for (NodeId node : health.evaluate(began.tick(), env.clock().nowNanos())) {
+          requests.outOfService(node);
+        }
         links.dial(began.tick());
       }
       case WorldEvent.TickEnded ended -> {
+        health.handedOver();
         // Block changes first, while the chunks about to be read are still marked.
         streams.flushCells();
         streams.flushChunks();
@@ -131,6 +149,7 @@ public final class Controller implements WorldInput, Transport.Listener {
       return;
     }
     links.disconnected(node);
+    health.disconnected(node);
     requests.linkLost(node);
   }
 
@@ -160,13 +179,15 @@ public final class Controller implements WorldInput, Transport.Listener {
       case Reply.Refusal refusal -> requests.refusal(node, refusal);
       case Reply.Greeting greeting -> {
         links.greeted(node, greeting.pathfinder());
+        health.greeted(node, env.clock().nowNanos());
         streams.hello(node, greeting);
       }
       case Reply.Depth depth -> {
         requests.depth(node, depth.queueDepth());
-        // The only view of a node's backlog in production, and the arrivals a failure
-        // detector reads.
+        health.heartbeat(node, env.clock().nowNanos());
+        // The only view of a node's backlog in production.
         env.metrics().record("node.queue.reported", depth.queueDepth(), "node", node.toString());
+        env.metrics().gauge("node.queue.depth", depth.queueDepth(), "node", node.toString());
       }
       case Reply.Foreign ignored -> env.metrics().count("path.response.foreign", 1);
       case null -> env.metrics().count("controller.unknown.frame", 1, "channel", channel.name());
