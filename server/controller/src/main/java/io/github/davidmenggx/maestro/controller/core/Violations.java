@@ -1,4 +1,4 @@
-package io.github.davidmenggx.maestro.controller.sim;
+package io.github.davidmenggx.maestro.controller.core;
 
 import java.util.ArrayList;
 import java.util.List;

@@ -1,4 +1,4 @@
-package io.github.davidmenggx.maestro.controller.sim;
+package io.github.davidmenggx.maestro.controller.core;
 
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.Offload;

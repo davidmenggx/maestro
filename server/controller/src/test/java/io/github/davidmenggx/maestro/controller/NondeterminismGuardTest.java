@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.env.Clock;
-import io.github.davidmenggx.maestro.controller.sim.Controller.Parts;
 import java.io.IOException;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
@@ -30,9 +29,9 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 /**
- * Reads the compiled controller, and the simulated controller that will become it, and fails if
- * either directly references a clock, a random source, a thread pool, a socket or the host it runs
- * on. These must come through {@code ControllerEnv}, or replay breaks.
+ * Reads the compiled controller and fails if it directly references a clock, a random source, a
+ * thread pool, a socket or the host it runs on. These must come through {@code ControllerEnv}, or
+ * replay breaks.
  *
  * <p>It also refuses collections whose iteration order is neither insertion nor key order: hashed
  * ones, whose order follows identity hash codes for most keys, and the immutable {@code Set.of} and
@@ -100,9 +99,6 @@ class NondeterminismGuardTest {
           new Rule("java/util/stream/Collectors", "toUnmodifiableMap"),
           new Rule("java/util/stream/Collectors", "groupingBy"));
 
-  /** The simulated controller and its parts, which are to become the production one. */
-  private static final List<Class<?>> SIMULATED_CONTROLLER = Parts.all();
-
   /** flatc output is not controller code, so the rule does not apply. */
   private static final String GENERATED = "maestro/fbs/";
 
@@ -128,16 +124,6 @@ class NondeterminismGuardTest {
   @Test
   void controllerCodeTakesItsNondeterminismFromTheSeams() throws IOException, URISyntaxException {
     assertEquals(List.of(), scanTree(classesRoot(Clock.class)));
-  }
-
-  @Test
-  void theSimulatedControllerTakesItsNondeterminismFromTheSeams()
-      throws IOException, URISyntaxException {
-    List<String> findings = new ArrayList<>();
-    for (Class<?> part : SIMULATED_CONTROLLER) {
-      findings.addAll(scanClassAndNested(part));
-    }
-    assertEquals(List.of(), findings);
   }
 
   @Test
@@ -290,29 +276,6 @@ class NondeterminismGuardTest {
     assertTrue(Files.exists(file), "expected a compiled sample at " + file);
     List<String> findings = new ArrayList<>();
     inspect(file, target.getSimpleName(), findings);
-    return findings;
-  }
-
-  /** {@code target} and the classes nested in it, which compile to files of their own. */
-  private static List<String> scanClassAndNested(Class<?> target)
-      throws IOException, URISyntaxException {
-    Path file = classesRoot(target).resolve(target.getName().replace('.', '/') + ".class");
-    assertTrue(Files.exists(file), "expected compiled classes at " + file);
-    String prefix = target.getSimpleName();
-    List<String> findings = new ArrayList<>();
-    try (Stream<Path> siblings = Files.list(file.getParent())) {
-      for (Path sibling :
-          siblings
-              .filter(
-                  path -> {
-                    String name = path.getFileName().toString();
-                    return name.equals(prefix + ".class") || name.startsWith(prefix + "$");
-                  })
-              .sorted()
-              .toList()) {
-        inspect(sibling, sibling.getFileName().toString(), findings);
-      }
-    }
     return findings;
   }
 

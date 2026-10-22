@@ -1,5 +1,6 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
+import io.github.davidmenggx.maestro.controller.core.Controller;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionMap;

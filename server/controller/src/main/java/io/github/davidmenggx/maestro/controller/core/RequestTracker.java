@@ -1,4 +1,4 @@
-package io.github.davidmenggx.maestro.controller.sim;
+package io.github.davidmenggx.maestro.controller.core;
 
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
@@ -11,6 +11,7 @@ import io.github.davidmenggx.maestro.controller.wire.Reply;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
+import io.github.davidmenggx.maestro.controller.world.SearchReach;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
@@ -30,19 +31,19 @@ import java.util.TreeSet;
  * answer it in time, the per-tick batches that carry it, its resends and cancels, and the answer
  * that settles it.
  */
-final class RequestTracker {
+public final class RequestTracker {
 
   /**
    * A request that cannot be answered within this many ticks is not sent, and is not waited for.
    */
-  static final int MAX_TICKS_LATE = 10;
+  public static final int MAX_TICKS_LATE = 10;
 
   /**
    * Ticks from a request to the earliest tick its node usually serves it: the batch is encoded off
-   * the main thread and leaves at the end of the next tick, and the node serves it in the tick
-   * after that.
+   * the main thread at the end of the tick, leaves when the next tick starts, and the node serves
+   * it in that tick.
    */
-  static final int SEND_TICKS = 2;
+  public static final int SEND_TICKS = 1;
 
   /**
    * A request is sent again under the same id once its answer is this many ticks late, at most
@@ -52,7 +53,7 @@ final class RequestTracker {
    */
   static final int RESEND_TICKS = 1;
 
-  static final int MAX_RESENDS = 2;
+  public static final int MAX_RESENDS = 2;
 
   /**
    * {@code request} is kept so it can be resent, and so the result can be returned as a complete
@@ -228,6 +229,25 @@ final class RequestTracker {
       out.pathDropped(mobId, DropReason.NO_NODE);
       return;
     }
+    MobClass profile = world.mobClass(classId);
+    if (profile == null) {
+      violations.add("request named profile " + classId + ", which the world does not hold");
+      out.pathDropped(mobId, DropReason.CLASS_UNREGISTERED);
+      return;
+    }
+    // A node reads past its area as air, which turns real ground into a cliff, so a search
+    // that could read past the region is not sent.
+    if (!SearchReach.fits(
+        region.minX(),
+        region.minZ(),
+        region.size(),
+        event.start(),
+        event.search().maxPathLength(),
+        profile.shape().width())) {
+      env.metrics().count("path.rejected", 1, "reason", "reach");
+      out.pathDropped(mobId, DropReason.NO_NODE);
+      return;
+    }
     // The chunk the search starts in must be resident on the node. Its frame is produced at a
     // tick boundary, before the request, so it usually reaches the node a tick ahead of it. If
     // it does not, as when its encode is retried, the answer's world sequence shows it.
@@ -244,13 +264,6 @@ final class RequestTracker {
     // after it. One made later in this tick trails it by less than a tick. A request that
     // still overtakes it is answered `UnknownProfile`.
     if (links.register(node, classId)) {
-      MobClass profile = world.mobClass(classId);
-      if (profile == null) {
-        links.unregister(node, classId);
-        violations.add("request named profile " + classId + ", which the world does not hold");
-        out.pathDropped(mobId, DropReason.CLASS_UNREGISTERED);
-        return;
-      }
       links.send(node, Channel.CONTROL, Frames.mobClass(profile));
       env.metrics().count("mobclass.registered", 1, "node", node.toString());
       out.pathDropped(mobId, DropReason.CLASS_UNREGISTERED);

@@ -19,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.SplittableRandom;
+import java.util.function.Supplier;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
@@ -44,7 +45,7 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * Runs vanilla searches on seeded terrain and records each as a parity case. Everything happens in
  * one call on the server thread, so no tick changes the world between building it and searching it.
  */
-final class ParityCapture implements Searches.Observer {
+final class ParityCapture implements Searches.Interceptor {
 
   /** Side of the area in chunks. Large enough for a follow range of 64 blocks. */
   static final int AREA_CHUNKS = 10;
@@ -314,7 +315,7 @@ final class ParityCapture implements Searches.Observer {
     PathNavigation navigation = mob.getNavigation();
     recorded.clear();
     probe.reset();
-    Searches.Observer previous = Searches.observe(this);
+    Searches.Interceptor previous = Searches.intercept(this);
     try {
       if (rng.nextInt(4) == 0) {
         int maxPathLength = 8 + rng.nextInt((int) defaultLength - 7);
@@ -323,7 +324,7 @@ final class ParityCapture implements Searches.Observer {
         navigation.createPath(target, reachRange);
       }
     } finally {
-      Searches.observe(previous);
+      Searches.intercept(previous);
     }
     if (recorded.size() != 1) {
       return null;
@@ -378,8 +379,21 @@ final class ParityCapture implements Searches.Observer {
     return profiles;
   }
 
+  /** Every intercepted search, whoever asked for it, is captured. */
   @Override
-  public void searched(SearchCall call, Path vanilla) {
+  public boolean wants(Mob mob) {
+    return true;
+  }
+
+  /** Runs vanilla's search and records it. */
+  @Override
+  public Path search(Mob mob, SearchCall call, Supplier<Path> search) {
+    Path vanilla = search.get();
+    record(call, vanilla);
+    return vanilla;
+  }
+
+  private void record(SearchCall call, Path vanilla) {
     List<WorldOutput.Node> nodes = new ArrayList<>(vanilla.getNodeCount());
     for (int i = 0; i < vanilla.getNodeCount(); i++) {
       Node node = vanilla.getNode(i);

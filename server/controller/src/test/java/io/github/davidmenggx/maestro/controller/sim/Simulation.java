@@ -8,6 +8,7 @@ import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldInput;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -18,11 +19,20 @@ import java.util.PriorityQueue;
 import java.util.function.Consumer;
 import java.util.function.LongConsumer;
 import java.util.function.Supplier;
+import maestro.fbs.ChunkSnapshot;
+import maestro.fbs.RegionAssignment;
+import maestro.fbs.WorldDelta;
+import maestro.fbs.WorldFrame;
+import maestro.fbs.WorldMsg;
 
 /**
  * Tick-driven deterministic simulator. Time is a step counter: {@link #STEPS_PER_TICK} steps make
  * one tick, and every delay in the harness is in steps. Events at the same step run in insertion
  * order, so two runs of one seed are identical.
+ *
+ * <p>The server works for the first part of each tick and then idles until the next one. The
+ * controller runs on the server thread, so what the network and the offload workers produce for it
+ * waits until the server hands over control: when a tick's work starts and just before it ends.
  */
 public final class Simulation {
 
@@ -33,6 +43,9 @@ public final class Simulation {
   static final long NANOS_PER_TICK = 50_000_000L;
 
   static final long NANOS_PER_STEP = NANOS_PER_TICK / STEPS_PER_TICK;
+
+  /** A server that works the whole tick still leaves its last step for the fleet. */
+  static final int MAX_BUSY_STEPS = STEPS_PER_TICK - 2;
 
   private record Scheduled(long time, long order, String name, Runnable action)
       implements Comparable<Scheduled> {
@@ -57,11 +70,21 @@ public final class Simulation {
   private final Rng runRng;
   private final Rng controllerRng;
   private final PriorityQueue<Scheduled> queue = new PriorityQueue<>();
+
+  /** Transport callbacks waiting for the controller thread, in arrival order. */
+  private final List<Scheduled> inbox = new ArrayList<>();
+
+  /** Offload work by the step it finishes, run at the first hand-over at or after it. */
+  private final PriorityQueue<Scheduled> finishedWork = new PriorityQueue<>();
+
   private final Map<NodeId, ModeledNode> nodes = new LinkedHashMap<>();
   private final Map<Long, List<FaultPlan.Fault>> faultsByTick = new LinkedHashMap<>();
 
-  /** Highest world sequence any fleet node applied, per region stream. */
-  private final Map<Stream, Long> appliedByRegion = new LinkedHashMap<>();
+  /** Highest world sequence the controller sent to any holder, per region stream. */
+  private final Map<Stream, Long> sentByRegion = new LinkedHashMap<>();
+
+  /** The region stream each node was last assigned, as the controller sent it. */
+  private final Map<NodeId, Stream> sentStream = new LinkedHashMap<>();
 
   /** Highest world sequence each holder applied, per region stream. */
   private final Map<HeldStream, Long> appliedByHolder = new LinkedHashMap<>();
@@ -87,6 +110,9 @@ public final class Simulation {
   private long order;
   private long tick = -1;
   private long settleFrom = Long.MAX_VALUE;
+
+  /** Steps from the start of a tick to the end of the server's work in it. */
+  private int busySteps = MAX_BUSY_STEPS;
 
   public Simulation(long seed, FaultPlan faults) {
     this.rng = SeededRng.of(seed);
@@ -146,6 +172,25 @@ public final class Simulation {
     settleFrom = tick;
   }
 
+  /**
+   * How many steps of each tick the server works before it ends the tick, between 1 and {@link
+   * #MAX_BUSY_STEPS}. The rest of the tick it idles, as a server under its tick budget does.
+   */
+  public void serverBusySteps(int steps) {
+    if (steps < 1 || steps > MAX_BUSY_STEPS) {
+      throw new IllegalArgumentException("a tick's work takes 1 to " + MAX_BUSY_STEPS + " steps");
+    }
+    busySteps = steps;
+  }
+
+  /**
+   * Queues a transport callback for the controller thread. It runs at the next hand-over, after the
+   * callbacks queued before it.
+   */
+  void toController(String name, Runnable action) {
+    inbox.add(new Scheduled(now, order++, name, action));
+  }
+
   /** Runs when a fault restarts the controller, after the new process's environment exists. */
   public void onRestart(Runnable action) {
     onRestart = Objects.requireNonNull(action, "action");
@@ -190,7 +235,6 @@ public final class Simulation {
               + highest);
     }
     appliedByHolder.put(held, Math.max(highest, sequence));
-    appliedByRegion.merge(new Stream(run, region), sequence, Math::max);
     Long expected = checkpoints.get(new Checkpoint(run, region, sequence));
     if (expected != null) {
       checkpointsCompared++;
@@ -209,23 +253,48 @@ public final class Simulation {
     }
   }
 
-  /**
-   * Records that a node took a fresh assignment. A stream starts over only where it stands, never
-   * behind a frame a node already applied, so it has no gap a node could have needed.
-   */
+  /** Records that a node took a fresh assignment, from which its own copy starts over. */
   void assigned(ModeledNode node, long run, long region, long sequence) {
-    long highest = appliedByRegion.getOrDefault(new Stream(run, region), 0L);
-    // The holder's own copy starts over here too.
     appliedByHolder.put(new HeldStream(node.id(), run, region), sequence);
-    if (sequence < highest) {
-      streamViolations.add(
-          node.id()
-              + " was assigned region "
-              + region
-              + " at sequence "
-              + sequence
-              + ", behind the applied "
-              + highest);
+  }
+
+  /**
+   * Records a world frame the controller sent. A fresh assignment starts a stream over only where
+   * it stands, never behind a frame already sent to a holder of the region, so it has no gap a node
+   * could have needed. Judged when it is sent, since frames to different holders travel separate
+   * links and may arrive in any order.
+   */
+  void worldFrameSent(NodeId node, byte[] bytes) {
+    WorldFrame frame = WorldFrame.getRootAsWorldFrame(ByteBuffer.wrap(bytes));
+    long sequence;
+    switch (frame.bodyType()) {
+      case WorldMsg.RegionAssignment -> {
+        RegionAssignment assignment = (RegionAssignment) frame.body(new RegionAssignment());
+        Stream stream = new Stream(assignment.run(), assignment.regionId());
+        sentStream.put(node, stream);
+        long highest = sentByRegion.getOrDefault(stream, 0L);
+        if (!assignment.resume() && assignment.sequence() < highest) {
+          streamViolations.add(
+              node
+                  + " was assigned region "
+                  + assignment.regionId()
+                  + " at sequence "
+                  + assignment.sequence()
+                  + ", behind the sent "
+                  + highest);
+        }
+        return;
+      }
+      case WorldMsg.ChunkSnapshot ->
+          sequence = ((ChunkSnapshot) frame.body(new ChunkSnapshot())).sequence();
+      case WorldMsg.WorldDelta -> sequence = ((WorldDelta) frame.body(new WorldDelta())).sequence();
+      default -> {
+        return;
+      }
+    }
+    Stream stream = sentStream.get(node);
+    if (stream != null) {
+      sentByRegion.merge(stream, sequence, Math::max);
     }
   }
 
@@ -280,9 +349,10 @@ public final class Simulation {
   }
 
   /**
-   * Runs {@code ticks} ticks. Each tick applies its faults, opens the tick, lets the workload
-   * change the world, lets the fleet work until the tick's last step, then closes the tick and runs
-   * {@code afterTick}. Queued work is drained between stages.
+   * Runs {@code ticks} ticks. Each tick applies its faults, hands over to the controller, opens the
+   * tick and lets the workload change the world. The fleet works while the server does, then the
+   * controller is handed over to again and closes the tick, and the fleet works on until the tick's
+   * last step. {@code afterTick} runs last.
    */
   public void run(WorldInput controller, Workload workload, long ticks, LongConsumer afterTick) {
     if (ticks < 1) {
@@ -293,14 +363,17 @@ public final class Simulation {
     for (long i = 0; i < ticks; i++) {
       tick++;
       now = tick * STEPS_PER_TICK;
+      long tickClose = now + busySteps;
       long tickEnd = now + STEPS_PER_TICK - 1;
 
       applyFaults(tick);
+      handOver();
       deliver(controller, new WorldEvent.TickBegan(tick));
       workload.tick(tick, event -> deliver(controller, event));
 
-      drainUntil(tickEnd - 1);
+      drainUntil(tickClose);
 
+      handOver();
       deliver(controller, new WorldEvent.TickEnded(tick));
       drainUntil(tickEnd);
       afterTick.accept(tick);
@@ -332,6 +405,24 @@ public final class Simulation {
     controller.accept(event);
   }
 
+  /**
+   * The server thread hands over to the controller: queued transport callbacks run in arrival
+   * order, then offload work finished by now, in the order it finished.
+   */
+  private void handOver() {
+    for (int i = 0; i < inbox.size(); i++) {
+      Scheduled next = inbox.get(i);
+      digest.mix(now).mix(next.name());
+      next.action().run();
+    }
+    inbox.clear();
+    while (!finishedWork.isEmpty() && finishedWork.peek().time() <= now) {
+      Scheduled next = finishedWork.poll();
+      digest.mix(now).mix(next.name());
+      next.action().run();
+    }
+  }
+
   private void drainUntil(long limit) {
     while (!queue.isEmpty() && queue.peek().time() <= limit) {
       Scheduled next = queue.poll();
@@ -356,18 +447,18 @@ public final class Simulation {
   }
 
   /**
-   * Work runs when it finishes, and its completion waits for the end of the tick it finishes in,
-   * because production drains finished jobs there. A result therefore never reaches the controller
-   * inside the call that submitted it, and work that reads controller state changed after it was
-   * submitted is caught. Work that throws, or that the fault plan fails, reports its failure at the
-   * same point. A job of a controller process that has since restarted reports nothing. The lane
-   * orders only a production worker's queue, which this model does not have.
+   * Work runs at the first hand-over after it finishes, because production drains finished jobs
+   * there, and its completion runs with it. A result therefore never reaches the controller inside
+   * the call that submitted it, and work that reads controller state changed after it was submitted
+   * is caught. Work that throws, or that the fault plan fails, reports its failure at the same
+   * point. A job of a controller process that has since restarted reports nothing. The lane orders
+   * only a production worker's queue, which this model does not have.
    */
   private final class SimOffload implements Offload {
 
     /**
      * A frame encode takes tens of microseconds, so between two steps and a couple of milliseconds.
-     * Two steps at least, so work submitted while a tick closes finishes in the next one.
+     * At least one step, so work never finishes in the hand-over that submitted it.
      */
     private static final int MIN_WORK_STEPS = 2;
 
@@ -383,32 +474,34 @@ public final class Simulation {
     public <T> void submit(
         String name, Lane lane, Supplier<T> work, Consumer<T> completion, Runnable failure) {
       long ready = now + MIN_WORK_STEPS + offloadRng.nextInt(MAX_WORK_STEPS - MIN_WORK_STEPS + 1);
-      long drainAt = (ready / STEPS_PER_TICK) * STEPS_PER_TICK + STEPS_PER_TICK - 1;
       metrics.count("offload.submitted", 1, "job", name);
       // Drawn only when failures are possible, so a plan without them replays unchanged.
       if (tick < settleFrom
           && offloadFailureRate > 0
           && offloadRng.nextDouble() < offloadFailureRate) {
         metrics.count("offload.failed", 1, "job", name);
-        scheduleAt(drainAt, "offload-failed:" + name, () -> live(failure));
+        finishedWork.add(
+            new Scheduled(ready, order++, "offload-failed:" + name, () -> live(failure)));
         return;
       }
-      scheduleAt(
-          drainAt,
-          "offload:" + name,
-          () ->
-              live(
-                  () -> {
-                    T result;
-                    try {
-                      result = work.get();
-                    } catch (RuntimeException e) {
-                      metrics.count("offload.threw", 1, "job", name);
-                      failure.run();
-                      return;
-                    }
-                    completion.accept(result);
-                  }));
+      finishedWork.add(
+          new Scheduled(
+              ready,
+              order++,
+              "offload:" + name,
+              () ->
+                  live(
+                      () -> {
+                        T result;
+                        try {
+                          result = work.get();
+                        } catch (RuntimeException e) {
+                          metrics.count("offload.threw", 1, "job", name);
+                          failure.run();
+                          return;
+                        }
+                        completion.accept(result);
+                      })));
     }
 
     private void live(Runnable action) {

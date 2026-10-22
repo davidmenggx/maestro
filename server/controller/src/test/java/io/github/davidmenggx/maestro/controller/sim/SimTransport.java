@@ -31,6 +31,9 @@ import java.util.Set;
  * <p>Each controller process gets its own {@link Session}. A restarted controller's links are gone
  * and its old session sends nothing, but datagrams still in flight reach the new process. The first
  * frame the node reads on each ordered connection is the one it joins the link with.
+ *
+ * <p>What reaches the controller, frames and link changes alike, waits for the next hand-over to
+ * the controller thread ({@link Simulation#toController}), in arrival order.
  */
 public final class SimTransport {
 
@@ -126,18 +129,22 @@ public final class SimTransport {
               return;
             }
             if (epoch.get(node) != attempt || isDead(node) || count(partitioned, node) > 0) {
-              listener.onDisconnected(node);
+              hear("connect-failed:" + node, listener -> listener.onDisconnected(node));
               return;
             }
             connected.add(node);
-            listener.onConnected(node);
+            hear("connected:" + node, listener -> listener.onConnected(node));
           });
     }
 
     /** Runs {@code callback} on the listener later, if this session is still the live one. */
     private void notify(String name, Callback callback) {
-      sim.schedule(
-          latency(),
+      sim.schedule(latency(), name, () -> hear(name, callback));
+    }
+
+    /** Queues {@code callback} for the controller thread, if this session is still the live one. */
+    private void hear(String name, Callback callback) {
+      sim.toController(
           name,
           () -> {
             if (session == this && listener != null) {
@@ -318,6 +325,9 @@ public final class SimTransport {
     byte[] bytes = new byte[frame.remaining()];
     frame.duplicate().get(bytes);
     sim.digest().mix(bytes);
+    if (channel == Transport.Channel.WORLD && direction == Direction.TO_NODE) {
+      sim.worldFrameSent(node, bytes);
+    }
     String nodeLabel = node.toString();
     sim.metrics().count("transport.sent", 1, "node", nodeLabel, "channel", channel.name());
 
@@ -387,9 +397,15 @@ public final class SimTransport {
     }
     if (direction == Direction.TO_CONTROLLER) {
       sim.metrics().count("transport.received", 1, "node", label, "channel", channel.name());
-      if (session.listener != null) {
-        session.listener.onFrame(node, channel, ByteBuffer.wrap(bytes));
-      }
+      // The process the frame reached reads it, unless a restart ended that process first.
+      Session receiver = session;
+      sim.toController(
+          "received:" + channel,
+          () -> {
+            if (session == receiver && receiver.listener != null) {
+              receiver.listener.onFrame(node, channel, ByteBuffer.wrap(bytes));
+            }
+          });
       return;
     }
     if (isDead(node)) {

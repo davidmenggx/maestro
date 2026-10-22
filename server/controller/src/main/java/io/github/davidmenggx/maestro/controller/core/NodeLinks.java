@@ -1,4 +1,4 @@
-package io.github.davidmenggx.maestro.controller.sim;
+package io.github.davidmenggx.maestro.controller.core;
 
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
@@ -115,10 +115,6 @@ final class NodeLinks {
   /** Records that the profile is sent on the node's link. Returns false if it already was. */
   boolean register(NodeId node, short classId) {
     return link(node).registeredClasses.add(classId);
-  }
-
-  void unregister(NodeId node, short classId) {
-    link(node).registeredClasses.remove(classId);
   }
 
   boolean registered(NodeId node, short classId) {

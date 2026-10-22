@@ -1,5 +1,6 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
+import io.github.davidmenggx.maestro.controller.core.Controller;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
@@ -94,6 +95,7 @@ public final class SimRun {
     this.scenario = scenario;
     this.sim = new Simulation(seed, faults);
     sim.settleFrom(quietAfter);
+    sim.serverBusySteps(scenario.serverBusySteps());
 
     List<NodeId> nodes = new ArrayList<>();
     for (int i = 0; i < topology.nodeCount(); i++) {
@@ -124,7 +126,7 @@ public final class SimRun {
   private void restartController() {
     out.restarted();
     for (String violation : controller.selfCheck()) {
-      retiredViolations.add("controller of run " + controller.run + ": " + violation);
+      retiredViolations.add("controller of run " + controller.run() + ": " + violation);
     }
     controller = newController();
     workload.replayState(sim.env().clock().tick(), event -> sim.deliver(controller, event));
@@ -250,9 +252,10 @@ public final class SimRun {
   /**
    * Whether the run is one the latency SLO applies to, decided from what went in, not from what the
    * controller did: nothing in the fault plan could delay or lose a request, and every node can
-   * serve what it was offered in time. A tick's batch leaves at the end of the next tick, and its
-   * answers must arrive before the tick after that ends, so each tick's requests to a node, served
-   * by its workers at their highest cost with the slowest latency each way, must fit one tick.
+   * serve what it was offered in time. A tick's batch leaves when the next tick starts, or at the
+   * latest when that tick's work ends, and its answers must reach the controller a tick after that,
+   * so each tick's requests to a node, served by its workers at their highest cost with the slowest
+   * latency each way, must fit one tick.
    */
   public boolean fitsCapacity() {
     if (!faults.clean()) {

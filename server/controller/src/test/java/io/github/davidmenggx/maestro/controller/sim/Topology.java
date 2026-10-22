@@ -3,24 +3,24 @@ package io.github.davidmenggx.maestro.controller.sim;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.region.Region;
+import io.github.davidmenggx.maestro.controller.region.RegionLayout;
 import io.github.davidmenggx.maestro.controller.region.RegionMap;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import java.util.List;
 
 /**
  * The coordinate space of a run and how it is divided among nodes: a square grid of square,
- * full-height regions of {@link #REGION_SIZE} blocks, centered on the origin so positions on both
- * sides of it are covered. Each region has one node, and the first {@code replicated} have a
- * second, which shares its requests. Separate from {@link Scenario}, which describes what happens
- * in that space.
+ * full-height regions of {@link #REGION_SIZE} blocks, cut from the production lattice ({@link
+ * RegionLayout}), so the origin is at the center of a region and positions on both sides of it are
+ * covered. Each region has one node, and the first {@code replicated} have a second, which shares
+ * its requests. Separate from {@link Scenario}, which describes what happens in that space.
  *
  * <p>The {@code with} methods let a focused test change one dimension of {@link #DEFAULT} without
  * restating the rest.
  */
 public record Topology(int regionsPerSide, int replicated, int minY, int height, int relief) {
 
-  /** Side of every region: four pathfinding horizons, the smallest region the spec allows. */
-  public static final int REGION_SIZE = 256;
+  public static final int REGION_SIZE = RegionLayout.SIZE;
 
   static final int MIN_HEIGHT = 32;
   static final int MAX_HEIGHT = 96;
@@ -80,9 +80,12 @@ public record Topology(int regionsPerSide, int replicated, int minY, int height,
     return map;
   }
 
-  /** Lowest x and z of the grid. */
+  /**
+   * Lowest x and z of the grid. It starts {@code (regionsPerSide - 1) / 2} cells below the
+   * origin's, so the origin's cell is the middle one, or the lower of the middle two.
+   */
   public int min() {
-    return Math.floorDiv(-extent() / 2, Chunks.SIZE) * Chunks.SIZE;
+    return RegionLayout.cellMin(-((regionsPerSide - 1) / 2));
   }
 
   /** Size of the whole grid along one axis, in blocks. */

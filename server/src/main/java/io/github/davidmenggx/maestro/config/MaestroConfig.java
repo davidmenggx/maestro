@@ -2,6 +2,7 @@ package io.github.davidmenggx.maestro.config;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -13,6 +14,7 @@ import java.lang.reflect.RecordComponent;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -22,8 +24,17 @@ import java.util.stream.Collectors;
  * defaults below, and a missing key takes its default, so a file written before a setting was added
  * still loads. A malformed file, or one with a key that is not a setting or a value a setting
  * cannot take, aborts startup.
+ *
+ * <p>{@code nodes} lists the compute fleet. With none, nothing is offloaded. {@code nodeCapacity}
+ * is the requests a node serves per tick, as admission assumes.
  */
-public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint) {
+public record MaestroConfig(
+    Mode mode,
+    SubMode subMode,
+    Offload offload,
+    List<NodeAddress> nodes,
+    int nodeCapacity,
+    String otlpEndpoint) {
 
   /** How compute nodes hold world state. */
   public enum Mode {
@@ -41,21 +52,60 @@ public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint) {
     STREAM
   }
 
+  /** What an offloaded search returns. */
+  public enum Offload {
+    /** Vanilla's path. The fleet's answer is only compared with it. */
+    @SerializedName("shadow")
+    SHADOW,
+    /** The fleet's answer. */
+    @SerializedName("on")
+    ON
+  }
+
+  /**
+   * Where one compute node listens. A port left out, or 0, is the node's default for that stream.
+   */
+  public record NodeAddress(String host, int worldPort, int controlPort, int requestPort) {
+
+    public static final int DEFAULT_WORLD_PORT = 25700;
+    public static final int DEFAULT_CONTROL_PORT = 25701;
+    public static final int DEFAULT_REQUEST_PORT = 25702;
+
+    public NodeAddress {
+      require(host != null && !host.isBlank(), "a node's `host` must not be empty");
+      worldPort = port(worldPort, DEFAULT_WORLD_PORT, "worldPort");
+      controlPort = port(controlPort, DEFAULT_CONTROL_PORT, "controlPort");
+      requestPort = port(requestPort, DEFAULT_REQUEST_PORT, "requestPort");
+    }
+
+    private static int port(int value, int fallback, String name) {
+      require(value >= 0 && value <= 0xFFFF, "a node's `" + name + "` must be a port: " + value);
+      return value == 0 ? fallback : value;
+    }
+  }
+
   public static final String FILE_NAME = "maestro.json";
 
   public static final MaestroConfig DEFAULT =
-      new MaestroConfig(Mode.STATEFUL, SubMode.BATCH, "http://localhost:4317");
+      new MaestroConfig(
+          Mode.STATEFUL, SubMode.BATCH, Offload.ON, List.of(), 100, "http://localhost:4317");
 
   private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
-  private static final Set<String> SETTINGS =
-      Arrays.stream(MaestroConfig.class.getRecordComponents())
-          .map(RecordComponent::getName)
-          .collect(Collectors.toUnmodifiableSet());
+  private static final Set<String> SETTINGS = componentNames(MaestroConfig.class);
+
+  private static final Set<String> NODE_SETTINGS = componentNames(NodeAddress.class);
 
   public MaestroConfig {
     require(mode != null, "`mode` must be \"stateful\" or \"stateless\"");
     require(subMode != null, "`subMode` must be \"batch\" or \"stream\"");
+    require(offload != null, "`offload` must be \"shadow\" or \"on\"");
+    require(nodes != null, "`nodes` must be a list");
+    for (NodeAddress node : nodes) {
+      require(node != null, "`nodes` must not hold null");
+    }
+    nodes = List.copyOf(nodes);
+    require(nodeCapacity >= 1, "`nodeCapacity` must be at least 1");
     require(otlpEndpoint != null && !otlpEndpoint.isBlank(), "`otlpEndpoint` must not be empty");
   }
 
@@ -76,6 +126,15 @@ public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint) {
         require(SETTINGS.contains(setting.getKey()), "`" + setting.getKey() + "` is not a setting");
         settings.add(setting.getKey(), setting.getValue());
       }
+      if (settings.get("nodes") instanceof JsonArray nodes) {
+        for (JsonElement node : nodes) {
+          if (node instanceof JsonObject object) {
+            for (String key : object.keySet()) {
+              require(NODE_SETTINGS.contains(key), "`" + key + "` is not a node setting");
+            }
+          }
+        }
+      }
       return GSON.fromJson(settings, MaestroConfig.class);
     } catch (IOException e) {
       throw new IllegalStateException("Could not read Maestro config at " + path, e);
@@ -85,6 +144,12 @@ public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint) {
       throw new IllegalStateException(
           "Invalid Maestro config at " + path + ": " + rootCause(e).getMessage(), e);
     }
+  }
+
+  private static Set<String> componentNames(Class<? extends Record> type) {
+    return Arrays.stream(type.getRecordComponents())
+        .map(RecordComponent::getName)
+        .collect(Collectors.toUnmodifiableSet());
   }
 
   private static Throwable rootCause(Throwable thrown) {

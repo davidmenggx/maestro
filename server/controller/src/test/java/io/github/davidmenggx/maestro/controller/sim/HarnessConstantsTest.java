@@ -3,6 +3,7 @@ package io.github.davidmenggx.maestro.controller.sim;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.core.RequestTracker;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import org.junit.jupiter.api.Test;
 

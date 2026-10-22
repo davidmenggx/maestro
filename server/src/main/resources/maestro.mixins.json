@@ -5,8 +5,12 @@
   "compatibilityLevel": "JAVA_25",
   "server": [
     "EnderEyeItemMixin",
+    "LevelChunkMixin",
+    "MeleeAttackGoalMixin",
     "MinecraftServerMixin",
     "PathFinderMixin",
+    "PathMixin",
+    "PathNavigationMixin",
     "PortalShapeMixin"
   ],
   "injectors": {

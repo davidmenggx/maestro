@@ -55,12 +55,21 @@ jobs:
         env:
           STARTUP_TIMEOUT: "600"
 
-      - name: Upload boot log
+      # The node built by the unit tests serves a real server, first in shadow mode,
+      # whose answers must match vanilla's, then with its answers moving the mobs.
+      - name: End to end
+        run: make test-e2e MAESTRO_WITH_OTEL=OFF
+        env:
+          STARTUP_TIMEOUT: "600"
+
+      - name: Upload boot and end-to-end logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: boot-smoke-test-log
-          path: server/build/boot-smoke-test.log
+          name: server-logs
+          path: |
+            server/build/boot-smoke-test.log
+            server/build/e2e-*.log
           if-no-files-found: ignore
 
   sanitize:

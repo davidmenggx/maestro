@@ -34,7 +34,12 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     MOBS(0, 48),
     MOB_CLASSES(1, 4),
     BLOCK_CHANGES_PER_TICK(0, 6),
-    PLAYERS(0, 3);
+    PLAYERS(0, 3),
+    /**
+     * How much of a tick the server works before it ends the tick, as a percentage. It idles for
+     * the rest, so offload work finished then reaches the controller when the next tick starts.
+     */
+    SERVER_BUSY_PERCENT(20, 100);
 
     private final int floor;
     private final int ceiling;
@@ -107,7 +112,8 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
               Count.MOBS, 12,
               Count.MOB_CLASSES, 2,
               Count.BLOCK_CHANGES_PER_TICK, 3,
-              Count.PLAYERS, 1),
+              Count.PLAYERS, 1,
+              Count.SERVER_BUSY_PERCENT, 50),
           Map.of(
               // A mob repaths about every 15 ticks, roughly as in vanilla.
               Chance.REQUEST, 0.07,
@@ -182,6 +188,12 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
       highest = Math.max(highest, serviceOf(i).maxCostSteps());
     }
     return highest;
+  }
+
+  /** Steps of each tick the server works, from {@link Count#SERVER_BUSY_PERCENT}. */
+  public int serverBusySteps() {
+    int steps = Simulation.STEPS_PER_TICK * counts.get(Count.SERVER_BUSY_PERCENT) / 100;
+    return Math.max(1, Math.min(Simulation.MAX_BUSY_STEPS, steps));
   }
 
   /** The capacity the controller assumes every node has, which differs from the truth. */

@@ -32,7 +32,8 @@ public abstract class PathFinderMixin {
 
   /**
    * Wraps the search itself, which runs after the evaluator's {@code prepare} has resolved the
-   * start node and before its {@code done}, so the mob's profile is read as the search sees it.
+   * start node and before its {@code done}, so the mob's profile is read as the search sees it. A
+   * call the interceptor takes is answered by it, which runs vanilla's search only if it chooses.
    */
   @WrapOperation(
       method =
@@ -51,11 +52,12 @@ public abstract class PathFinderMixin {
       float maxVisitedNodesMultiplier,
       Operation<Path> search,
       @Local(argsOnly = true) Mob mob) {
-    Path vanilla =
-        search.call(finder, from, targets, maxPathLength, reachRange, maxVisitedNodesMultiplier);
-    Searches.Observer observer = Searches.observer();
-    if (observer == null || !Searches.intercepted(finder, nodeEvaluator, targets.size())) {
-      return vanilla;
+    Searches.Interceptor interceptor = Searches.interceptor();
+    if (interceptor == null
+        || !Searches.intercepted(finder, nodeEvaluator, targets.size())
+        || !interceptor.wants(mob)) {
+      return search.call(
+          finder, from, targets, maxPathLength, reachRange, maxVisitedNodesMultiplier);
     }
     // The budget as vanilla computes it, float multiply included.
     int budget = (int) (maxVisitedNodes * maxVisitedNodesMultiplier);
@@ -69,11 +71,17 @@ public abstract class PathFinderMixin {
             maxPathLength,
             reachRange,
             budget,
-            observer.profiles(),
+            interceptor.profiles(),
             MALUS);
-    if (call != null) {
-      observer.searched(call, vanilla);
+    if (call == null) {
+      return search.call(
+          finder, from, targets, maxPathLength, reachRange, maxVisitedNodesMultiplier);
     }
-    return vanilla;
+    return interceptor.search(
+        mob,
+        call,
+        () ->
+            search.call(
+                finder, from, targets, maxPathLength, reachRange, maxVisitedNodesMultiplier));
   }
 }

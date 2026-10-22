@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
+import io.github.davidmenggx.maestro.controller.env.Offload;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.env.Transport;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
@@ -542,31 +543,29 @@ class HarnessGuardsTest {
     world.loadChunk(0, 0, 0);
     int size = Topology.REGION_SIZE;
 
-    first.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 4, false, world)));
-    first.receive(
-        Channel.WORLD,
-        ByteBuffer.wrap(Frames.chunkSnapshot(5, 0, 0, Frames.readChunk(world, 0, 0))));
+    sendWorld(sim, first, Frames.assignment(RUN, 0, size, 4, false, world));
+    sendWorld(sim, first, Frames.chunkSnapshot(5, 0, 0, Frames.readChunk(world, 0, 0)));
     assertEquals(List.of(), sim.streamViolations());
 
     // A node takes a fresh assignment wherever it starts if it held nothing of the stream, so
-    // the harness checks that no holder's starts behind what another holder applied.
-    second.receive(
-        Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 2, false, world)));
-    second.receive(
-        Channel.WORLD,
-        ByteBuffer.wrap(Frames.chunkSnapshot(3, 0, 0, Frames.readChunk(world, 0, 0))));
+    // the harness checks that none starts behind a frame already sent to another holder.
+    sendWorld(sim, second, Frames.assignment(RUN, 0, size, 2, false, world));
+    sendWorld(sim, second, Frames.chunkSnapshot(3, 0, 0, Frames.readChunk(world, 0, 0)));
     assertEquals(List.of(), first.violations());
     assertEquals(List.of(), second.violations());
     assertEquals(1, sim.streamViolations().size(), sim.streamViolations().toString());
 
     // Another controller run has a stream of its own.
     ModeledNode third = linked(sim, NodeId.of(2), RUN + 1);
-    third.receive(
-        Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN + 1, 0, size, 0, false, world)));
-    third.receive(
-        Channel.WORLD,
-        ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
+    sendWorld(sim, third, Frames.assignment(RUN + 1, 0, size, 0, false, world));
+    sendWorld(sim, third, Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0)));
     assertEquals(1, sim.streamViolations().size(), sim.streamViolations().toString());
+  }
+
+  /** A world frame the controller sends, delivered at once. */
+  private static void sendWorld(Simulation sim, ModeledNode node, byte[] frame) {
+    sim.worldFrameSent(node.id(), frame);
+    node.receive(Channel.WORLD, ByteBuffer.wrap(frame));
   }
 
   @Test
@@ -745,10 +744,12 @@ class HarnessGuardsTest {
         IntStream.range(0, Topology.DEFAULT.nodeCount()).mapToObj(NodeId::of).toList();
     RegionMap regions = Topology.DEFAULT.regions(fleet);
     assertEquals(fleet, regions.nodes().stream().sorted((a, b) -> a.id() - b.id()).toList());
-    // The grid covers the origin from both sides, and its first region has two holders.
+    // The grid covers the origin from both sides. Its first region is centered on the origin
+    // and has two holders.
     assertEquals(4, regions.regions().size());
     assertEquals(2, regions.holders(regions.regionAt(-1, -1).id()).size());
-    assertEquals(1, regions.holders(regions.regionAt(0, 0).id()).size());
+    assertEquals(2, regions.holders(regions.regionAt(0, 0).id()).size());
+    assertEquals(1, regions.holders(regions.regionAt(200, 200).id()).size());
   }
 
   @Test
@@ -905,7 +906,9 @@ class HarnessGuardsTest {
     transport.connect(id);
     sim.run(event -> {}, (tick, input) -> {}, 1);
     assertEquals(1, listener.connected);
-    // The listener opened the link with a `Join` on each connection, and the node said hello.
+    // The listener opened the link with a `Join` on each connection, and the node said hello,
+    // which the controller hears at the next hand-over.
+    sim.run(event -> {}, (tick, input) -> {}, 1);
     assertEquals(0, sim.metrics().total("transport.refused"));
     assertTrue(listener.frames >= 1, "no hello");
 
@@ -917,6 +920,66 @@ class HarnessGuardsTest {
     assertEquals(2, listener.connected);
     assertEquals(0, node.knownClassCount());
     assertEquals(0, sim.metrics().total("transport.refused"));
+  }
+
+  /**
+   * The controller runs on the server thread, so it hears the network and finished offload work
+   * only where the server hands over: as a tick starts, and as its work ends.
+   */
+  @Test
+  void theControllerHearsAnythingOnlyWhenTheServerHandsOver() {
+    int busySteps = 300;
+    Simulation sim = new Simulation(1L, FaultPlan.reliable());
+    sim.serverBusySteps(busySteps);
+    NodeId id = NodeId.of(0);
+    sim.addNode(id, ModeledNode.Service.MANUAL);
+    Transport transport = sim.env().transport();
+    CountingListener counting = new CountingListener(transport, sim.env().run());
+    List<Long> heardAt = new ArrayList<>();
+    transport.listen(
+        new Transport.Listener() {
+          @Override
+          public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
+            heardAt.add(sim.now());
+            counting.onFrame(node, channel, frame);
+          }
+
+          @Override
+          public void onConnected(NodeId node) {
+            heardAt.add(sim.now());
+            counting.onConnected(node);
+          }
+
+          @Override
+          public void onDisconnected(NodeId node) {
+            heardAt.add(sim.now());
+            counting.onDisconnected(node);
+          }
+        });
+    transport.connect(id);
+    sim.run(
+        event -> {
+          if (event instanceof WorldEvent.TickBegan) {
+            sim.env()
+                .offload()
+                .submit(
+                    "probe",
+                    Offload.Lane.WORLD,
+                    () -> 0,
+                    done -> heardAt.add(sim.now()),
+                    () -> heardAt.add(sim.now()));
+          }
+        },
+        (tick, input) -> {},
+        4);
+
+    assertEquals(1, counting.connected);
+    assertTrue(counting.frames >= 1, "no hello");
+    assertTrue(heardAt.size() > 4, heardAt.toString());
+    for (long step : heardAt) {
+      long within = step % Simulation.STEPS_PER_TICK;
+      assertTrue(within == 0 || within == busySteps, "heard at step " + within + " of its tick");
+    }
   }
 
   @Test

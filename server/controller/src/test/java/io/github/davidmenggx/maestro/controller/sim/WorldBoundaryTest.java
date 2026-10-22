@@ -5,9 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.flatbuffers.FlatBufferBuilder;
+import io.github.davidmenggx.maestro.controller.core.RequestTracker;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.region.Region;
+import io.github.davidmenggx.maestro.controller.region.RegionLayout;
 import io.github.davidmenggx.maestro.controller.wire.Frames;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.Pos;
@@ -35,10 +37,13 @@ class WorldBoundaryTest {
   private static final int WARMUP_MOB = 2;
   private static final short OTHER_CLASS = 2;
 
-  /** In the region of the default grid on the positive side of the origin. */
-  private static final Pos HERE = new Pos(4, 40, 4);
+  /** Corner of the region of the default grid on the positive side of the origin's. */
+  private static final int HERE_REGION_MIN = RegionLayout.cellMin(1);
 
-  /** In another region, across the origin, which has two holders. */
+  /** In the middle of that region, so a search from it reads nothing past it. */
+  private static final Pos HERE = new Pos(HERE_REGION_MIN + 132, 40, HERE_REGION_MIN + 132);
+
+  /** In the origin's region, which has two holders. */
   private static final Pos THERE = new Pos(-20, 40, -20);
 
   private static final WorldEvent.Search SEARCH = new WorldEvent.Search(0, 16f, 256, 3);
@@ -112,7 +117,7 @@ class WorldBoundaryTest {
     // The change happens while the region is unreadable, so it must not be sent as
     // a delta. The snapshot that follows already contains it.
     List<WorldEvent> script = new ArrayList<>();
-    script.add(new WorldEvent.BlockChanged(2, new Pos(4, 40, 4), (byte) PathType.WATER, 0));
+    script.add(new WorldEvent.BlockChanged(2, HERE, (byte) PathType.WATER, 0));
     script.addAll(chunkLoads(5));
 
     SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
@@ -220,6 +225,34 @@ class WorldBoundaryTest {
     assertEquals(1, run.out.dropped(DropReason.CLASS_UNREGISTERED), run.describe());
   }
 
+  /**
+   * A node reads past its area as air, so a search that could read past the region would see a
+   * cliff where there is ground. It stays on the server.
+   */
+  @Test
+  void aSearchThatCouldReadPastItsRegionIsNotSent() {
+    int reachInside = HERE.x() - HERE_REGION_MIN;
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(
+        new WorldEvent.PathRequested(
+            3,
+            MOB,
+            MOB_CLASS,
+            HERE,
+            THERE,
+            new WorldEvent.Search(0, reachInside, 16 * reachInside, 3)));
+    script.add(new WorldEvent.PathRequested(4, MOB, MOB_CLASS, HERE, THERE, SEARCH));
+
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.NO_NODE), run.describe());
+    assertEquals(1, run.sim.metrics().counter("path.rejected", "reason", "reach"), run.describe());
+    // The same mob, asking for a shorter search, is served.
+    assertEquals(1, run.out.answered(), run.describe());
+  }
+
   /** Encoding such a target would fail on every retry, so the request is never sent. */
   @Test
   void aRequestTheWireCannotCarryIsDroppedBeforeItIsEncoded() {
@@ -245,7 +278,8 @@ class WorldBoundaryTest {
     assertEquals(1, run.controller.outstandingCount(), run.describe());
     NodeId owner = holders(run, HERE).get(0);
 
-    run.controller.onFrame(owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, 200));
+    run.controller.onFrame(
+        owner, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST, 200));
     // A datagram that is not a frame at all, as from a sender that is not a node.
     run.controller.onFrame(owner, Channel.REQUEST, ByteBuffer.wrap(new byte[] {9, 0, 0, 0, 1}));
     assertEquals(1, run.controller.outstandingCount(), run.describe());
@@ -254,12 +288,12 @@ class WorldBoundaryTest {
     // A well-formed answer from a node the request did not go to.
     NodeId other = holders(run, THERE).get(0);
     run.controller.onFrame(
-        other, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, PathType.WALKABLE));
+        other, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE));
     assertEquals(1, run.controller.outstandingCount(), run.describe());
     assertEquals(1, run.sim.metrics().total("path.response.misrouted"), run.describe());
 
     run.controller.onFrame(
-        owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, PathType.WALKABLE));
+        owner, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE));
     assertEquals(0, run.controller.outstandingCount(), run.describe());
     assertEquals(1, run.out.answered(), run.describe());
   }
@@ -274,7 +308,7 @@ class WorldBoundaryTest {
     NodeId owner = holders(run, HERE).get(0);
 
     run.controller.onFrame(
-        owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, PathType.WALKABLE, 0));
+        owner, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE, 0));
 
     assertEquals(0, run.controller.outstandingCount(), run.describe());
     assertEquals(0, run.out.answered(), run.describe());
@@ -291,18 +325,23 @@ class WorldBoundaryTest {
     script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
     script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH));
     script.add(new WorldEvent.PathRequested(3, MOB, MOB_CLASS, HERE, HERE, SEARCH));
-    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 4, script).go();
+    // A search takes the node a whole tick, so the run ends before the first answer arrives.
+    Scenario slow =
+        Scenario.DEFAULT
+            .with(Scenario.Count.WORKER_CAPACITY, 1)
+            .with(Scenario.Count.COST_SPREAD_PERCENT, 0);
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 4, slow, script).go();
     NodeId owner = holders(run, HERE).get(0);
     assertEquals(1, run.out.dropped(DropReason.SUPERSEDED), run.describe());
     assertEquals(2, run.controller.outstandingCount(), run.describe());
 
     run.controller.onFrame(
-        owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST, PathType.WALKABLE));
+        owner, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE));
     assertEquals(1, run.controller.outstandingCount(), run.describe());
     assertEquals(0, run.out.answered(), run.describe());
 
     run.controller.onFrame(
-        owner, Channel.REQUEST, answer(run.controller.run, FIRST_REQUEST + 1, PathType.WALKABLE));
+        owner, Channel.REQUEST, answer(run.controller.run(), FIRST_REQUEST + 1, PathType.WALKABLE));
     assertEquals(0, run.controller.outstandingCount(), run.describe());
     assertEquals(1, run.out.answered(), run.describe());
     assertEquals(List.of(), run.controller.selfCheck(), run.describe());
@@ -496,8 +535,8 @@ class WorldBoundaryTest {
   private static List<WorldEvent> prelude() {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
     script.add(new WorldEvent.MobSpawned(0, WARMUP_MOB, HERE));
-    script.add(new WorldEvent.PathRequested(1, WARMUP_MOB, MOB_CLASS, HERE, THERE, SEARCH));
-    script.add(new WorldEvent.MobRemoved(1, WARMUP_MOB));
+    script.add(new WorldEvent.PathRequested(2, WARMUP_MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    script.add(new WorldEvent.MobRemoved(2, WARMUP_MOB));
     return script;
   }
 
@@ -513,7 +552,13 @@ class WorldBoundaryTest {
   private static ByteBuffer answer(long run, long requestId, int type, long worldSequence) {
     FlatBufferBuilder builder = new FlatBufferBuilder(128);
     PathResponse.startNodesVector(builder, 1);
-    PathNode.createPathNode(builder, (short) HERE.x(), (short) HERE.y(), (short) HERE.z(), type);
+    // Positions on the wire are relative to the region.
+    PathNode.createPathNode(
+        builder,
+        (short) (HERE.x() - HERE_REGION_MIN),
+        (short) HERE.y(),
+        (short) (HERE.z() - HERE_REGION_MIN),
+        type);
     int nodes = builder.endVector();
     int body =
         PathResponse.createPathResponse(builder, requestId, true, nodes, 1.0f, worldSequence);

@@ -42,7 +42,7 @@ MAESTRO_SANITIZE ?=
 
 .PHONY: all help flatc schema schema-cpp schema-java \
         node node-configure node-test \
-        server server-test fuzz test test-boot capture conformance run-node run-server \
+        server server-test fuzz test test-boot test-e2e capture conformance run-node run-server \
         clean distclean
 
 all: node server ## Build the C++ node and the Java mod
@@ -97,7 +97,7 @@ server: schema-java ## Build the Fabric server mod jar
 	cd server && $(GRADLE) build
 
 server-test: schema-java ## Run the Java unit tests (mod and controller), fuzz excluded
-	cd server && $(GRADLE) test :controller:test
+	cd server && $(GRADLE) test mixinTest :controller:test
 
 fuzz: schema-java ## Run the DST seed sweeps (TIER=shallow|deep|coverage SEED=n RUNS=n)
 	cd server && $(GRADLE) :controller:$(if $(TIER),fuzz-$(TIER),fuzz) \
@@ -109,6 +109,9 @@ run-server: schema-java ## Boot a dev server (WORLD=<name> loads worlds/<name>)
 
 test-boot: schema-java ## Boot the released mod and assert the mixins applied
 	tools/boot-smoke-test.sh
+
+test-e2e: node schema-java ## Run the released mod against a real node (OFFLOAD=shadow|on, both by default)
+	$(foreach mode,$(if $(OFFLOAD),$(OFFLOAD),shadow on),OFFLOAD=$(mode) tools/e2e-test.sh &&) true
 
 capture: schema-java ## Record parity fixtures into fixtures/parity (SEED="1 2" N=cases)
 	tools/capture-fixtures.sh "$(if $(SEED),$(SEED),$(error set SEED, e.g. SEED="1 2 3"))" \

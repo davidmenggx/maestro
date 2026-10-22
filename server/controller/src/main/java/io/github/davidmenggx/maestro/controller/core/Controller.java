@@ -1,4 +1,4 @@
-package io.github.davidmenggx.maestro.controller.sim;
+package io.github.davidmenggx.maestro.controller.core;
 
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
@@ -30,8 +30,7 @@ public final class Controller implements WorldInput, Transport.Listener {
   private final WorldStreams streams;
   private final RequestTracker requests;
 
-  /** Identifies this controller process to the fleet. */
-  final long run;
+  private final long run;
 
   public Controller(
       ControllerEnv env, WorldSource world, WorldOutput out, RegionMap regions, int nodeCapacity) {
@@ -49,23 +48,13 @@ public final class Controller implements WorldInput, Transport.Listener {
     env.transport().listen(this);
   }
 
-  /** The classes the controller is made of, for checks that read compiled code. */
-  public static final class Parts {
+  // Accessors for harness assertions and production checks. Everything below this point is
+  // behavior.
 
-    private Parts() {}
-
-    public static List<Class<?>> all() {
-      return List.of(
-          Controller.class,
-          NodeLinks.class,
-          WorldStreams.class,
-          RequestTracker.class,
-          Encoder.class,
-          Violations.class);
-    }
+  /** Identifies this controller process to the fleet. */
+  public long run() {
+    return run;
   }
-
-  // Accessors for harness assertions. Everything below this point is behavior.
 
   public int requestsIssued() {
     return requests.requestsIssued();

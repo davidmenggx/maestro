@@ -5,8 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.world.ProfileTable;
+import java.util.function.Supplier;
 import net.minecraft.SharedConstants;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.level.pathfinder.PathFinder;
 import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
@@ -29,18 +31,29 @@ class SearchesTest {
   }
 
   @Test
-  void anObserverReplacedForAWhileIsRestored() {
-    Searches.Observer outer = observer();
-    Searches.Observer inner = observer();
-    Searches.Observer before = Searches.observe(outer);
+  void anInterceptorReplacedForAWhileIsRestored() {
+    Searches.Interceptor outer = interceptor();
+    Searches.Interceptor inner = interceptor();
+    Searches.Interceptor before = Searches.intercept(outer);
     try {
-      Searches.Observer replaced = Searches.observe(inner);
+      Searches.Interceptor replaced = Searches.intercept(inner);
       assertSame(outer, replaced);
-      assertSame(inner, Searches.observe(replaced));
-      assertSame(outer, Searches.observer());
+      assertSame(inner, Searches.intercept(replaced));
+      assertSame(outer, Searches.interceptor());
     } finally {
-      Searches.observe(before);
+      Searches.intercept(before);
     }
+  }
+
+  @Test
+  void onlyCallsInsideACallerThatFollowsItsPathMayBeOffloaded() {
+    assertFalse(Searches.offloadable());
+    Searches.enter();
+    Searches.enter();
+    Searches.leave();
+    assertTrue(Searches.offloadable(), "a nested call left the outer one");
+    Searches.leave();
+    assertFalse(Searches.offloadable());
   }
 
   @Test
@@ -53,16 +66,23 @@ class SearchesTest {
     assertFalse(Searches.intercepted(new PathFinder(ownEvaluator, 1), ownEvaluator, 1));
   }
 
-  private static Searches.Observer observer() {
+  private static Searches.Interceptor interceptor() {
     ProfileTable profiles = new ProfileTable();
-    return new Searches.Observer() {
+    return new Searches.Interceptor() {
       @Override
       public ProfileTable profiles() {
         return profiles;
       }
 
       @Override
-      public void searched(SearchCall call, Path vanilla) {}
+      public boolean wants(Mob mob) {
+        return true;
+      }
+
+      @Override
+      public Path search(Mob mob, SearchCall call, Supplier<Path> vanilla) {
+        return vanilla.get();
+      }
     };
   }
 }

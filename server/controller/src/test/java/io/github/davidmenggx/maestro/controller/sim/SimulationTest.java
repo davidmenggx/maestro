@@ -4,12 +4,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.core.WorldStreams;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
@@ -43,6 +48,16 @@ class SimulationTest {
   /** Long enough for several requests to name a profile that is still held behind the stall. */
   private static final long STALL_TICKS = 15;
 
+  /**
+   * Four workers serve each tick's few requests at once. The server works the whole tick, so a
+   * batch leaves only when the next tick's work ends, a tick before its answers are due.
+   */
+  private static final Scenario EDGE_SCENARIO =
+      Scenario.DEFAULT.with(Count.WORKERS, 4).with(Count.SERVER_BUSY_PERCENT, 100);
+
+  /** Holds the origin's region, where the spawn chunks keep the world loaded. */
+  private static final NodeId SPAWN_HOLDER = NodeId.of(0);
+
   /** Block changes per tick, enough that most regions see one on most ticks. */
   private static final int CHANGES_PER_TICK = 2 * Topology.DEFAULT.nodeCount();
 
@@ -70,9 +85,22 @@ class SimulationTest {
         run.sim.metrics().counter("offload.submitted", "job", "delta")
             > run.regions.regions().size(),
         run.describe());
+    // A region where no chunk was ever loaded has nothing to stream.
+    Set<Integer> loaded = new TreeSet<>();
+    for (int i = 0; i < run.world.loadedCount(); i++) {
+      long chunk = run.world.loadedChunk(i);
+      Region region =
+          run.regions.regionAt((int) (chunk >> 32) * Chunks.SIZE, (int) chunk * Chunks.SIZE);
+      if (region != null) {
+        loaded.add(region.id());
+      }
+    }
+    assertFalse(loaded.isEmpty(), run.describe());
     for (ModeledNode node : run.sim.nodes()) {
-      assertTrue(node.hasState(), run.describe());
-      assertTrue(node.lastSequence() > 1, run.describe());
+      if (loaded.contains(run.regions.regionOf(node.id()))) {
+        assertTrue(node.hasState(), run.describe());
+        assertTrue(node.lastSequence() > 1, run.describe());
+      }
     }
   }
 
@@ -90,12 +118,11 @@ class SimulationTest {
 
   /**
    * Each way takes the most at which one request at the highest cost is still answered in time, so
-   * a round trip and a search take nearly a tick and the SLO leaves the controller no slack. Four
-   * workers serve each tick's few requests at once.
+   * a round trip and a search take nearly a tick and the SLO leaves the controller no slack.
    */
   @Test
   void aCleanRunAtTheLatencyEdgeStillMeetsTheSlo() {
-    Scenario wide = Scenario.DEFAULT.with(Count.WORKERS, 4);
+    Scenario wide = EDGE_SCENARIO;
     int edgeLatency = FaultPlan.edgeLatency(wide.maxCostSteps(Topology.DEFAULT.nodeCount()));
     FaultPlan edge = new FaultPlan(edgeLatency - 10, edgeLatency, 0.0, 0.0, 0.0, List.of());
     SimRun run = SimRun.of(3L, edge, TICKS, wide).go();
@@ -115,7 +142,7 @@ class SimulationTest {
    */
   @Test
   void aLatencyPastTheEdgeMakesEvenACorrectControllerLate() {
-    Scenario wide = Scenario.DEFAULT.with(Count.WORKERS, 4);
+    Scenario wide = EDGE_SCENARIO;
     int late = FaultPlan.edgeLatency(wide.serviceOf(0).minCostSteps()) + 1;
     SimRun run =
         SimRun.of(3L, new FaultPlan(late, late, 0.0, 0.0, 0.0, List.of()), TICKS, wide).go();
@@ -201,9 +228,10 @@ class SimulationTest {
     // gap and every node ends with the same state as a fresh snapshot.
     assertEquals(List.of(), run.violations(), run.describe());
     assertTrue(run.sim.metrics().total("offload.failed") > 0, run.describe());
+    // Each failure is retried, unless it was the last attempt.
     assertEquals(
         run.sim.metrics().total("offload.failed"),
-        run.sim.metrics().total("offload.retried"),
+        run.sim.metrics().total("offload.retried") + run.sim.metrics().total("offload.abandoned"),
         run.describe());
     assertTrue(run.sim.metrics().counter("offload.retried", "job", "chunk") > 0, run.describe());
     assertTrue(run.sim.metrics().counter("offload.retried", "job", "delta") > 0, run.describe());
@@ -292,7 +320,7 @@ class SimulationTest {
 
   @Test
   void aLinkResetReplaysTheWorldStreamInsteadOfResnapshotting() {
-    NodeId victim = NodeId.of(2);
+    NodeId victim = SPAWN_HOLDER;
     FaultPlan plan = FaultPlan.reliable().with(new FaultPlan.LinkReset(60, victim));
 
     SimRun run = SimRun.of(23L, plan, TICKS).go();
@@ -311,7 +339,7 @@ class SimulationTest {
 
   @Test
   void aNodeThatFallsPastTheRetentionWindowIsResnapshotted() {
-    NodeId victim = NodeId.of(2);
+    NodeId victim = SPAWN_HOLDER;
     FaultPlan plan =
         FaultPlan.reliable()
             .with(
@@ -362,7 +390,7 @@ class SimulationTest {
 
   @Test
   void aPartitionedNodeIsSilentAndItsRequestsTimeOut() {
-    NodeId victim = NodeId.of(1);
+    NodeId victim = SPAWN_HOLDER;
     FaultPlan plan =
         FaultPlan.reliable()
             .with(
@@ -383,7 +411,7 @@ class SimulationTest {
 
   @Test
   void aPausedNodeKeepsItsLinkWhileItsRequestsTimeOut() {
-    NodeId victim = NodeId.of(1);
+    NodeId victim = SPAWN_HOLDER;
     FaultPlan plan =
         FaultPlan.reliable()
             .with(new FaultPlan.Paused(40, victim, true), new FaultPlan.Paused(70, victim, false));

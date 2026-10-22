@@ -1,4 +1,4 @@
-package io.github.davidmenggx.maestro.controller.sim;
+package io.github.davidmenggx.maestro.controller.core;
 
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
@@ -30,19 +30,19 @@ import java.util.function.Supplier;
  * finished frames wait in the log until the gap before them is filled. A world frame whose encode
  * keeps failing starts its region's log over.
  */
-final class WorldStreams {
+public final class WorldStreams {
 
   /**
    * Sent frames kept per region, so a reconnecting holder can be replayed forward instead of sent a
    * new snapshot. A holder that fell further behind gets a new snapshot.
    */
-  static final int RETENTION_FRAMES = 48;
+  public static final int RETENTION_FRAMES = 48;
 
   /**
    * Chunks read per tick, across all regions. A read runs on the main thread, so a region sent
    * again in full is spread over several ticks, and its chunks become usable as they arrive.
    */
-  static final int MAX_CHUNK_READS_PER_TICK = 16;
+  public static final int MAX_CHUNK_READS_PER_TICK = 16;
 
   /** {@link Holder#nextToSend} before the holder's first {@code Hello}: nothing is sent. */
   private static final long NOT_STARTED = Long.MAX_VALUE;

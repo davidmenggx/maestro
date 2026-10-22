@@ -1,9 +1,12 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
+import io.github.davidmenggx.maestro.controller.core.WorldStreams;
 import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionMap;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
+import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
+import io.github.davidmenggx.maestro.controller.world.SearchReach;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput;
 import java.util.ArrayDeque;
@@ -27,10 +30,11 @@ import java.util.TreeMap;
  * <p>A request open when its controller process restarts has no outcome, because nothing is left to
  * report one. It is closed as lost with the process.
  *
- * <p>A request is servable when it starts in a region, in a chunk loaded long enough for any
- * backlog of chunk reads to have reached it. Dropping a servable request for want of a node counts
- * against the SLO, so a run cannot meet it by turning work away, unless the chunk left meanwhile,
- * since an answer then cannot show it was searched while the chunk was there.
+ * <p>A request is servable when it starts in a region, far enough inside it that the search cannot
+ * read past it, in a chunk loaded long enough for any backlog of chunk reads to have reached it.
+ * Dropping a servable request for want of a node counts against the SLO, so a run cannot meet it by
+ * turning work away, unless the chunk left meanwhile, since an answer then cannot show it was
+ * searched while the chunk was there.
  */
 public final class RecordingOutput implements WorldOutput {
 
@@ -84,7 +88,17 @@ public final class RecordingOutput implements WorldOutput {
   private boolean servable(WorldEvent.PathRequested request) {
     Pos start = request.start();
     Region region = regions.regionAt(start.x(), start.z());
-    if (region == null || !world.contains(start.x(), start.z())) {
+    MobClass profile = world.mobClass(request.classId());
+    if (region == null
+        || profile == null
+        || !world.contains(start.x(), start.z())
+        || !SearchReach.fits(
+            region.minX(),
+            region.minZ(),
+            region.size(),
+            start,
+            request.search().maxPathLength(),
+            profile.shape().width())) {
       return false;
     }
     long since = world.loadedSince(Chunks.of(start.x()), Chunks.of(start.z()));

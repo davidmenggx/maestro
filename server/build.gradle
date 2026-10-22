@@ -27,6 +27,13 @@ sourceSets {
     compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
     runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
   }
+  // Tests of code that only works once the mod's mixins apply. They run under Fabric's
+  // loader, which also refuses to read block tags that no server bound, so the plain tests
+  // stay on a bare JVM.
+  mixinTest {
+    compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+    runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
+  }
 }
 
 loom {
@@ -94,6 +101,10 @@ dependencies {
 
   testImplementation "org.junit.jupiter:junit-jupiter:${junit_version}"
   testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+
+  mixinTestImplementation "org.junit.jupiter:junit-jupiter:${junit_version}"
+  mixinTestImplementation "net.fabricmc:fabric-loader-junit:${loader_version}"
+  mixinTestRuntimeOnly "org.junit.platform:junit-platform-launcher"
 }
 
 // Loom's `include` nests one artifact at a time and does not follow transitive
@@ -120,6 +131,18 @@ test {
   useJUnitPlatform()
 }
 
+tasks.register('mixinTest', Test) {
+  description = 'Runs the tests that need the mod\'s mixins applied.'
+  group = 'verification'
+  testClassesDirs = sourceSets.mixinTest.output.classesDirs
+  classpath = sourceSets.mixinTest.runtimeClasspath
+  useJUnitPlatform()
+  // The mod's mixins are for the dedicated server, so the loader runs the tests as one.
+  systemProperty 'fabric.side', 'server'
+}
+
+check.dependsOn tasks.named('mixinTest')
+
 // Both mods take their version from the project.
 tasks.withType(ProcessResources).configureEach {
   inputs.property "version", project.version
@@ -131,7 +154,8 @@ tasks.withType(ProcessResources).configureEach {
 // Loom's `server` run configuration already passes `--nogui`, but it manages
 // neither the EULA nor `server.properties`. A superflat, fixed-seed overworld
 // keeps every dev boot and benchmark run identical. `max-tick-time=-1` stops the
-// watchdog from killing a server paused in a debugger.
+// watchdog from killing a server paused in a debugger. A dev server runs mobs with
+// no player online, so it never pauses for being empty.
 def devRunDir = file("${projectDir}/run")
 def worldFixtureDir = file("${projectDir}/../worlds")
 def devServerProperties = [
@@ -140,6 +164,7 @@ def devServerProperties = [
   "online-mode": "false",
   "spawn-protection": "0",
   "max-tick-time": "-1",
+  "pause-when-empty-seconds": "0",
 ]
 
 tasks.matching { it.name in ["runServer", "runReleaseServer"] }.configureEach {

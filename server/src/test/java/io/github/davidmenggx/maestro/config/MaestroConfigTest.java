@@ -33,6 +33,12 @@ class MaestroConfigTest {
             {
               "mode": "stateless",
               "subMode": "stream",
+              "offload": "shadow",
+              "nodes": [
+                {"host": "10.0.0.5", "worldPort": 1, "controlPort": 2, "requestPort": 3},
+                {"host": "node-2"}
+              ],
+              "nodeCapacity": 40,
               "otlpEndpoint": "http://collector:4317"
             }
             """);
@@ -41,7 +47,24 @@ class MaestroConfigTest {
 
     assertEquals(MaestroConfig.Mode.STATELESS, config.mode());
     assertEquals(MaestroConfig.SubMode.STREAM, config.subMode());
+    assertEquals(MaestroConfig.Offload.SHADOW, config.offload());
+    assertEquals(
+        List.of(
+            new MaestroConfig.NodeAddress("10.0.0.5", 1, 2, 3),
+            // A port left out is the node's default.
+            new MaestroConfig.NodeAddress(
+                "node-2",
+                MaestroConfig.NodeAddress.DEFAULT_WORLD_PORT,
+                MaestroConfig.NodeAddress.DEFAULT_CONTROL_PORT,
+                MaestroConfig.NodeAddress.DEFAULT_REQUEST_PORT)),
+        config.nodes());
+    assertEquals(40, config.nodeCapacity());
     assertEquals("http://collector:4317", config.otlpEndpoint());
+  }
+
+  @Test
+  void theDefaultOffloadsNothing() {
+    assertEquals(List.of(), MaestroConfig.DEFAULT.nodes());
   }
 
   @Test
@@ -80,7 +103,24 @@ class MaestroConfigTest {
             """,
             "{\"mode\": ",
             "",
-            "[]");
+            "[]",
+            // An unknown offload, a node with no host or a port out of range, a capacity below
+            // one, and a list holding nothing.
+            """
+            {"offload": "maybe"}
+            """,
+            """
+            {"nodes": [{"worldPort": 1}]}
+            """,
+            """
+            {"nodes": [{"host": "a", "requestPort": 70000}]}
+            """,
+            """
+            {"nodeCapacity": 0}
+            """,
+            """
+            {"nodes": [null]}
+            """);
 
     for (String json : unusable) {
       Path path = write(dir, json);
@@ -106,6 +146,16 @@ class MaestroConfigTest {
     IllegalStateException thrown =
         assertThrows(IllegalStateException.class, () -> MaestroConfig.load(path));
     assertTrue(thrown.getMessage().contains("devMode"), thrown.getMessage());
+
+    // Inside a node too.
+    Path node =
+        write(
+            dir,
+            """
+            {"nodes": [{"host": "a", "worldport": 1}]}
+            """);
+    thrown = assertThrows(IllegalStateException.class, () -> MaestroConfig.load(node));
+    assertTrue(thrown.getMessage().contains("worldport"), thrown.getMessage());
   }
 
   private static Path write(Path dir, String json) throws IOException {
