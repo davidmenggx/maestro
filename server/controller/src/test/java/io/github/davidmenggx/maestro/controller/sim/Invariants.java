@@ -1,11 +1,11 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.region.Region;
+import io.github.davidmenggx.maestro.controller.region.RegionMap;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
-import maestro.fbs.PathType;
 
 /**
  * The properties a run must satisfy regardless of network behavior. Returns every violation, not
@@ -25,10 +25,19 @@ public final class Invariants {
       violations.addAll(node.violations());
     }
 
-    // A region's sequence never goes back, across replays and resnapshots alike.
+    // A region's sequence never goes back, across replays and resnapshots alike, a
+    // stream starts over only where it stands, and a node at a checkpoint holds what
+    // the world held then.
     violations.addAll(run.sim.streamViolations());
 
-    // The controller's own bookkeeping.
+    // The transport always opens a link with a valid `Join`.
+    long refused = run.sim.metrics().total("transport.refused");
+    if (refused > 0) {
+      violations.add(refused + " connections were refused by their node");
+    }
+
+    // The controller's own bookkeeping, of every process the run had.
+    violations.addAll(run.retiredViolations());
     violations.addAll(run.controller.selfCheck());
 
     // Every frame fits its channel: a request frame one datagram, a world frame what
@@ -88,6 +97,11 @@ public final class Invariants {
 
     // Every request is answered or explicitly dropped, exactly once.
     violations.addAll(run.out.ledgerViolations());
+
+    // An answer is accepted only if its node held the chunk the search starts in.
+    if (run.out.answeredOverAir() > 0) {
+      violations.add(run.out.answeredOverAir() + " answers searched over air were accepted");
+    }
     if (run.controller.outstandingCount() != 0) {
       violations.add(
           run.controller.outstandingCount() + " requests still outstanding at end of run");
@@ -102,8 +116,8 @@ public final class Invariants {
 
   /**
    * The latency SLO: p99 below {@link SimRun#TICK_BUDGET}. A miss is a request rejected for queue
-   * depth or never answered in time. It ranks later than any answer, so a run cannot meet the SLO
-   * by refusing work.
+   * depth, never answered in time, or servable and dropped for want of a node. It ranks later than
+   * any answer, so a run cannot meet the SLO by refusing work.
    */
   static List<String> checkSlo(List<Double> latencies, long misses) {
     double p99 = SimMetrics.percentileWithMisses(latencies, 0.99, misses);
@@ -124,7 +138,7 @@ public final class Invariants {
    * A node has caught up when it holds its region and has applied everything the controller
    * produced for it. A node that is behind, partitioned or dead cannot be compared.
    */
-  public static boolean caughtUp(ProbeController controller, ModeledNode node) {
+  public static boolean caughtUp(Controller controller, ModeledNode node) {
     return node.assigned() && node.lastSequence() == controller.heldSequence(node.id());
   }
 
@@ -134,8 +148,8 @@ public final class Invariants {
    * directly, not through the encoder, so an encoding bug cannot cancel out.
    */
   public static List<String> checkAgainstFreshSnapshot(SimRun run, ModeledNode node) {
-    int region = run.regions.indexOf(node.id());
-    if (region < 0) {
+    int region = run.regions.regionOf(node.id());
+    if (region == RegionMap.NONE) {
       return List.of(node.id() + " owns no region to compare");
     }
     if (!node.assigned()) {
@@ -155,32 +169,22 @@ public final class Invariants {
   }
 
   /**
-   * The state a node assigned {@code region} holds once it has every frame: each block of a chunk
+   * The state a node assigned {@code regionId} holds once it has every frame: each block of a chunk
    * the server holds, and air elsewhere, as vanilla reads a chunk it could not fetch.
    */
-  private static long freshDigest(SimRun run, int region) {
+  static long freshDigest(SimRun run, int regionId) {
     SimWorld world = run.world;
-    int size = run.regions.topology().regionSize();
-    int height = world.height();
-    byte[] cells = new byte[size * size * height];
-    byte[] floors = new byte[cells.length];
-    Arrays.fill(cells, (byte) PathType.OPEN);
-    int originX = run.regions.minX(region);
-    int originZ = run.regions.minZ(region);
-    for (int x = 0; x < size; x++) {
-      for (int z = 0; z < size; z++) {
-        int worldX = originX + x;
-        int worldZ = originZ + z;
-        if (!world.chunkLoaded(Chunks.of(worldX), Chunks.of(worldZ))) {
-          continue;
-        }
-        for (int dy = 0; dy < height; dy++) {
-          int index = (x * size + z) * height + dy;
-          cells[index] = world.pathTypeAt(worldX, world.minY() + dy, worldZ);
-          floors[index] = (byte) world.floorAt(worldX, world.minY() + dy, worldZ);
-        }
+    Region region = run.regions.region(regionId);
+    int perSide = region.size() / Chunks.SIZE;
+    ModeledNode.AreaDigest digest =
+        new ModeledNode.AreaDigest(regionId, region.size(), world.minY(), world.height());
+    for (int cx = 0; cx < perSide; cx++) {
+      for (int cz = 0; cz < perSide; cz++) {
+        int chunkX = Chunks.of(region.minX()) + cx;
+        int chunkZ = Chunks.of(region.minZ()) + cz;
+        digest.chunk(cx * perSide + cz, world.chunkHash(chunkX, chunkZ));
       }
     }
-    return ModeledNode.digest(region, size, world.minY(), height, cells, floors);
+    return digest.value();
   }
 }

@@ -2,6 +2,7 @@ package io.github.davidmenggx.maestro.mixin;
 
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 import net.minecraft.core.Registry;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
@@ -20,15 +21,19 @@ public abstract class MinecraftServerMixin {
   private static final Logger LOG = LoggerFactory.getLogger("maestro");
 
   /**
-   * `createLevels` builds the overworld directly, then iterates the `LEVEL_STEM` registry to create
-   * every other dimension. Emptying that iteration leaves only the overworld in `levels`.
+   * {@code createLevels} builds the overworld directly, then iterates the {@code LEVEL_STEM}
+   * registry to create every other dimension and to set up each level's world border, the
+   * overworld's included. Iterating the overworld's entry alone keeps its border setup and creates
+   * no other dimension.
    */
   @Redirect(
       method = "createLevels",
       at = @At(value = "INVOKE", target = "Lnet/minecraft/core/Registry;entrySet()Ljava/util/Set;"))
   private Set<Map.Entry<ResourceKey<LevelStem>, LevelStem>> maestro$overworldOnly(
       Registry<LevelStem> registry) {
-    return Set.of();
+    return registry.entrySet().stream()
+        .filter(entry -> entry.getKey().equals(LevelStem.OVERWORLD))
+        .collect(Collectors.toUnmodifiableSet());
   }
 
   @Inject(method = "loadLevel", at = @At("TAIL"))

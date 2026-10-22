@@ -42,8 +42,10 @@ public final class Searches {
     return observer;
   }
 
-  /** Replaces the observer. Null removes it. */
-  public static void observe(Observer next) {
+  /** Replaces the observer and returns the one it replaced, or null. Null removes it. */
+  public static Observer observe(Observer next) {
+    Observer previous = observer;
     observer = next;
+    return previous;
   }
 }

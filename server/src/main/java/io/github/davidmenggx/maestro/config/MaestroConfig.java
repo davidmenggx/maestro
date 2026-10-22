@@ -3,6 +3,7 @@ package io.github.davidmenggx.maestro.config;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.annotations.SerializedName;
 import java.io.IOException;
@@ -12,13 +13,15 @@ import java.lang.reflect.RecordComponent;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
  * Startup settings read from `<config dir>/maestro.json`. A missing file is created with the
- * defaults below. A malformed or incomplete file, or one with a key that is not a setting, aborts
- * startup.
+ * defaults below, and a missing key takes its default, so a file written before a setting was added
+ * still loads. A malformed file, or one with a key that is not a setting or a value a setting
+ * cannot take, aborts startup.
  */
 public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint) {
 
@@ -66,12 +69,14 @@ public record MaestroConfig(Mode mode, SubMode subMode, String otlpEndpoint) {
       JsonElement json = JsonParser.parseReader(reader);
       require(!json.isJsonNull(), "file is empty");
       require(json.isJsonObject(), "file is not a JSON object");
-      // Gson ignores a key it does not know, so a misspelled or retired setting would
-      // otherwise be dropped without a word.
-      for (String key : json.getAsJsonObject().keySet()) {
-        require(SETTINGS.contains(key), "`" + key + "` is not a setting");
+      JsonObject settings = GSON.toJsonTree(DEFAULT).getAsJsonObject();
+      for (Map.Entry<String, JsonElement> setting : json.getAsJsonObject().entrySet()) {
+        // Gson ignores a key it does not know, so a misspelled or retired setting would
+        // otherwise be dropped without a word.
+        require(SETTINGS.contains(setting.getKey()), "`" + setting.getKey() + "` is not a setting");
+        settings.add(setting.getKey(), setting.getValue());
       }
-      return GSON.fromJson(json, MaestroConfig.class);
+      return GSON.fromJson(settings, MaestroConfig.class);
     } catch (IOException e) {
       throw new IllegalStateException("Could not read Maestro config at " + path, e);
     } catch (RuntimeException e) {

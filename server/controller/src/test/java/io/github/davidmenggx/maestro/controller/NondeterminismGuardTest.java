@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.env.Clock;
-import io.github.davidmenggx.maestro.controller.sim.ProbeController;
+import io.github.davidmenggx.maestro.controller.sim.Controller.Parts;
 import java.io.IOException;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
@@ -100,8 +100,8 @@ class NondeterminismGuardTest {
           new Rule("java/util/stream/Collectors", "toUnmodifiableMap"),
           new Rule("java/util/stream/Collectors", "groupingBy"));
 
-  /** The simulated controller, which is to become the production one. */
-  private static final Class<?> SIMULATED_CONTROLLER = ProbeController.class;
+  /** The simulated controller and its parts, which are to become the production one. */
+  private static final List<Class<?>> SIMULATED_CONTROLLER = Parts.all();
 
   /** flatc output is not controller code, so the rule does not apply. */
   private static final String GENERATED = "maestro/fbs/";
@@ -133,7 +133,10 @@ class NondeterminismGuardTest {
   @Test
   void theSimulatedControllerTakesItsNondeterminismFromTheSeams()
       throws IOException, URISyntaxException {
-    List<String> findings = scanClassAndNested(SIMULATED_CONTROLLER);
+    List<String> findings = new ArrayList<>();
+    for (Class<?> part : SIMULATED_CONTROLLER) {
+      findings.addAll(scanClassAndNested(part));
+    }
     assertEquals(List.of(), findings);
   }
 

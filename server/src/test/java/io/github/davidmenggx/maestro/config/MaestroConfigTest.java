@@ -45,16 +45,35 @@ class MaestroConfigTest {
   }
 
   @Test
+  void aMissingKeyTakesItsDefault(@TempDir Path dir) throws IOException {
+    MaestroConfig partial =
+        MaestroConfig.load(
+            write(
+                dir,
+                """
+                {"mode": "stateless"}
+                """));
+    assertEquals(MaestroConfig.Mode.STATELESS, partial.mode());
+    assertEquals(MaestroConfig.DEFAULT.subMode(), partial.subMode());
+    assertEquals(MaestroConfig.DEFAULT.otlpEndpoint(), partial.otlpEndpoint());
+
+    assertEquals(MaestroConfig.DEFAULT, MaestroConfig.load(write(dir, "{}")));
+  }
+
+  @Test
   void rejectsAFileItCannotUse(@TempDir Path dir) throws IOException {
     List<String> unusable =
         List.of(
-            // An unknown enum value, a missing field, a blank endpoint, truncated JSON, an
-            // empty file, and a value that is not an object.
+            // An unknown enum value, an explicit null, a value of the wrong type, a blank
+            // endpoint, truncated JSON, an empty file, and a value that is not an object.
             """
             {"mode": "sharded", "subMode": "batch", "otlpEndpoint": "http://localhost:4317"}
             """,
             """
-            {"mode": "stateful", "otlpEndpoint": "http://localhost:4317"}
+            {"mode": null}
+            """,
+            """
+            {"subMode": ["batch"]}
             """,
             """
             {"mode": "stateful", "subMode": "batch", "otlpEndpoint": "  "}

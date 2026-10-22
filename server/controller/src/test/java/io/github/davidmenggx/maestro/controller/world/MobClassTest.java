@@ -41,19 +41,23 @@ class MobClassTest {
   }
 
   @Test
-  void aShapeHoldsEveryLandMobVanillaCanMakeAndNoMore() {
-    // The giant at the largest scale, with the highest step height.
-    new MobClass.Shape(3.6f * 16, 12.0f * 16, 10.0f);
-    new MobClass.Shape(
-        MobClass.Shape.MAX_WIDTH, MobClass.Shape.MAX_HEIGHT, MobClass.Shape.MAX_UP_STEP);
+  void aShapeIsAtMostTheFootprintLimit() {
+    // 8 x 8 x 8 cells, the largest cube the limit allows, with the highest step height.
+    new MobClass.Shape(7.99f, 7.99f, MobClass.Shape.MAX_UP_STEP);
     new MobClass.Shape(0.6f, 1.8f, 0.0f);
+    // The giant at scale 1 is 4 x 13 x 4 cells.
+    new MobClass.Shape(3.6f, 12.0f, 1.0f);
+    assertEquals(208.0, MobClass.Shape.footprint(3.6f, 12.0f));
 
+    assertThrows(IllegalArgumentException.class, () -> new MobClass.Shape(8.0f, 7.99f, 0.6f));
     assertThrows(IllegalArgumentException.class, () -> new MobClass.Shape(0.0f, 1.8f, 0.6f));
     assertThrows(IllegalArgumentException.class, () -> new MobClass.Shape(0.6f, -1.0f, 0.6f));
     assertThrows(IllegalArgumentException.class, () -> new MobClass.Shape(0.6f, 1.8f, -0.1f));
     assertThrows(IllegalArgumentException.class, () -> new MobClass.Shape(2000.0f, 1.8f, 0.6f));
-    assertThrows(IllegalArgumentException.class, () -> new MobClass.Shape(0.6f, 300.0f, 0.6f));
+    assertThrows(IllegalArgumentException.class, () -> new MobClass.Shape(0.6f, 600.0f, 0.6f));
     assertThrows(IllegalArgumentException.class, () -> new MobClass.Shape(0.6f, 1.8f, 20.0f));
+    assertThrows(
+        IllegalArgumentException.class, () -> new MobClass.Shape(Float.MAX_VALUE, 1.8f, 0.6f));
     // NaN fails every comparison, so it must not slip past a check written as a rejection.
     assertThrows(IllegalArgumentException.class, () -> new MobClass.Shape(Float.NaN, 1.8f, 0.6f));
     assertThrows(

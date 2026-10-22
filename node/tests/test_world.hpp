@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "maestro/world/area.hpp"
+#include "maestro/world/world_store.hpp"
 
 namespace maestro::test {
 
@@ -40,8 +41,10 @@ public:
   /// Sets every cell in the box between the two corners, inclusive.
   void fill(int X0, int Y0, int Z0, int X1, int Y1, int Z1, world::Cell Value);
 
+  /// An assignment standing at `Sequence` of the stream.
   Frame assignment(bool Resume = false, std::uint64_t Run = 1,
-                   std::uint32_t RegionId = 0) const;
+                   std::uint32_t RegionId = 0,
+                   std::uint64_t Sequence = 0) const;
 
   /// One chunk's state, run-length encoded as the controller encodes it.
   Frame chunk(std::uint64_t Sequence, int ChunkX, int ChunkZ) const;
@@ -60,5 +63,11 @@ private:
 Frame clearedChunk(std::uint64_t Sequence, int ChunkX, int ChunkZ);
 
 Frame delta(std::uint64_t Sequence, std::span<const world::CellEdit> Edits);
+
+/// Verifies `Bytes` as a `WorldFrame` and applies it to `Store`. Bytes that
+/// fail verification are `Malformed` and drop what `Store` holds, as the node
+/// treats them.
+world::ApplyStatus applyBytes(world::WorldStore &Store,
+                              std::span<const std::uint8_t> Bytes);
 
 } // namespace maestro::test

@@ -55,7 +55,7 @@ final class ParityCapture implements Searches.Observer {
   static final int ORIGIN = 4096;
 
   private static final long RUN = 1;
-  private static final int REGION = 0;
+  private static final int REGION = 3;
   private static final int ATTEMPTS_PER_CASE = 50;
 
   /** Block change frames in a capture, each between two batches of searches. */
@@ -157,20 +157,21 @@ final class ParityCapture implements Searches.Observer {
     forgetCachedTypes();
 
     List<byte[]> worldFrames = new ArrayList<>();
-    worldFrames.add(Frames.assignment(RUN, REGION, SIZE, false, world));
+    worldFrames.add(Frames.assignment(RUN, REGION, SIZE, 0, false, world));
     long sequence = 0;
     int firstChunk = Chunks.of(ORIGIN);
     for (int dx = 0; dx < AREA_CHUNKS; dx++) {
       for (int dz = 0; dz < AREA_CHUNKS; dz++) {
-        Frames.ChunkRuns runs = Frames.readChunk(world, firstChunk + dx, firstChunk + dz);
-        byte[] frame = Frames.chunkSnapshot(++sequence, dx, dz, runs);
-        // The section shortcut must give what reading every block gives.
+        byte[] frame =
+            Frames.chunkSnapshot(
+                ++sequence, dx, dz, readChunk(world, firstChunk + dx, firstChunk + dz));
+        // The section shortcuts must give what reading every block gives.
         byte[] reference =
             Frames.chunkSnapshot(
                 sequence,
                 dx,
                 dz,
-                Frames.readChunk(new BlockByBlock(world), firstChunk + dx, firstChunk + dz));
+                readChunk(new BlockByBlock(world), firstChunk + dx, firstChunk + dz));
         if (!Arrays.equals(frame, reference)) {
           throw new IllegalStateException(
               "sections and blocks disagree in chunk " + dx + ", " + dz);
@@ -218,6 +219,15 @@ final class ParityCapture implements Searches.Observer {
     }
     FixtureFile.write(file, seed, FixtureFile.frame(worldFrames), cases);
     return new Summary(cases.size(), exact, reached, offStart, modelDiffered, deltas);
+  }
+
+  /** The chunk's runs. The area is force-loaded, so an unreadable chunk fails the capture. */
+  private static Frames.ChunkRuns readChunk(WorldSource source, int chunkX, int chunkZ) {
+    Frames.ChunkRuns runs = Frames.readChunk(source, chunkX, chunkZ);
+    if (runs == null) {
+      throw new IllegalStateException("chunk " + chunkX + ", " + chunkZ + " is not loaded");
+    }
+    return runs;
   }
 
   /**
@@ -304,7 +314,7 @@ final class ParityCapture implements Searches.Observer {
     PathNavigation navigation = mob.getNavigation();
     recorded.clear();
     probe.reset();
-    Searches.observe(this);
+    Searches.Observer previous = Searches.observe(this);
     try {
       if (rng.nextInt(4) == 0) {
         int maxPathLength = 8 + rng.nextInt((int) defaultLength - 7);
@@ -313,7 +323,7 @@ final class ParityCapture implements Searches.Observer {
         navigation.createPath(target, reachRange);
       }
     } finally {
-      Searches.observe(null);
+      Searches.observe(previous);
     }
     if (recorded.size() != 1) {
       return null;
@@ -329,6 +339,8 @@ final class ParityCapture implements Searches.Observer {
     }
     byte[] request =
         Frames.requests(
+            RUN,
+            REGION,
             List.of(
                 new Frames.Request(
                     requestId, profile.classId(), start, pos(call.target()), call.search())),
@@ -336,6 +348,7 @@ final class ParityCapture implements Searches.Observer {
             ORIGIN);
     byte[] response =
         Frames.response(
+            RUN,
             requestId,
             search.reached(),
             search.nodes(),
@@ -543,6 +556,11 @@ final class ParityCapture implements Searches.Observer {
     @Override
     public int floorAt(int x, int y, int z) {
       return inner.floorAt(x, y, z);
+    }
+
+    @Override
+    public boolean readable(int chunkX, int chunkZ) {
+      return inner.readable(chunkX, chunkZ);
     }
   }
 

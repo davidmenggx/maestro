@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cassert>
+#include <compare>
+#include <cstdint>
 #include <utility>
+#include <vector>
 
 namespace maestro::world {
 
@@ -20,6 +23,23 @@ int columnIndex(int X, int Z) {
   return (X % ChunkSize) * ChunkSize + Z % ChunkSize;
 }
 
+/// One edit of a delta, keyed so that sorted, the edits of one chunk are
+/// adjacent, within it those of one column, and a cell's last edit comes last.
+struct EditKey {
+  /// `ChunkX * chunksPerSide + ChunkZ`.
+  std::uint32_t Chunk;
+  /// The column within the chunk, then the offset, which fits 16 bits as the
+  /// height does.
+  std::uint32_t Cell;
+  /// The edit's place in the delta.
+  std::uint32_t Index;
+
+  std::uint32_t column() const { return Cell >> 16; }
+  int offset() const { return static_cast<int>(Cell & 0xFFFF); }
+
+  friend auto operator<=>(const EditKey &, const EditKey &) = default;
+};
+
 } // namespace
 
 Cell Column::at(int Offset) const {
@@ -31,27 +51,44 @@ Cell Column::at(int Offset) const {
 }
 
 std::shared_ptr<const Column> Column::with(int Offset, Cell Value) const {
+  const ColumnEdit Edit{Offset, Value};
+  return with({&Edit, 1});
+}
+
+std::shared_ptr<const Column>
+Column::with(std::span<const ColumnEdit> Edits) const {
+  if (std::ranges::all_of(Edits, [this](const ColumnEdit &Edit) {
+        return at(Edit.Offset) == Edit.Value;
+      }))
+    return shared_from_this();
   std::vector<Run> Out;
-  Out.reserve(Runs.size() + 2);
+  Out.reserve(Runs.size() + 2 * Edits.size());
+  auto Edit = Edits.begin();
   int Start = 0;
   for (const Run &R : Runs) {
-    if (Offset >= Start && Offset < R.End) {
-      if (Offset > Start)
-        appendMerged(Out, Run{static_cast<std::uint16_t>(Offset), R.Value});
-      appendMerged(Out, Run{static_cast<std::uint16_t>(Offset + 1), Value});
-      if (Offset + 1 < R.End)
-        appendMerged(Out, R);
-    } else {
-      appendMerged(Out, R);
+    // The first offset of `R` not yet written.
+    int Next = Start;
+    for (; Edit != Edits.end() && Edit->Offset < R.End; ++Edit) {
+      assert(Edit->Offset >= Next && "edits out of order");
+      if (Edit->Offset > Next)
+        appendMerged(Out,
+                     Run{static_cast<std::uint16_t>(Edit->Offset), R.Value});
+      appendMerged(
+          Out, Run{static_cast<std::uint16_t>(Edit->Offset + 1), Edit->Value});
+      Next = Edit->Offset + 1;
     }
+    if (Next < R.End)
+      appendMerged(Out, R);
     Start = R.End;
   }
+  assert(Edit == Edits.end() && "offset past the top of the column");
   return std::make_shared<const Column>(std::move(Out));
 }
 
-Area::Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId)
+Area::Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId,
+           std::uint64_t Sequence)
     : Geo(Geo), ControllerRun(ControllerRun), RegionId(RegionId),
-      Rows(static_cast<std::size_t>(Geo.chunksPerSide())),
+      Sequence(Sequence), Rows(static_cast<std::size_t>(Geo.chunksPerSide())),
       AirColumn(std::make_shared<const Column>(
           std::vector<Run>{Run{static_cast<std::uint16_t>(Geo.Height), Air}})) {
 }
@@ -101,44 +138,69 @@ std::shared_ptr<const Area> Area::withCells(std::span<const CellEdit> Edits,
                                             std::uint64_t Sequence) const {
   auto Next = std::make_shared<Area>(*this);
   Next->Sequence = Sequence;
+  const int PerSide = Geo.chunksPerSide();
 
-  // Rows and chunks already copied for this version. A delta touches few, so
-  // a linear scan is faster than a map.
-  std::vector<std::pair<int, std::shared_ptr<ChunkRow>>> CopiedRows;
-  std::vector<std::pair<int, std::shared_ptr<Chunk>>> CopiedChunks;
-  for (const CellEdit &Edit : Edits) {
+  std::vector<EditKey> Keys;
+  Keys.reserve(Edits.size());
+  for (std::size_t I = 0; I < Edits.size(); ++I) {
+    const CellEdit &Edit = Edits[I];
     assert(Geo.contains(Edit.X, Edit.Y, Edit.Z) && "edit outside the area");
-    const int ChunkX = Edit.X / ChunkSize;
-    const int ChunkZ = Edit.Z / ChunkSize;
+    const auto Column = static_cast<std::uint32_t>(columnIndex(Edit.X, Edit.Z));
+    const auto Offset = static_cast<std::uint32_t>(Edit.Y - Geo.MinY);
+    Keys.push_back({static_cast<std::uint32_t>(Edit.X / ChunkSize * PerSide +
+                                               Edit.Z / ChunkSize),
+                    Column << 16 | Offset, static_cast<std::uint32_t>(I)});
+  }
+  std::sort(Keys.begin(), Keys.end());
 
-    auto RowIt =
-        std::find_if(CopiedRows.begin(), CopiedRows.end(),
-                     [&](const auto &Entry) { return Entry.first == ChunkX; });
-    if (RowIt == CopiedRows.end()) {
-      auto Row = copyRow(ChunkX);
-      Next->Rows[ChunkX] = Row;
-      RowIt = CopiedRows.emplace(CopiedRows.end(), ChunkX, std::move(Row));
+  // The row copied for this version, if any. A row's chunks are adjacent.
+  ChunkRow *Row = nullptr;
+  int RowX = -1;
+  std::vector<ColumnEdit> ColumnEdits;
+  for (std::size_t Begin = 0; Begin < Keys.size();) {
+    const std::uint32_t ChunkIndex = Keys[Begin].Chunk;
+    const int ChunkX = static_cast<int>(ChunkIndex) / PerSide;
+    const int ChunkZ = static_cast<int>(ChunkIndex) % PerSide;
+    // Null for a chunk with no state, which reads as air, so an edit to it
+    // still applies.
+    const Chunk *Old = Rows[ChunkX] ? (*Rows[ChunkX])[ChunkZ].get() : nullptr;
+    // Copied once a column changes.
+    std::shared_ptr<Chunk> Content;
+    while (Begin < Keys.size() && Keys[Begin].Chunk == ChunkIndex) {
+      const std::uint32_t Column = Keys[Begin].column();
+      ColumnEdits.clear();
+      for (; Begin < Keys.size() && Keys[Begin].Chunk == ChunkIndex &&
+             Keys[Begin].column() == Column;
+           ++Begin) {
+        const int Offset = Keys[Begin].offset();
+        const Cell Value = Edits[Keys[Begin].Index].Value;
+        if (!ColumnEdits.empty() && ColumnEdits.back().Offset == Offset)
+          ColumnEdits.back().Value = Value;
+        else
+          ColumnEdits.push_back({Offset, Value});
+      }
+      const ColumnPtr &Base = Old ? (*Old)[Column] : AirColumn;
+      ColumnPtr Edited = Base->with(ColumnEdits);
+      if (Edited == Base)
+        continue;
+      if (!Content) {
+        Content = std::make_shared<Chunk>();
+        if (Old)
+          *Content = *Old;
+        else
+          Content->fill(AirColumn);
+      }
+      (*Content)[Column] = std::move(Edited);
     }
-
-    const int Index = ChunkX * Geo.chunksPerSide() + ChunkZ;
-    auto ChunkIt =
-        std::find_if(CopiedChunks.begin(), CopiedChunks.end(),
-                     [&](const auto &Entry) { return Entry.first == Index; });
-    if (ChunkIt == CopiedChunks.end()) {
-      // A cleared chunk becomes air, so an edit to it still applies.
-      ChunkPtr &Slot = (*RowIt->second)[ChunkZ];
-      auto Fresh = std::make_shared<Chunk>();
-      if (Slot)
-        *Fresh = *Slot;
-      else
-        Fresh->fill(AirColumn);
-      Slot = Fresh;
-      ChunkIt =
-          CopiedChunks.emplace(CopiedChunks.end(), Index, std::move(Fresh));
+    if (!Content)
+      continue;
+    if (RowX != ChunkX) {
+      auto Copy = copyRow(ChunkX);
+      Row = Copy.get();
+      Next->Rows[ChunkX] = std::move(Copy);
+      RowX = ChunkX;
     }
-
-    ColumnPtr &Target = (*ChunkIt->second)[columnIndex(Edit.X, Edit.Z)];
-    Target = Target->with(Edit.Y - Geo.MinY, Edit.Value);
+    (*Row)[ChunkZ] = std::move(Content);
   }
   return Next;
 }

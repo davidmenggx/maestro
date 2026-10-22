@@ -53,19 +53,21 @@ struct Result {
   float Cost = 0.0F;
 };
 
-/// Encodes `Path` as a finished `ResponseFrame` in `Builder`, which is cleared
-/// first so one builder can be reused. Returns false, with nothing encoded, if
-/// a position does not fit the wire's 16 bits, which cannot happen for a
-/// request the controller admitted.
+/// Encodes `Path` as a finished `ResponseFrame` of controller run `Run` in
+/// `Builder`, which is cleared first so one builder can be reused. Returns
+/// false, with nothing encoded, if a position does not fit the wire's 16 bits,
+/// which cannot happen for a request the controller admitted.
 [[nodiscard]] bool encodeResponse(flatbuffers::FlatBufferBuilder &Builder,
-                                  std::uint64_t RequestId, const Result &Path,
+                                  std::uint64_t Run, std::uint64_t RequestId,
+                                  const Result &Path,
                                   std::uint64_t WorldSequence);
 
 /// Encodes the answer to a request that names a profile this node has not
-/// received, as a finished `ResponseFrame` in `Builder`, which is cleared
-/// first.
+/// received, as a finished `ResponseFrame` of controller run `Run` in
+/// `Builder`, which is cleared first.
 void encodeUnknownProfile(flatbuffers::FlatBufferBuilder &Builder,
-                          std::uint64_t RequestId, std::uint16_t ClassId);
+                          std::uint64_t Run, std::uint64_t RequestId,
+                          std::uint16_t ClassId);
 
 /// One pathfinding algorithm. A node picks one at startup and reports it in
 /// `Hello`. An instance reuses scratch state between calls to avoid
@@ -73,8 +75,6 @@ void encodeUnknownProfile(flatbuffers::FlatBufferBuilder &Builder,
 class Search {
 public:
   virtual ~Search() = default;
-
-  virtual fbs::Pathfinder kind() const = 0;
 
   /// Searches `Area`, which the caller keeps pinned until the call returns,
   /// and overwrites `Out`.

@@ -20,7 +20,10 @@ public interface Transport {
      * resumable.
      */
     WORLD(true),
-    /** Path requests: at-least-once, idempotent, may arrive out of order or twice. */
+    /**
+     * Path requests: at-least-once, idempotent, may arrive out of order or twice. Datagrams are not
+     * part of the link, so one in flight when the link changes still arrives.
+     */
     REQUEST(false),
     /** Mob profiles to the node; {@code Hello} and heartbeats back. */
     CONTROL(true);
@@ -36,14 +39,17 @@ public interface Transport {
     }
   }
 
-  /** Callbacks run on the controller thread, never inside a {@link #send} call. */
+  /** Callbacks run on the controller thread, never inside a call into the transport. */
   interface Listener {
 
     void onFrame(NodeId node, Channel channel, ByteBuffer frame);
 
     void onConnected(NodeId node);
 
-    /** The link is gone (process death or reset). Not the same as an unresponsive node. */
+    /**
+     * The link is gone (process death or reset), or a {@link #connect} attempt failed. Not the same
+     * as an unresponsive node.
+     */
     void onDisconnected(NodeId node);
   }
 
@@ -54,7 +60,13 @@ public interface Transport {
    */
   void send(NodeId node, Channel channel, ByteBuffer frame);
 
-  void connect(NodeId node, String endpoint);
+  /**
+   * Opens a link to the node, replacing any it has. The transport knows each node's addresses.
+   * Every attempt ends in exactly one {@link Listener#onConnected} or {@link
+   * Listener#onDisconnected}. The controller's first frame on each ordered channel of a new link is
+   * its {@code Join}, which the transport carries like any other frame.
+   */
+  void connect(NodeId node);
 
   /** Installed once, before any {@link #connect}. */
   void listen(Listener listener);

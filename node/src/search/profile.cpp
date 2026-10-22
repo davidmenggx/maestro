@@ -1,16 +1,37 @@
 #include "maestro/search/profile.hpp"
 
+#include <cmath>
+
+#include "java_math.hpp"
 #include "mob_generated.h"
 
 namespace maestro::search {
+
+namespace {
+
+/// Whether a mob of `Width` and `Height`, both finite and positive, has a
+/// footprint within `Profile::FootprintLimit`. `NodeEvaluator.prepare` sizes
+/// it `floor(width + 1)` by `floor(height + 1)` by `floor(width + 1)`, adding
+/// in `float`.
+bool footprintFits(float Width, float Height) {
+  const std::int64_t Side = java::floor(Width + 1.0F);
+  const std::int64_t Tall = java::floor(Height + 1.0F);
+  // Each factor is at least 1, so checking them first keeps the product from
+  // overflowing without changing the answer.
+  return Side <= Profile::FootprintLimit && Tall <= Profile::FootprintLimit &&
+         Side * Tall * Side <= Profile::FootprintLimit;
+}
+
+} // namespace
 
 std::optional<Profile> Profile::decode(const fbs::MobClass &Wire) {
   const auto *Malus = Wire.malus();
   if (!Malus || Malus->size() != world::PathTypeCount)
     return std::nullopt;
   // Written so that NaN fails every comparison.
-  if (!(Wire.width() > 0.0F && Wire.width() <= WidthLimit) ||
-      !(Wire.height() > 0.0F && Wire.height() <= HeightLimit) ||
+  if (!(std::isfinite(Wire.width()) && Wire.width() > 0.0F) ||
+      !(std::isfinite(Wire.height()) && Wire.height() > 0.0F) ||
+      !footprintFits(Wire.width(), Wire.height()) ||
       !(Wire.max_up_step() >= 0.0F && Wire.max_up_step() <= UpStepLimit))
     return std::nullopt;
 

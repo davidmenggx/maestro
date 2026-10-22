@@ -17,8 +17,8 @@ public final class SearchReach {
    * those cells reads the cells around it to find its type.
    */
   public static int blocks(float maxPathLength, float width) {
-    if (!Float.isFinite(maxPathLength) || maxPathLength <= 0) {
-      throw new IllegalArgumentException("path length bound must be positive: " + maxPathLength);
+    if (!(maxPathLength > 0 && maxPathLength <= WorldEvent.Search.MAX_PATH_LENGTH)) {
+      throw new IllegalArgumentException("not a path length bound: " + maxPathLength);
     }
     if (!Float.isFinite(width) || width <= 0) {
       throw new IllegalArgumentException("width must be positive: " + width);

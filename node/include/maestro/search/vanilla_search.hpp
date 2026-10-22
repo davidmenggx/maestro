@@ -22,8 +22,6 @@ public:
   VanillaSearch(const VanillaSearch &) = delete;
   VanillaSearch &operator=(const VanillaSearch &) = delete;
 
-  fbs::Pathfinder kind() const override { return fbs::Pathfinder::VANILLA; }
-
   void find(const world::Area &Area, const Profile &Mob, const Request &Call,
             Result &Out) override;
 

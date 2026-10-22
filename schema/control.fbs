@@ -15,6 +15,12 @@ namespace maestro.fbs;
 // area as air before any chunk arrives. If `resume` is set, the node keeps its
 // state and deltas continue after the `last_sequence` it reported. Otherwise
 // it drops its state and every resident chunk is sent again.
+// `sequence` is the stream position the assignment stands at, so the next
+// frame is `sequence + 1`. A fresh area is all air as of `sequence`, and a
+// resume repeats the `last_sequence` the node reported. `run` is the link's
+// run, and a fresh assignment of the region a node holds never stands behind
+// the sequence the node holds; the node refuses either as a frame it cannot
+// apply.
 table RegionAssignment {
   run:ulong;
   region_id:uint;
@@ -22,13 +28,28 @@ table RegionAssignment {
   min_y:int;
   height:ushort;
   resume:bool;
+  sequence:ulong;
 }
 
-// A node's first frame on a new connection: the search it runs, the region it
-// still holds, the controller run that region came from, and its last applied
-// world sequence. `last_sequence` is 0 if the node holds no state, as after a
-// restart. The controller replies with a `RegionAssignment` saying whether the
-// stream resumes.
+// The controller's first frame on each of a link's two connections. `run`
+// identifies the controller process and `link` counts its connection attempts
+// to the node, so the node pairs the world and control connections of one
+// attempt. A `Join` naming another run, or a later attempt of the same run,
+// replaces the link. One naming the current attempt joins it, once per port.
+// The node closes a connection whose first frame is anything else, names an
+// earlier attempt or the attempt of a link already lost, or has a zero field,
+// and leaves the live link alone.
+table Join {
+  run:ulong;
+  link:ulong;
+}
+
+// The node's reply to the `Join` on a control connection: the search it runs,
+// the region it still holds, the controller run that region came from, and its
+// last applied world sequence. `last_sequence` is 0 if the node holds no
+// state, as after a restart, and then `run` and `region_id` are 0 too. Region
+// ids start at 1. The controller replies with a `RegionAssignment`
+// saying whether the stream resumes.
 table Hello {
   run:ulong;
   region_id:uint;
@@ -46,16 +67,21 @@ table Heartbeat {
 // One union per channel per direction. A reader knows the channel a frame
 // arrived on, so it dispatches on a single root type. The world and control
 // channels are TCP; the request channel is UDP.
-union WorldMsg { WorldDelta, RegionAssignment, ChunkSnapshot }
+union WorldMsg { WorldDelta, RegionAssignment, ChunkSnapshot, Join }
 table WorldFrame { body:WorldMsg; }
 
-union RequestMsg { PathRequestBatch }
-table RequestFrame { body:RequestMsg; }
+// `run` and `region_id` name the link and the area the frame is meant for. A
+// node drops a frame whose run is not its link's, and answers a request whose
+// region is not the area it holds as if it held none.
+union RequestMsg { PathRequestBatch, PathCancel }
+table RequestFrame { body:RequestMsg; run:ulong; region_id:uint; }
 
+// `run` repeats the request frame's, so a controller drops an answer meant for
+// an earlier process.
 union ResponseMsg { PathResponse, UnknownProfile }
-table ResponseFrame { body:ResponseMsg; }
+table ResponseFrame { body:ResponseMsg; run:ulong; }
 
-union ControlMsg { MobClass }
+union ControlMsg { MobClass, Join }
 table ControlFrame { body:ControlMsg; }
 
 union ControlReplyMsg { Hello, Heartbeat }

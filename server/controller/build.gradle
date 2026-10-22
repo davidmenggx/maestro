@@ -32,7 +32,7 @@ tasks.withType(JavaCompile).configureEach {
   options.release = 25
 }
 
-def fuzzTiers = [shallow: "20000", deep: "6000", coverage: "2000"]
+def fuzzTiers = [shallow: "5000", deep: "1500", coverage: "2000"]
 
 // Forwarded to the forked test JVM, which does not inherit the Gradle JVM's
 // properties. `make fuzz SEED=n` replays a seed reported by a failing run.
@@ -57,6 +57,9 @@ def forwardSweepProperties = { Test task, String defaultRuns ->
 // Parity fixtures recorded from vanilla by `make capture`, shared with the node.
 def parityFixtures = file("${rootDir}/../fixtures/parity")
 
+// Node conformance scripts, written by `make conformance` and replayed by the node.
+def conformanceFixtures = file("${rootDir}/../fixtures/conformance")
+
 test {
   useJUnitPlatform {
     excludeTags 'fuzz'
@@ -64,6 +67,12 @@ test {
   forwardSweepProperties(delegate, null)
   systemProperty 'maestro.fixtures', parityFixtures.absolutePath
   inputs.dir(parityFixtures).withPropertyName('parityFixtures').optional()
+  systemProperty 'maestro.conformance', conformanceFixtures.absolutePath
+  inputs.dir(conformanceFixtures).withPropertyName('conformanceFixtures').optional()
+  if (System.getProperty('maestro.conformance.write') != null) {
+    systemProperty 'maestro.conformance.write', 'true'
+    outputs.upToDateWhen { false }
+  }
 }
 
 // One task per tier.

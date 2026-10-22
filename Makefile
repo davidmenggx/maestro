@@ -13,6 +13,7 @@
 #                   (TIER=shallow|deep|coverage narrows it to one tier)
 #   make test-boot  boot the released mod and assert the mixins applied
 #   make capture    record vanilla parity fixtures (SEED="1 2" N=cases)
+#   make conformance  write the node conformance fixture
 #   make clean      remove build outputs (keeps fetched deps)
 #   make help       list targets
 
@@ -41,7 +42,8 @@ MAESTRO_SANITIZE ?=
 
 .PHONY: all help flatc schema schema-cpp schema-java \
         node node-configure node-test \
-        server server-test fuzz test test-boot capture run-node run-server clean distclean
+        server server-test fuzz test test-boot capture conformance run-node run-server \
+        clean distclean
 
 all: node server ## Build the C++ node and the Java mod
 
@@ -111,6 +113,10 @@ test-boot: schema-java ## Boot the released mod and assert the mixins applied
 capture: schema-java ## Record parity fixtures into fixtures/parity (SEED="1 2" N=cases)
 	tools/capture-fixtures.sh "$(if $(SEED),$(SEED),$(error set SEED, e.g. SEED="1 2 3"))" \
 		$(if $(N),$(N),100)
+
+conformance: schema-java ## Write the node conformance fixture into fixtures/conformance
+	cd server && $(GRADLE) :controller:test --tests '*ConformanceTest*' \
+		-Dmaestro.conformance.write=true
 
 # ---------------------------------------------------------------------------
 # Aggregate / cleanup

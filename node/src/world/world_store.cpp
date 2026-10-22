@@ -73,34 +73,35 @@ ChunkPtr decodeChunk(const fbs::ChunkSnapshot &Snapshot, int Height,
   return Content;
 }
 
+/// Whether `Sequence` may follow `Held`.
+ApplyStatus admit(const Area &Held, std::uint64_t Sequence) {
+  if (Sequence == 0)
+    return ApplyStatus::Malformed;
+  return Sequence == Held.sequence() + 1 ? ApplyStatus::Applied
+                                         : ApplyStatus::OutOfSequence;
+}
+
 } // namespace
 
-ApplyStatus WorldStore::apply(std::span<const std::uint8_t> Frame) {
+ApplyStatus WorldStore::apply(const fbs::WorldFrame &Frame) {
   const ApplyStatus Status = applyFrame(Frame);
-  if (Status != ApplyStatus::Applied) {
-    Current.store(nullptr);
-    AwaitingBaseline = false;
-  }
+  if (Status != ApplyStatus::Applied)
+    clear();
   return Status;
 }
 
-ApplyStatus WorldStore::applyFrame(std::span<const std::uint8_t> Frame) {
-  flatbuffers::Verifier Verifier(Frame.data(), Frame.size());
-  if (!fbs::VerifyWorldFrameBuffer(Verifier))
-    return ApplyStatus::Malformed;
-
-  const auto *Root = fbs::GetWorldFrame(Frame.data());
-  switch (Root->body_type()) {
+ApplyStatus WorldStore::applyFrame(const fbs::WorldFrame &Frame) {
+  switch (Frame.body_type()) {
   case fbs::WorldMsg::RegionAssignment:
-    if (const auto *Body = Root->body_as_RegionAssignment())
+    if (const auto *Body = Frame.body_as_RegionAssignment())
       return assign(*Body);
     break;
   case fbs::WorldMsg::ChunkSnapshot:
-    if (const auto *Body = Root->body_as_ChunkSnapshot())
+    if (const auto *Body = Frame.body_as_ChunkSnapshot())
       return applyChunk(*Body);
     break;
   case fbs::WorldMsg::WorldDelta:
-    if (const auto *Body = Root->body_as_WorldDelta())
+    if (const auto *Body = Frame.body_as_WorldDelta())
       return applyDelta(*Body);
     break;
   default:
@@ -115,24 +116,28 @@ ApplyStatus WorldStore::assign(const fbs::RegionAssignment &Assignment) {
   // Wire positions are shorts, so the area must fit in one.
   constexpr int ShortMin = std::numeric_limits<std::int16_t>::min();
   constexpr int ShortMax = std::numeric_limits<std::int16_t>::max();
-  if (Geo.Size <= 0 || Geo.Size % ChunkSize != 0 || Geo.Size > ShortMax ||
-      Geo.Height <= 0 || Geo.MinY < ShortMin ||
+  if (Assignment.run() == 0 || Geo.Size <= 0 || Geo.Size % ChunkSize != 0 ||
+      Geo.Size > ShortMax || Geo.Height <= 0 || Geo.MinY < ShortMin ||
       std::int64_t{Geo.MinY} + Geo.Height - 1 > ShortMax)
     return ApplyStatus::Malformed;
 
+  const auto Held = pin();
+  const bool SameStream = Held && Held->run() == Assignment.run() &&
+                          Held->regionId() == Assignment.region_id();
   if (Assignment.resume()) {
     // Resuming keeps the held state, so it must be the stream the controller
     // is continuing.
-    const auto Held = pin();
-    if (!Held || Held->sequence() == 0 || Held->run() != Assignment.run() ||
-        Held->regionId() != Assignment.region_id() || Held->geometry() != Geo)
+    if (!SameStream || Held->sequence() == 0 ||
+        Held->sequence() != Assignment.sequence() || Held->geometry() != Geo)
       return ApplyStatus::CannotResume;
     return ApplyStatus::Applied;
   }
+  // A stream never starts over behind a frame already applied.
+  if (SameStream && Held->sequence() > Assignment.sequence())
+    return ApplyStatus::Behind;
 
-  AwaitingBaseline = true;
-  Current.store(std::make_shared<const Area>(Geo, Assignment.run(),
-                                             Assignment.region_id()));
+  Current.store(std::make_shared<const Area>(
+      Geo, Assignment.run(), Assignment.region_id(), Assignment.sequence()));
   return ApplyStatus::Applied;
 }
 
@@ -152,10 +157,9 @@ ApplyStatus WorldStore::applyChunk(const fbs::ChunkSnapshot &Snapshot) {
   if (Malformed)
     return ApplyStatus::Malformed;
 
-  if (const ApplyStatus Status = admit(Snapshot.sequence());
+  if (const ApplyStatus Status = admit(*Held, Snapshot.sequence());
       Status != ApplyStatus::Applied)
     return Status;
-  AwaitingBaseline = false;
   Current.store(Held->withChunk(Position->x(), Position->z(),
                                 std::move(Content), Snapshot.sequence()));
   return ApplyStatus::Applied;
@@ -179,21 +183,11 @@ ApplyStatus WorldStore::applyDelta(const fbs::WorldDelta &Delta) {
     }
   }
 
-  if (const ApplyStatus Status = admit(Delta.sequence());
+  if (const ApplyStatus Status = admit(*Held, Delta.sequence());
       Status != ApplyStatus::Applied)
     return Status;
-  AwaitingBaseline = false;
   Current.store(Held->withCells(Edits, Delta.sequence()));
   return ApplyStatus::Applied;
-}
-
-ApplyStatus WorldStore::admit(std::uint64_t Sequence) const {
-  if (Sequence == 0)
-    return ApplyStatus::Malformed;
-  if (AwaitingBaseline)
-    return ApplyStatus::Applied;
-  return Sequence == pin()->sequence() + 1 ? ApplyStatus::Applied
-                                           : ApplyStatus::OutOfSequence;
 }
 
 } // namespace maestro::world

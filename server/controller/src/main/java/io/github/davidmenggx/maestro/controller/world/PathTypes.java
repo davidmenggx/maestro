@@ -51,16 +51,6 @@ public final class PathTypes {
     return pathType >= 0 && pathType < PER_BLOCK.length && PER_BLOCK[pathType];
   }
 
-  /** How many ordinals a cell may carry. */
-  public static int perBlockCount() {
-    return PER_BLOCK_ORDINALS.length;
-  }
-
-  /** The nth type a cell may carry, in enum order, so a given index always picks the same type. */
-  public static byte perBlock(int index) {
-    return PER_BLOCK_ORDINALS[index];
-  }
-
   public static String name(byte pathType) {
     return pathType >= 0 && pathType < PathType.names.length
         ? PathType.names[pathType]

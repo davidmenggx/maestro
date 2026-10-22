@@ -41,9 +41,15 @@ struct Run {
   friend bool operator==(Run, Run) = default;
 };
 
+/// One cell to set in a column, `Offset` counting up from the area's `MinY`.
+struct ColumnEdit {
+  int Offset = 0;
+  Cell Value;
+};
+
 /// One full-height column, run-length encoded. Immutable, so versions of an
 /// area can share it.
-class Column {
+class Column : public std::enable_shared_from_this<Column> {
 public:
   /// `Runs` must be ordered, non-empty, and end at the area's height.
   explicit Column(std::vector<Run> Runs) : Runs(std::move(Runs)) {}
@@ -53,6 +59,11 @@ public:
 
   /// A copy with the cell at `Offset` replaced and equal neighbours merged.
   std::shared_ptr<const Column> with(int Offset, Cell Value) const;
+
+  /// A copy with every cell in `Edits` replaced and equal neighbours merged.
+  /// `Edits` must be in strictly increasing `Offset` order. If no cell
+  /// changes, this column itself, which must then be owned by a `shared_ptr`.
+  std::shared_ptr<const Column> with(std::span<const ColumnEdit> Edits) const;
 
   std::span<const Run> runs() const { return Runs; }
 
@@ -83,9 +94,10 @@ struct CellEdit {
 /// one version always describe the same stream position.
 class Area {
 public:
-  /// An all-air area, before the first frame of the stream named by
-  /// `ControllerRun` and `RegionId`.
-  Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId);
+  /// An all-air area at position `Sequence` of the stream named by
+  /// `ControllerRun` and `RegionId`, before any frame after it.
+  Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId,
+       std::uint64_t Sequence = 0);
 
   const Geometry &geometry() const { return Geo; }
 
@@ -94,7 +106,8 @@ public:
 
   std::uint32_t regionId() const { return RegionId; }
 
-  /// Sequence of the last world frame applied, or 0 before the first.
+  /// Sequence of the last world frame applied, or the assignment's before
+  /// the first.
   std::uint64_t sequence() const { return Sequence; }
 
   Cell at(int X, int Y, int Z) const;
@@ -109,8 +122,10 @@ public:
                                         ChunkPtr Content,
                                         std::uint64_t Sequence) const;
 
-  /// A version with `Edits` applied in order. Every edit must be inside the
-  /// area. An edit in a chunk with no state starts that chunk from air.
+  /// A version with `Edits` applied, a later edit to a cell winning over an
+  /// earlier one. Every edit must be inside the area. An edit that changes a
+  /// chunk with no state starts that chunk from air. Columns and chunks no
+  /// edit changes stay shared.
   std::shared_ptr<const Area> withCells(std::span<const CellEdit> Edits,
                                         std::uint64_t Sequence) const;
 

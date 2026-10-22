@@ -14,8 +14,8 @@ import java.util.TreeMap;
 public final class SimMetrics implements Metrics {
 
   private final Map<String, Long> counters = new TreeMap<>();
-  private final Map<String, Long> gauges = new TreeMap<>();
   private final Map<String, List<Double>> distributions = new TreeMap<>();
+  private final Map<String, Long> gauges = new TreeMap<>();
 
   @Override
   public void count(String name, long delta, String... labels) {
@@ -32,13 +32,13 @@ public final class SimMetrics implements Metrics {
     gauges.put(key(name, labels), value);
   }
 
-  public long counter(String name, String... labels) {
-    return counters.getOrDefault(key(name, labels), 0L);
-  }
-
-  /** Last value reported for a gauge, or 0 if it was never set. */
+  /** The last value the gauge was set to, or 0 if it never was. */
   public long gauge(String name, String... labels) {
     return gauges.getOrDefault(key(name, labels), 0L);
+  }
+
+  public long counter(String name, String... labels) {
+    return counters.getOrDefault(key(name, labels), 0L);
   }
 
   /** Every labeled series of one counter, summed. */

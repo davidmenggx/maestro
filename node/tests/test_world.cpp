@@ -48,11 +48,12 @@ void DenseWorld::fill(int X0, int Y0, int Z0, int X1, int Y1, int Z1,
 }
 
 Frame DenseWorld::assignment(bool Resume, std::uint64_t Run,
-                             std::uint32_t RegionId) const {
+                             std::uint32_t RegionId,
+                             std::uint64_t Sequence) const {
   flatbuffers::FlatBufferBuilder Builder;
   const auto Body = fbs::CreateRegionAssignment(
       Builder, Run, RegionId, static_cast<std::uint16_t>(Geo.Size), Geo.MinY,
-      static_cast<std::uint16_t>(Geo.Height), Resume);
+      static_cast<std::uint16_t>(Geo.Height), Resume, Sequence);
   Builder.Finish(fbs::CreateWorldFrame(Builder, fbs::WorldMsg::RegionAssignment,
                                        Body.Union()));
   return finish(Builder);
@@ -101,11 +102,11 @@ Frame DenseWorld::chunk(std::uint64_t Sequence, int ChunkX, int ChunkZ) const {
 
 std::shared_ptr<const world::Area> DenseWorld::load() const {
   world::WorldStore Store;
-  EXPECT_EQ(Store.apply(assignment()), world::ApplyStatus::Applied);
+  EXPECT_EQ(applyBytes(Store, assignment()), world::ApplyStatus::Applied);
   std::uint64_t Sequence = 1;
   for (int ChunkX = 0; ChunkX < Geo.chunksPerSide(); ++ChunkX)
     for (int ChunkZ = 0; ChunkZ < Geo.chunksPerSide(); ++ChunkZ)
-      EXPECT_EQ(Store.apply(chunk(Sequence++, ChunkX, ChunkZ)),
+      EXPECT_EQ(applyBytes(Store, chunk(Sequence++, ChunkX, ChunkZ)),
                 world::ApplyStatus::Applied);
   return Store.pin();
 }
@@ -135,6 +136,16 @@ Frame delta(std::uint64_t Sequence, std::span<const world::CellEdit> Edits) {
   Builder.Finish(
       fbs::CreateWorldFrame(Builder, fbs::WorldMsg::WorldDelta, Body.Union()));
   return finish(Builder);
+}
+
+world::ApplyStatus applyBytes(world::WorldStore &Store,
+                              std::span<const std::uint8_t> Bytes) {
+  flatbuffers::Verifier Verifier(Bytes.data(), Bytes.size());
+  if (!fbs::VerifyWorldFrameBuffer(Verifier)) {
+    Store.clear();
+    return world::ApplyStatus::Malformed;
+  }
+  return Store.apply(*fbs::GetWorldFrame(Bytes.data()));
 }
 
 } // namespace maestro::test

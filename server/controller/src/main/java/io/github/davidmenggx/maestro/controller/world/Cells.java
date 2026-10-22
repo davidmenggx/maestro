@@ -1,6 +1,9 @@
 package io.github.davidmenggx.maestro.controller.world;
 
-/** What one cell holds besides its position. Bounds shared by the boundary and the encoder. */
+/**
+ * What one cell holds besides its position. Bounds shared by the boundary and the encoder, and the
+ * packed form a {@link WorldSource} reads cells in: {@code (floor << 8) | pathType}.
+ */
 public final class Cells {
 
   /**
@@ -14,4 +17,17 @@ public final class Cells {
   public static final int FULL_FLOOR = 16;
 
   private Cells() {}
+
+  /** A cell in its packed form. */
+  public static int pack(int floor, byte pathType) {
+    return (floor << 8) | (pathType & 0xFF);
+  }
+
+  public static int floorOf(int cell) {
+    return cell >> 8;
+  }
+
+  public static byte typeOf(int cell) {
+    return (byte) cell;
+  }
 }

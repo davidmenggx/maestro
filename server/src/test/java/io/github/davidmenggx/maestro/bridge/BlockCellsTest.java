@@ -1,7 +1,9 @@
 package io.github.davidmenggx.maestro.bridge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.PathTypes;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
@@ -13,6 +15,7 @@ import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.SlabBlock;
 import net.minecraft.world.level.block.SnowLayerBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.material.FluidState;
@@ -81,6 +84,18 @@ class BlockCellsTest {
   }
 
   @Test
+  void theFloorOfABlockAPistonIsMovingIsClamped() {
+    // A carpet being pushed up collides a block lower until it moves, so its top is below the cell.
+    BlockGetter pushedUp = moving(Blocks.WHITE_CARPET.defaultBlockState(), Direction.UP);
+    assertTrue(collisionTop(pushedUp) < 0);
+    assertEquals(0, BlockCells.floor(pushedUp, BlockPos.ZERO));
+
+    BlockGetter pushedDown = moving(Blocks.OAK_FENCE.defaultBlockState(), Direction.DOWN);
+    assertTrue(collisionTop(pushedDown) * Cells.FULL_FLOOR > Cells.MAX_FLOOR);
+    assertEquals(Cells.MAX_FLOOR, BlockCells.floor(pushedDown, BlockPos.ZERO));
+  }
+
+  @Test
   void aCellOnlyEverCarriesAPerBlockType() {
     for (BlockState state : net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY) {
       byte type = BlockCells.pathType(new OneBlock(state), BlockPos.ZERO);
@@ -108,12 +123,30 @@ class BlockCellsTest {
     assertEquals(floor, BlockCells.floor(new OneBlock(state), BlockPos.ZERO), state.toString());
   }
 
-  /** One block at the origin and air everywhere else. */
-  private record OneBlock(BlockState state) implements BlockGetter {
+  /** A piston extending in {@code direction} that has just started moving {@code moved}. */
+  private static BlockGetter moving(BlockState moved, Direction direction) {
+    BlockState piston = Blocks.MOVING_PISTON.defaultBlockState();
+    return new OneBlock(
+        piston, new PistonMovingBlockEntity(BlockPos.ZERO, piston, moved, direction, true, false));
+  }
+
+  private static double collisionTop(BlockGetter level) {
+    return level
+        .getBlockState(BlockPos.ZERO)
+        .getCollisionShape(level, BlockPos.ZERO)
+        .max(Direction.Axis.Y);
+  }
+
+  /** One block at the origin, with its block entity if it has one, and air everywhere else. */
+  private record OneBlock(BlockState state, BlockEntity blockEntity) implements BlockGetter {
+
+    OneBlock(BlockState state) {
+      this(state, null);
+    }
 
     @Override
     public BlockEntity getBlockEntity(BlockPos pos) {
-      return null;
+      return pos.equals(BlockPos.ZERO) ? blockEntity : null;
     }
 
     @Override

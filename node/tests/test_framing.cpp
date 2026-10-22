@@ -79,3 +79,14 @@ TEST(Framing, ALengthPastTheCapIsRefused) {
   EXPECT_EQ(Peeked.Status, HeaderStatus::TooLarge);
   EXPECT_EQ(Peeked.Length, UINT32_MAX);
 }
+
+TEST(Framing, ALengthIsCheckedAgainstTheLimitGiven) {
+  for (const std::uint32_t Limit :
+       {maestro::net::MaxJoinSize, maestro::net::MaxControlPayloadSize}) {
+    EXPECT_EQ(peekHeader(header(Limit), Limit).Status, HeaderStatus::Ready)
+        << Limit;
+    EXPECT_EQ(peekHeader(header(Limit + 1), Limit).Status,
+              HeaderStatus::TooLarge)
+        << Limit;
+  }
+}

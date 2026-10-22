@@ -7,10 +7,11 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * The faults the network, the fleet and the controller's encode workers may inject into a run. The
- * drop and duplicate rates apply to unordered channels only, because an ordered channel cannot lose
- * a frame without breaking the connection. {@code offloadFailureRate} is the probability that an
- * offloaded encode throws, until the run settles ({@link Simulation#settleFrom}).
+ * The faults the network, the fleet, the controller process and its encode workers may inject into
+ * a run. The drop and duplicate rates apply to unordered channels only, because an ordered channel
+ * cannot lose a frame without breaking the connection. {@code offloadFailureRate} is the
+ * probability that an offloaded encode throws, until the run settles ({@link
+ * Simulation#settleFrom}).
  */
 public record FaultPlan(
     int minLatencySteps,
@@ -20,33 +21,49 @@ public record FaultPlan(
     double offloadFailureRate,
     List<Fault> faults) {
 
-  /** Scheduled fleet fault, applied at the start of its tick. */
+  /** Scheduled fault, applied at the start of its tick. */
   public sealed interface Fault {
     long tick();
+  }
 
+  /** A fault of one node. */
+  public sealed interface NodeFault extends Fault {
     NodeId node();
   }
 
   /** Process death: state is lost and the peer sees a reset. */
-  public record NodeDied(long tick, NodeId node) implements Fault {}
+  public record NodeDied(long tick, NodeId node) implements NodeFault {}
 
   /**
    * The connection breaks but the process survives, so the node keeps its region state. This is the
    * case resume-from-N is for: the node reconnects still holding most of the stream.
    */
-  public record LinkReset(long tick, NodeId node) implements Fault {}
+  public record LinkReset(long tick, NodeId node) implements NodeFault {}
 
-  public record NodeRecovered(long tick, NodeId node) implements Fault {}
+  public record NodeRecovered(long tick, NodeId node) implements NodeFault {}
 
   /** Only the failure detector can find a partition, unlike a disconnect. */
-  public record Partitioned(long tick, NodeId node, boolean active) implements Fault {}
+  public record Partitioned(long tick, NodeId node, boolean active) implements NodeFault {}
 
   /**
    * The ordered channels stop delivering while the link stays up, like TCP during a retransmit
    * backoff, and unordered frames still get through. Held frames arrive when the stall ends. This
    * is how a request can arrive before the profile it names.
    */
-  public record Stalled(long tick, NodeId node, boolean active) implements Fault {}
+  public record Stalled(long tick, NodeId node, boolean active) implements NodeFault {}
+
+  /**
+   * The node's process freezes, as in a long collection pause: its links stay up, but it serves
+   * nothing, sends no heartbeat, and handles what reaches it only once it resumes. This is the case
+   * only a failure detector can tell from a slow node.
+   */
+  public record Paused(long tick, NodeId node, boolean active) implements NodeFault {}
+
+  /**
+   * The controller process restarts with a new run id. Its links and everything it had in flight
+   * are gone, and the nodes keep their world state from the old run.
+   */
+  public record ControllerRestarted(long tick) implements Fault {}
 
   public FaultPlan {
     if (minLatencySteps < 1 || maxLatencySteps < minLatencySteps) {
@@ -67,9 +84,10 @@ public record FaultPlan(
 
   /**
    * Share of sampled plans with nothing that can delay or lose a request, so a sweep has runs the
-   * latency SLO applies to. They still draw a latency range and a duplicate rate.
+   * latency SLO applies to. They still draw a latency range and a duplicate rate, and only those
+   * whose fleet can serve their load in time are held to the SLO, about a quarter of them.
    */
-  static final double CLEAN_CHANCE = 0.25;
+  static final double CLEAN_CHANCE = 0.4;
 
   /**
    * Faults drawn per run. Several may hit one node, so the sweep covers a failure during a
@@ -86,25 +104,13 @@ public record FaultPlan(
   /** Floor of the sampled latency range, in steps. Twenty steps is one millisecond. */
   static final int MAX_MIN_LATENCY_STEPS = 20;
 
-  /**
-   * Widest sampled range. The worst case a draw can reach, {@code MAX_MIN_LATENCY_STEPS +
-   * MAX_LATENCY_SPAN_STEPS}, must not pass {@link #MAX_ONE_WAY_LATENCY_STEPS}. Otherwise a request
-   * is late whatever the controller does, and the latency invariant says nothing about it. At 1000
-   * steps per tick, 400 is 20ms.
-   */
+  /** Widest sampled range. At 1000 steps per tick, 400 is 20ms. */
   static final int MAX_LATENCY_SPAN_STEPS = 400;
 
   /**
-   * Longest one-way latency at which a correct controller still meets the SLO. A batch leaves at a
-   * tick boundary, must arrive by the fleet's service step to be served in the next tick, and its
-   * answer must arrive before that tick ends, where the controller also checks what to resend.
-   */
-  static final int MAX_ONE_WAY_LATENCY_STEPS =
-      Simulation.STEPS_PER_TICK - Simulation.SERVICE_STEP - 2;
-
-  /**
-   * Share of clean plans whose latency sits just under {@link #MAX_ONE_WAY_LATENCY_STEPS} each way,
-   * so a round trip takes nearly a tick. Such a run has no slack: a tick added by the controller
+   * Share of clean plans whose latency sits just under the edge each way: the longest at which one
+   * request served at the slowest node's highest cost is still answered in the tick its batch
+   * arrives in ({@link #edgeLatency}). Such a run has no slack: a tick added by the controller
    * misses the SLO.
    */
   static final double EDGE_CHANCE = 0.5;
@@ -126,19 +132,31 @@ public record FaultPlan(
   }
 
   /**
-   * One draw from the full range of latency, loss, duplication and encode failure, plus up to
-   * {@link #MAX_FAULTS} fleet faults that may overlap on one node or hit several nodes at once.
-   * Each fault starts inside {@code activeTicks} and, unless the node is permanently lost, ends
-   * there too, so the quiet tail of the run can settle. One plan in {@link #CLEAN_CHANCE} has only
-   * latency and duplication, and a share {@link #EDGE_CHANCE} of those has latency at the edge.
+   * The longest one-way latency at which a request served in {@code maxCostSteps} by an idle node
+   * is answered within the tick its batch arrives in: the batch leaves at the end of a tick, and
+   * the answer must arrive before that tick's successor ends, where the controller also checks what
+   * to resend. 0 if no latency is short enough.
    */
-  public static FaultPlan sample(Rng rng, int nodeCount, long activeTicks) {
+  static int edgeLatency(int maxCostSteps) {
+    return Math.max(0, (Simulation.STEPS_PER_TICK - 1 - maxCostSteps) / 2);
+  }
+
+  /**
+   * One draw from the full range of latency, loss, duplication and encode failure, plus up to
+   * {@link #MAX_FAULTS} faults that may overlap on one node or hit several nodes at once. Each
+   * fault starts inside {@code activeTicks} and, unless the node is permanently lost, ends there
+   * too, so the quiet tail of the run can settle. One plan in {@link #CLEAN_CHANCE} has only
+   * latency and duplication, and a share {@link #EDGE_CHANCE} of those has latency at the edge for
+   * a fleet whose slowest request costs {@code maxCostSteps}.
+   */
+  public static FaultPlan sample(Rng rng, int nodeCount, long activeTicks, int maxCostSteps) {
     int minLatency = 1 + rng.nextInt(MAX_MIN_LATENCY_STEPS);
     int maxLatency = minLatency + rng.nextInt(MAX_LATENCY_SPAN_STEPS);
     double duplicateRate = rng.nextDouble() * MAX_SAMPLED_RATE;
     if (rng.nextDouble() < CLEAN_CHANCE) {
-      if (rng.nextDouble() < EDGE_CHANCE) {
-        maxLatency = MAX_ONE_WAY_LATENCY_STEPS;
+      int edge = edgeLatency(maxCostSteps);
+      if (rng.nextDouble() < EDGE_CHANCE && edge > EDGE_SPAN_STEPS) {
+        maxLatency = edge;
         minLatency = maxLatency - rng.nextInt(EDGE_SPAN_STEPS);
       }
       return new FaultPlan(minLatency, maxLatency, 0.0, duplicateRate, 0.0, List.of());
@@ -160,7 +178,7 @@ public record FaultPlan(
       long start = 1 + rng.nextLong(activeTicks - MAX_FAULT_SPAN_TICKS);
       long end = start + 1 + rng.nextInt(MAX_FAULT_SPAN_TICKS - 1);
       plan =
-          switch (rng.nextInt(4)) {
+          switch (rng.nextInt(6)) {
             case 0 ->
                 rng.nextDouble() < PERMANENT_LOSS_CHANCE
                     ? plan.with(new NodeDied(start, node))
@@ -168,6 +186,8 @@ public record FaultPlan(
             case 1 ->
                 plan.with(new Partitioned(start, node, true), new Partitioned(end, node, false));
             case 2 -> plan.with(new Stalled(start, node, true), new Stalled(end, node, false));
+            case 3 -> plan.with(new Paused(start, node, true), new Paused(end, node, false));
+            case 4 -> plan.with(new ControllerRestarted(start));
             default -> plan.with(new LinkReset(start, node));
           };
     }

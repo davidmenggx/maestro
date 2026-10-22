@@ -1,6 +1,7 @@
 # ---- AI usage ----
 .claude/settings.local.json
 .claude/hmonkey.json
+.claude/worktrees/
 
 # ---- Build outputs ----
 /build/

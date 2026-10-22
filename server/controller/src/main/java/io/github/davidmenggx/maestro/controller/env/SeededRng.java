@@ -4,8 +4,8 @@ import java.util.random.RandomGenerator;
 import java.util.random.RandomGeneratorFactory;
 
 /**
- * The only {@link Rng} implementation. Production seeds it once at startup and the simulator seeds
- * it per run. The same seed always gives the same sequence, so a failing run can be replayed.
+ * The only {@link Rng} implementation. The same seed always gives the same sequence, so a failing
+ * run can be replayed from its seed.
  */
 public final class SeededRng implements Rng {
 

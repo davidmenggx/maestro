@@ -36,9 +36,7 @@ public interface WorldOutput {
     /** The mob withdrew the request before it was answered. */
     CANCELED,
     /** The mob sent a new request before this one was answered, so this one was abandoned. */
-    SUPERSEDED,
-    /** Dropped to meet the latency SLO when the fleet is saturated. */
-    SHED
+    SUPERSEDED
   }
 
   /** One node of the path, with the resolved type the navigation reads when following it. */
