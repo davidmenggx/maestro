@@ -160,8 +160,8 @@ final class Failover {
     metrics.gauge("failover.waiting", waiting.size());
   }
 
-  /** The mob left the world. */
-  void mobRemoved(int mobId) {
+  /** The mob no longer waits for a full search: it left, or something else served its call. */
+  void forget(int mobId) {
     waiting.remove(mobId);
   }
 

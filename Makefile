@@ -89,8 +89,11 @@ run-server: schema-java ## Boot a dev server (WORLD=<name> loads worlds/<name>)
 test-boot: schema-java ## Boot the released mod and assert the mixins applied
 	tools/boot-smoke-test.sh
 
-test-e2e: node schema-java ## Run the released mod against a real node (OFFLOAD=shadow|on, both by default)
-	$(foreach mode,$(if $(OFFLOAD),$(OFFLOAD),shadow on),OFFLOAD=$(mode) tools/e2e-test.sh &&) true
+# Each run is `offload:faults`.
+E2E_RUNS := $(if $(OFFLOAD),$(OFFLOAD):$(FAULTS),shadow: on: on:failover)
+
+test-e2e: node schema-java ## Run the released mod against a real node (OFFLOAD=shadow|on FAULTS=failover pick one run; all by default)
+	$(foreach run,$(E2E_RUNS),OFFLOAD=$(word 1,$(subst :, ,$(run))) FAULTS=$(word 2,$(subst :, ,$(run))) tools/e2e-test.sh &&) true
 
 capture: schema-java ## Record parity fixtures into fixtures/parity (SEED="1 2" N=cases)
 	tools/capture-fixtures.sh "$(if $(SEED),$(SEED),$(error set SEED, e.g. SEED="1 2 3"))" \

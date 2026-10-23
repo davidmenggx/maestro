@@ -45,9 +45,9 @@ public final class RequestTracker {
 
   /**
    * {@code request} is kept for resends. {@code startChunk} is the chunk the search starts in.
-   * {@code dueTick} is when the latest copy should be answered, or {@link #NOT_SENT} while it waits
-   * to be encoded. An {@code abandoned} request is reported dropped but still counts against its
-   * node.
+   * {@code firstSent} is when the first copy left. {@code dueTick} is when the latest copy should
+   * be answered. Both are {@link #NOT_SENT} until then. An {@code abandoned} request is reported
+   * dropped but still counts against its node, and is {@code canceled} if a cancel was sent for it.
    */
   private record Outstanding(
       int mobId,
@@ -56,23 +56,55 @@ public final class RequestTracker {
       long startChunk,
       long issuedTick,
       Frames.Request request,
+      long firstSent,
       long dueTick,
       int resends,
-      boolean abandoned) {
+      boolean abandoned,
+      boolean canceled) {
 
-    Outstanding sent(long due) {
+    Outstanding sent(long tick, long due) {
       return new Outstanding(
-          mobId, node, region, startChunk, issuedTick, request, due, resends, abandoned);
+          mobId,
+          node,
+          region,
+          startChunk,
+          issuedTick,
+          request,
+          resends == 0 ? tick : firstSent,
+          due,
+          resends,
+          abandoned,
+          canceled);
     }
 
     Outstanding resent() {
       return new Outstanding(
-          mobId, node, region, startChunk, issuedTick, request, NOT_SENT, resends + 1, abandoned);
+          mobId,
+          node,
+          region,
+          startChunk,
+          issuedTick,
+          request,
+          firstSent,
+          NOT_SENT,
+          resends + 1,
+          abandoned,
+          canceled);
     }
 
-    Outstanding abandon() {
+    Outstanding abandon(boolean cancel) {
       return new Outstanding(
-          mobId, node, region, startChunk, issuedTick, request, dueTick, resends, true);
+          mobId,
+          node,
+          region,
+          startChunk,
+          issuedTick,
+          request,
+          firstSent,
+          dueTick,
+          resends,
+          true,
+          cancel);
     }
   }
 
@@ -276,7 +308,17 @@ public final class RequestTracker {
     put(
         requestId,
         new Outstanding(
-            mobId, node, region, startChunk, event.tick(), request, NOT_SENT, 0, false));
+            mobId,
+            node,
+            region,
+            startChunk,
+            event.tick(),
+            request,
+            NOT_SENT,
+            NOT_SENT,
+            0,
+            false,
+            false));
     load.batch.put(requestId, request);
     health.admitted(node, requestId, event.tick());
   }
@@ -447,8 +489,9 @@ public final class RequestTracker {
   }
 
   /**
-   * Acts on requests due by now, in issue order. Live ones rejoin the batch; abandoned ones stop
-   * counting.
+   * Acts on requests due by now, in issue order. One whose first copy fell due unanswered shows the
+   * node missed it, unless it was canceled. Live ones and probes rejoin the batch; other abandoned
+   * ones stop counting.
    */
   void settleDue(long tick) {
     TreeSet<Long> due = new TreeSet<>();
@@ -463,7 +506,10 @@ public final class RequestTracker {
     }
     for (long requestId : due) {
       Outstanding request = outstanding.get(requestId);
-      if (request.abandoned()) {
+      if (request.resends() == 0 && !request.canceled()) {
+        health.missed(request.node(), request.firstSent());
+      }
+      if (request.abandoned() && !health.probing(request.node(), requestId)) {
         remove(requestId);
         givenUp.put(requestId, new GivenUp(request.node(), request.issuedTick()));
         continue;
@@ -533,20 +579,17 @@ public final class RequestTracker {
     // when the batch leaves.
     long tick = env.clock().tick();
     long due = tick + RESEND_TICKS + (expectedQueue(node, tick) + batch.size()) / nodeCapacity;
-    int first = 0;
     for (Frames.Request request : batch) {
       Outstanding waiting = outstanding.get(request.requestId());
       if (waiting != null) {
-        first += waiting.resends() == 0 ? 1 : 0;
-        put(request.requestId(), waiting.sent(due));
+        put(request.requestId(), waiting.sent(tick, due));
       }
     }
-    health.sent(node, tick, first);
   }
 
   /**
    * Returns a given-up batch's waiting requests and cancels to the node's next batch if its link
-   * stands.
+   * stands. Waiting means live, or the probe.
    */
   private void requeue(NodeId node, long attempt, List<Frames.Request> batch, List<Long> cancels) {
     if (links.attempt(node) != attempt) {
@@ -554,9 +597,12 @@ public final class RequestTracker {
     }
     Load load = loads.get(node);
     for (Frames.Request request : batch) {
-      Outstanding waiting = outstanding.get(request.requestId());
-      if (waiting != null && !waiting.abandoned() && waiting.dueTick() == NOT_SENT) {
-        load.batch.put(request.requestId(), request);
+      long requestId = request.requestId();
+      Outstanding waiting = outstanding.get(requestId);
+      if (waiting != null
+          && waiting.dueTick() == NOT_SENT
+          && (!waiting.abandoned() || health.probing(node, requestId))) {
+        load.batch.put(requestId, request);
       }
     }
     load.cancels.addAll(cancels);
@@ -613,8 +659,12 @@ public final class RequestTracker {
   /**
    * Reports a live request dropped because its mob no longer wants it. A request whose first copy
    * awaits a batch is just removed. Otherwise it counts against the node until due or answered, and
-   * a sent copy is canceled (best effort). A first copy still being encoded is not canceled: the
-   * cancel would race it, and a node honoring one would look unhealthy.
+   * a sent copy is canceled (best effort). Two are not canceled:
+   *
+   * <ul>
+   *   <li>A first copy still being encoded: the cancel would race it.
+   *   <li>The probe: its answer is what brings the node back, so it is sent until answered.
+   * </ul>
    */
   private void abandon(long requestId, DropReason reason) {
     Outstanding request = outstanding.get(requestId);
@@ -623,16 +673,21 @@ public final class RequestTracker {
     }
     requestByMob.remove(request.mobId());
     Load load = loads.get(request.node());
-    boolean waiting = load.batch.remove(requestId) != null;
+    boolean probe = health.probing(request.node(), requestId);
+    boolean waiting = load.batch.containsKey(requestId);
     if (waiting && request.resends() == 0) {
+      load.batch.remove(requestId);
       remove(requestId);
       health.withdrawn(request.node(), requestId);
+    } else if (probe) {
+      put(requestId, request.abandon(false));
     } else {
       boolean encoding = !waiting && request.dueTick() == NOT_SENT && request.resends() == 0;
+      load.batch.remove(requestId);
       if (!encoding) {
         load.cancels.add(requestId);
       }
-      put(requestId, request.abandon());
+      put(requestId, request.abandon(!encoding));
     }
     drop(request.mobId(), reason);
   }

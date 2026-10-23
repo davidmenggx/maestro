@@ -162,6 +162,40 @@ class PathOffloadTest {
   }
 
   @Test
+  void aMobAskingAgainWhereItsHoldEndedIsHeldAgainAndKeepsItsRequest() {
+    Path ended = search(START, TARGET);
+    navigator.follow(ended, TARGET);
+    offload.pathDropped(MOB, DropReason.TIMEOUT);
+    assertSame(ended, navigator.path);
+
+    // The new hold has the ended one's node, which the navigation would keep in its place.
+    Path placeholder = search(START, TARGET);
+    navigator.follow(placeholder, TARGET);
+    offload.tickEnding();
+
+    assertSame(placeholder, navigator.path);
+    assertTrue(HeldPaths.isHeld(navigator.path));
+    assertEquals(0, controller.cancels());
+    offload.pathComputed(answer(START, TARGET, line(0, 6)));
+    assertEquals(1, offload.outcomes("APPLIED"));
+  }
+
+  @Test
+  void aFinishedPathAtTheMobsBlockDoesNotKeepItFromBeingHeld() {
+    Path arrived = path(List.of(START));
+    navigator.follow(arrived, START);
+    arrived.advance();
+    assertTrue(arrived.isDone());
+
+    Path placeholder = search(START, TARGET);
+    navigator.follow(placeholder, TARGET);
+    offload.tickEnding();
+
+    assertSame(placeholder, navigator.path);
+    assertEquals(0, controller.cancels());
+  }
+
+  @Test
   void aGoalThatStopsTheNavigationAndHandsItThePathBackKeepsItsRequest() {
     // The attack goal's `canUse` gets the stroll path, the selector stops the stroll (and the
     // navigation), then the attack goal follows that path again.
@@ -469,6 +503,40 @@ class PathOffloadTest {
   }
 
   @Test
+  void aMobWhoseNodeTakesItsNextRequestNoLongerWaitsForAFullSearch() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    spendTheBudget();
+    navigator.follow(search(START, TARGET), TARGET);
+    assertTrue(offload.failover().waits(MOB));
+
+    // The node is back: the cheap path is the placeholder, and the answer replaces it.
+    controller.refuseWith = null;
+    Path placeholder = search(START, TARGET);
+    navigator.follow(placeholder, TARGET);
+    assertFalse(offload.failover().waits(MOB));
+
+    clock.tick++;
+    offload.tickEnding();
+    assertEquals(List.of(), laterSearches);
+    assertSame(placeholder, navigator.path);
+    offload.pathComputed(answer(START, TARGET, line(0, 6)));
+    assertEquals(1, offload.outcomes("APPLIED"));
+  }
+
+  @Test
+  void aMobSearchedInFullAfterARefusalNoLongerWaitsForAFullSearch() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    spendTheBudget();
+    navigator.follow(search(START, TARGET), TARGET);
+    assertTrue(offload.failover().waits(MOB));
+
+    controller.refuseWith = DropReason.QUEUE_DEPTH;
+    search(START, TARGET);
+
+    assertFalse(offload.failover().waits(MOB));
+  }
+
+  @Test
   void otherRefusalsAreSearchedByVanillaWithoutTheFailover() {
     controller.refuseWith = DropReason.UNAVAILABLE;
     spendTheBudget();
@@ -615,8 +683,9 @@ class PathOffloadTest {
   }
 
   /**
-   * A navigation that takes a path the way vanilla's does: one with the same nodes is kept. It
-   * tells the offload what it was handed, as the navigation mixin does.
+   * A navigation that takes a path the way vanilla's does: one with the same nodes is kept. As the
+   * navigation mixin does, it tells the offload what it was handed, and a held path replaces one
+   * that would swallow it.
    */
   private final class FakeNavigator implements PathOffload.Navigator {
     final int mob;
@@ -644,6 +713,9 @@ class PathOffloadTest {
         offload.handed(mob, next);
       }
       this.target = target;
+      if (HeldPaths.swallows(path, next)) {
+        path = null;
+      }
       if (!next.sameAs(path)) {
         path = next;
       }

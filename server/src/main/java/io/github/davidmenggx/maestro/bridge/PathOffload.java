@@ -303,34 +303,31 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     MobState state = mobs.computeIfAbsent(mobId, id -> new MobState());
     BlockPos start = call.start();
     BlockPos target = call.target();
-    if (mode == Offload.ON) {
-      Answer latest = state.latest;
-      state.latest = null;
-      if (latest != null
-          && latest.start().equals(start)
-          && latest.target().equals(target)
-          && clock.tick() - latest.result().issuedTick() <= FRESH_TICKS) {
-        record(Outcome.REUSED);
-        return toPath(latest.result());
-      }
+    if (mode == Offload.SHADOW) {
+      return shadow(mobId, navigator, state, call, vanilla);
+    }
+    Answer latest = state.latest;
+    state.latest = null;
+    if (latest != null
+        && latest.start().equals(start)
+        && latest.target().equals(target)
+        && clock.tick() - latest.result().issuedTick() <= FRESH_TICKS) {
+      record(Outcome.REUSED);
+      failover.forget(mobId);
+      return toPath(latest.result());
     }
     Pending pending = state.pending;
     if (pending != null && pending.matches(start, target)) {
       // Asked again for the answer it already waits for.
-      return mode == Offload.SHADOW ? vanilla.search() : placeholder(navigator, pending);
+      return placeholder(navigator, pending);
     }
 
-    if (mode == Offload.SHADOW) {
-      Path path = vanilla.search();
-      if (request(mobId, navigator, state, call) == null) {
-        state.pending = new Pending(start, target, VanillaPath.of(path));
-      }
-      return path;
-    }
     DropReason refused = request(mobId, navigator, state, call);
     if (refused == DropReason.UNAVAILABLE) {
       return failover.serve(mobId, navigator, target, vanilla);
     }
+    // Served by its node or by vanilla in full, so a full search in the failover's turns is moot.
+    failover.forget(mobId);
     if (refused != null) {
       return vanilla.search();
     }
@@ -338,6 +335,20 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     state.pending = sent;
     waiting.add(mobId);
     return placeholder(navigator, sent);
+  }
+
+  /** Vanilla's answer, which the fleet's answer to the same search is compared with on arrival. */
+  private Path shadow(
+      int mobId, Navigator navigator, MobState state, SearchCall call, Searches.Vanilla vanilla) {
+    Path path = vanilla.search();
+    Pending pending = state.pending;
+    if (pending != null && pending.matches(call.start(), call.target())) {
+      return path;
+    }
+    if (request(mobId, navigator, state, call) == null) {
+      state.pending = new Pending(call.start(), call.target(), VanillaPath.of(path));
+    }
+    return path;
   }
 
   /**
@@ -523,7 +534,7 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
   public void mobRemoved(int mobId) {
     mobs.remove(mobId);
     waiting.remove(mobId);
-    failover.mobRemoved(mobId);
+    failover.forget(mobId);
   }
 
   /** A held path the mob follows ends, so its goal finishes and asks again later. */

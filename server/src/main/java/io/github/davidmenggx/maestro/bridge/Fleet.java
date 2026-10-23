@@ -57,6 +57,9 @@ public final class Fleet implements AutoCloseable {
   private final Controller controller;
   private final Set<String> logged = new LinkedHashSet<>();
 
+  /** Each node's state as last logged. */
+  private final Map<NodeId, String> states = new LinkedHashMap<>();
+
   private Fleet(
       ServerLevel level,
       RegionMap regions,
@@ -73,6 +76,9 @@ public final class Fleet implements AutoCloseable {
     this.offload = offload;
     this.paths = paths;
     this.controller = controller;
+    for (NodeId node : regions.nodes()) {
+      states.put(node, state(node));
+    }
   }
 
   /** The active fleet, or null if none. */
@@ -150,9 +156,28 @@ public final class Fleet implements AutoCloseable {
     handOver();
     paths.tickEnding();
     controller.accept(new WorldEvent.TickEnded(clock.tick()));
+    logChangedStates();
     if (clock.tick() % SELF_CHECK_TICKS == 0) {
       selfCheck();
     }
+  }
+
+  /** Logs each node whose link or service changed, with what became of the requests so far. */
+  private void logChangedStates() {
+    for (Map.Entry<NodeId, String> entry : states.entrySet()) {
+      String now = state(entry.getKey());
+      if (!now.equals(entry.getValue())) {
+        entry.setValue(now);
+        LOG.info("Maestro: {} is {}; so far {}", entry.getKey(), now, paths.summary());
+      }
+    }
+  }
+
+  private String state(NodeId node) {
+    if (!controller.linked(node)) {
+      return "not linked";
+    }
+    return controller.inService(node) ? "linked and in service" : "linked but out of service";
   }
 
   private void handOver() {

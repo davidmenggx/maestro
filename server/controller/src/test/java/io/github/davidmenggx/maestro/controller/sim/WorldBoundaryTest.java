@@ -32,7 +32,20 @@ class WorldBoundaryTest {
   private static final short MOB_CLASS = 1;
   private static final int MOB = 1;
   private static final int WARMUP_MOB = 2;
+  private static final int OTHER_MOB = 3;
+  private static final int PROBING_MOB = 4;
+  private static final int CROWD = 100;
+  private static final int CROWD_SIZE = 20;
   private static final short OTHER_CLASS = 2;
+
+  /** A tick after the circuit of a node whose path went quiet at tick 16 half opens. */
+  private static final long PROBE_TICK = 37;
+
+  /** A node that serves a request in a twelfth of a tick, always. */
+  private static final Scenario QUICK =
+      Scenario.DEFAULT
+          .with(Scenario.Count.WORKER_CAPACITY, 12)
+          .with(Scenario.Count.COST_SPREAD_PERCENT, 0);
 
   /** Corner of the region of the default grid on the positive side of the origin's. */
   private static final int HERE_REGION_MIN = RegionLayout.cellMin(1);
@@ -521,12 +534,123 @@ class WorldBoundaryTest {
     assertEquals(0, run.out.answered(), run.describe());
   }
 
+  /**
+   * One request goes unanswered, copies and all. A later one, sent once the first is past its
+   * budget, is answered by its due tick, so it shows the request path works.
+   */
+  @Test
+  void aRequestAnsweredByItsDueTickKeepsItsNodeInServiceAfterAnEarlierOneWasLost() {
+    // The link is slow, so the owner holds the chunk a few ticks later than usual.
+    List<WorldEvent> script = prelude(6);
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.MobSpawned(0, OTHER_MOB, HERE));
+    script.add(new WorldEvent.PathRequested(10, MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    script.add(new WorldEvent.PathRequested(25, OTHER_MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    // An answer takes more than a tick, so the later one comes in after the next tick starts.
+    FaultPlan plan =
+        new FaultPlan(
+            600,
+            600,
+            0,
+            0,
+            0,
+            List.of(
+                new FaultPlan.Partitioned(10, OWNER, true),
+                new FaultPlan.Partitioned(22, OWNER, false)));
+
+    SimRun run = SimRun.scripted(1L, plan, 40, QUICK, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.TIMEOUT), run.describe());
+    assertEquals(1, run.out.answered(), run.describe());
+    assertEquals(0, run.sim.metrics().total("node.quiet"), run.describe());
+  }
+
+  /**
+   * A request canceled before it fell due may be dropped by its node, as here, so it shows nothing.
+   * The only other unanswered request is then not enough to take the node out of service.
+   */
+  @Test
+  void aRequestCanceledBeforeItFellDueShowsNothingAboutThePath() {
+    List<WorldEvent> script = prelude();
+    // Queued ahead of the canceled request, so the node still holds it when the cancel arrives.
+    for (int i = 0; i < CROWD_SIZE; i++) {
+      script.add(new WorldEvent.MobSpawned(0, CROWD + i, HERE));
+      script.add(new WorldEvent.PathRequested(4, CROWD + i, MOB_CLASS, HERE, THERE, SEARCH));
+    }
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(4, MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    script.add(new WorldEvent.PathCanceled(5, MOB));
+    script.add(new WorldEvent.MobSpawned(0, OTHER_MOB, HERE));
+    script.add(new WorldEvent.PathRequested(17, OTHER_MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(
+                new FaultPlan.Partitioned(17, OWNER, true),
+                new FaultPlan.Partitioned(30, OWNER, false));
+
+    SimRun run = SimRun.scripted(1L, plan, 40, QUICK.with(Scenario.Count.WORKERS, 1), script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, run.sim.node(OWNER).canceledRequests(), run.describe());
+    assertEquals(CROWD_SIZE, run.out.answered(), run.describe());
+    assertEquals(1, run.out.dropped(DropReason.TIMEOUT), run.describe());
+    assertEquals(0, run.sim.metrics().total("node.quiet"), run.describe());
+  }
+
+  /**
+   * The probe leaves into a blackhole and its mob gives it up there. It is still resent, so a copy
+   * sent once the blackhole ends is answered and the node is back in service.
+   */
+  @Test
+  void aProbeWhoseMobGivesItUpIsResentUntilAnswered() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.MobSpawned(0, OTHER_MOB, HERE));
+    script.add(new WorldEvent.MobSpawned(0, PROBING_MOB, HERE));
+    // Both are lost, so the path goes quiet and the node leaves service, then half opens.
+    script.add(new WorldEvent.PathRequested(4, MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    script.add(new WorldEvent.PathRequested(4, OTHER_MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    script.add(
+        new WorldEvent.PathRequested(PROBE_TICK, PROBING_MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    script.add(new WorldEvent.PathCanceled(PROBE_TICK + 2, PROBING_MOB));
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(
+                new FaultPlan.Blackholed(4, OWNER, true),
+                new FaultPlan.Blackholed(PROBE_TICK + 2, OWNER, false));
+
+    SimRun run = SimRun.scripted(1L, plan, PROBE_TICK + 20, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    String owner = OWNER.toString();
+    assertEquals(1, run.sim.metrics().counter("node.quiet", "node", owner), run.describe());
+    assertEquals(
+        1,
+        run.sim.metrics().counter("node.circuit", "node", owner, "state", "probing"),
+        run.describe());
+    assertEquals(
+        1,
+        run.sim.metrics().counter("node.circuit", "node", owner, "state", "closed"),
+        run.describe());
+    assertEquals(
+        1,
+        run.sim.metrics().counter("node.circuit", "node", owner, "state", "open"),
+        run.describe());
+    assertEquals(1, run.out.dropped(DropReason.CANCELED), run.describe());
+  }
+
   /** Loads the world and registers {@code MOB_CLASS}, which costs one request per script. */
   private static List<WorldEvent> prelude() {
+    return prelude(2);
+  }
+
+  /** As above, registering at {@code tick}, by which the owner must hold the chunk at HERE. */
+  private static List<WorldEvent> prelude(long tick) {
     List<WorldEvent> script = new ArrayList<>(chunkLoads(0));
     script.add(new WorldEvent.MobSpawned(0, WARMUP_MOB, HERE));
-    script.add(new WorldEvent.PathRequested(2, WARMUP_MOB, MOB_CLASS, HERE, THERE, SEARCH));
-    script.add(new WorldEvent.MobRemoved(2, WARMUP_MOB));
+    script.add(new WorldEvent.PathRequested(tick, WARMUP_MOB, MOB_CLASS, HERE, THERE, SEARCH));
+    script.add(new WorldEvent.MobRemoved(tick, WARMUP_MOB));
     return script;
   }
 

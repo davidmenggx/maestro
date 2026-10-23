@@ -90,6 +90,20 @@ public final class HeldPaths {
     return false;
   }
 
+  /**
+   * Whether a navigation following {@code kept} would swallow the held path {@code handed}: it
+   * keeps a path whose nodes match the one handed, so a hold handed where an ended hold or a
+   * finished path lies would never be followed.
+   */
+  public static boolean swallows(Path kept, Path handed) {
+    return kept != null
+        && handed != null
+        && kept != handed
+        && kept.sameAs(handed)
+        && isHeld(handed)
+        && !isHeld(kept);
+  }
+
   /** Ends the hold. The path is done from now on. */
   public static void release(Path path) {
     ((Marks) (Object) path).maestro$setHeldUntil(NOT_HELD);

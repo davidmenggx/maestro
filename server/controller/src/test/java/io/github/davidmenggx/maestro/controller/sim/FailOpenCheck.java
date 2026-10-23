@@ -4,6 +4,7 @@ import io.github.davidmenggx.maestro.controller.core.Encoder;
 import io.github.davidmenggx.maestro.controller.core.NodeHealth;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -17,10 +18,12 @@ import java.util.Set;
  *
  * <p>An episode is one stretch in which a node cannot answer, within one controller run. Once
  * earlier answers have arrived, the controller may send only the requests that show the path is
- * quiet ({@link NodeHealth#QUIET_REQUESTS} within {@link NodeHealth#QUIET_WINDOW_TICKS}, the oldest
- * {@link NodeHealth#QUIET_TICKS} old), those admitted before it noticed, and then probes, each
- * after a failed probe and a doubling backoff. A link heard going down takes its requests with it,
- * so only requests sent since show anything.
+ * quiet, those admitted before it noticed, and then probes, each after a failed probe and a
+ * doubling backoff. A request shows the path is quiet once its first copy fell due unanswered,
+ * which its resend shows on the wire: {@link NodeHealth#QUIET_REQUESTS} of them first sent within
+ * {@link NodeHealth#QUIET_WINDOW_TICKS}, the oldest {@link NodeHealth#QUIET_TICKS} old. A request
+ * that is never resent is not counted, so the bound errs late. A link heard going down takes its
+ * requests with it, so only requests sent since show anything.
  */
 final class FailOpenCheck {
 
@@ -32,11 +35,21 @@ final class FailOpenCheck {
 
   private record Sent(long run, NodeId node, long requestId) {}
 
-  /** Ticks at which requests were first sent to the node, and at which its link was heard down. */
+  /**
+   * A request first sent at {@code firstSent} whose first copy fell due unanswered, as its resend
+   * at {@code resent} shows. The controller saw it fall due by then.
+   */
+  record Missed(long firstSent, long resent) {}
+
+  /**
+   * Ticks at which requests were first sent to the node, its requests that fell due, and ticks at
+   * which its link was heard down.
+   */
   private static final class Episode {
     final long run;
     final long start;
     final List<Long> firstSends = new ArrayList<>();
+    final List<Missed> missed = new ArrayList<>();
     final List<Long> linksLost = new ArrayList<>();
 
     Episode(long run, long start) {
@@ -46,7 +59,13 @@ final class FailOpenCheck {
   }
 
   private final Map<NodeId, Episode> open = new LinkedHashMap<>();
-  private final Set<Sent> sent = new LinkedHashSet<>();
+
+  /** When each request was first sent. */
+  private final Map<Sent, Long> firstSent = new LinkedHashMap<>();
+
+  /** Requests sent again at least once. */
+  private final Set<Sent> resent = new LinkedHashSet<>();
+
   private final List<String> violations = new ArrayList<>();
   private long judged;
 
@@ -70,14 +89,21 @@ final class FailOpenCheck {
     }
   }
 
-  /** A request copy left for the node. Only its first copy counts. */
+  /**
+   * A request copy left for the node. Its first copy counts as a new request, and its second shows
+   * that the first fell due unanswered.
+   */
   void requestSent(NodeId node, long run, long requestId, long tick) {
-    if (!sent.add(new Sent(run, node, requestId))) {
-      return;
-    }
+    Sent request = new Sent(run, node, requestId);
+    Long first = firstSent.putIfAbsent(request, tick);
     Episode episode = open.get(node);
-    if (episode != null && episode.run == run) {
-      episode.firstSends.add(tick);
+    boolean counted = episode != null && episode.run == run;
+    if (first == null) {
+      if (counted) {
+        episode.firstSends.add(tick);
+      }
+    } else if (resent.add(request) && counted) {
+      episode.missed.add(new Missed(first, tick));
     }
   }
 
@@ -125,18 +151,27 @@ final class FailOpenCheck {
   }
 
   /**
-   * The tick by which the controller noticed a quiet path from requests first sent at {@code
-   * blind}, or {@link Long#MAX_VALUE} if it could not have.
+   * The tick by which the controller noticed a quiet path from the requests that fell due in {@code
+   * blind}, or {@link Long#MAX_VALUE} if it could not have. It notices once it has seen {@link
+   * NodeHealth#QUIET_REQUESTS} fall due, by their resends, the oldest is {@link
+   * NodeHealth#QUIET_TICKS} old, and none is past the window yet.
    */
-  static long noticed(List<Long> blind) {
+  static long noticed(List<Missed> blind) {
+    List<Missed> byFirstSend = new ArrayList<>(blind);
+    byFirstSend.sort(Comparator.comparingLong(Missed::firstSent));
     int last = NodeHealth.QUIET_REQUESTS - 1;
-    for (int i = 0; i + last < blind.size(); i++) {
-      if (blind.get(i + last) - blind.get(i) < NodeHealth.QUIET_WINDOW_TICKS) {
-        return Math.max(blind.get(i) + NodeHealth.QUIET_TICKS, blind.get(i + last) + 1)
-            + LATE_SEND_TICKS;
+    long noticed = Long.MAX_VALUE;
+    for (int i = 0; i + last < byFirstSend.size(); i++) {
+      long oldest = byFirstSend.get(i).firstSent();
+      long at = oldest + NodeHealth.QUIET_TICKS;
+      for (int j = i; j <= i + last; j++) {
+        at = Math.max(at, byFirstSend.get(j).resent());
+      }
+      if (at - oldest <= NodeHealth.QUIET_WINDOW_TICKS) {
+        noticed = Math.min(noticed, at + LATE_SEND_TICKS);
       }
     }
-    return Long.MAX_VALUE;
+    return noticed;
   }
 
   private void judge(NodeId node, Episode episode, long end) {
@@ -149,10 +184,17 @@ final class FailOpenCheck {
    * Adds the episode's violation to {@code found}, if any, and returns whether the bound applied.
    */
   private static boolean judge(NodeId node, Episode episode, long end, List<String> found) {
+    long blindFrom = episode.start + STRAY_ANSWER_TICKS;
     List<Long> blind = new ArrayList<>();
     for (long tick : episode.firstSends) {
-      if (tick >= episode.start + STRAY_ANSWER_TICKS) {
+      if (tick >= blindFrom) {
         blind.add(tick);
+      }
+    }
+    List<Missed> missed = new ArrayList<>();
+    for (Missed request : episode.missed) {
+      if (request.firstSent() >= blindFrom) {
+        missed.add(request);
       }
     }
     // Requests sent on each link, up to the tick its loss was heard, show the quiet only to that
@@ -163,7 +205,11 @@ final class FailOpenCheck {
     ends.add(Long.MAX_VALUE);
     for (long until : ends) {
       long after = from;
-      long onLink = noticed(blind.stream().filter(tick -> tick > after && tick <= until).toList());
+      long onLink =
+          noticed(
+              missed.stream()
+                  .filter(request -> request.firstSent() > after && request.resent() <= until)
+                  .toList());
       if (onLink <= until) {
         noticed = onLink;
         break;

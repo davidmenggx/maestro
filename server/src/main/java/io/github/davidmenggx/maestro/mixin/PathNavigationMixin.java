@@ -84,11 +84,15 @@ public abstract class PathNavigationMixin implements PathOffload.NavigationAcces
 
   /**
    * The navigation is handed a path to follow, so a search's placeholder handed here is followed on
-   * purpose, not merely left in place by a caller that did not take it.
+   * purpose, not merely left in place by a caller that did not take it. A held path replaces one
+   * with its nodes that is no longer held, which the navigation would otherwise keep.
    */
   @Inject(method = "moveTo(Lnet/minecraft/world/level/pathfinder/Path;D)Z", at = @At("HEAD"))
   private void maestro$handed(
       Path newPath, double speedModifier, CallbackInfoReturnable<Boolean> cir) {
+    if (HeldPaths.swallows(path, newPath)) {
+      path = null;
+    }
     Searches.handed(mob, newPath);
   }
 

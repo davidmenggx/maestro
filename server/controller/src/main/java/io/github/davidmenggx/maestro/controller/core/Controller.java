@@ -85,6 +85,16 @@ public final class Controller implements WorldInput, Transport.Listener {
     return streams.regionSettled(regionId);
   }
 
+  /** Whether the node is past its handshake on a live link. */
+  public boolean linked(NodeId node) {
+    return links.greeted(node);
+  }
+
+  /** Whether the node is neither suspected nor has a quiet request path. */
+  public boolean inService(NodeId node) {
+    return health.inService(node);
+  }
+
   /** Bookkeeping that must be consistent, and every violation the controller noticed itself. */
   public List<String> selfCheck() {
     List<String> found = new ArrayList<>(violations.list());

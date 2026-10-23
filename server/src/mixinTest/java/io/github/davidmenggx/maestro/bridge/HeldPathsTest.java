@@ -93,6 +93,36 @@ class HeldPathsTest {
   }
 
   @Test
+  void aHoldWherePathWithItsNodeEndedWouldBeSwallowed() {
+    Path ended = HeldPaths.hold(AT, TARGET);
+    HeldPaths.release(ended);
+    Path finished = new Path(new ArrayList<>(List.of(new Node(3, 64, -7))), AT, true);
+    finished.advance();
+    Path hold = HeldPaths.hold(AT, TARGET);
+
+    assertTrue(HeldPaths.swallows(ended, hold));
+    assertTrue(HeldPaths.swallows(finished, hold));
+  }
+
+  @Test
+  void onlyAHoldCanBeSwallowedAndOnlyByAnotherPathWithItsNodeThatIsNotHeld() {
+    Path hold = HeldPaths.hold(AT, TARGET);
+    Path stillHeld = HeldPaths.hold(AT, TARGET);
+    Path elsewhere = HeldPaths.hold(AT.east(), TARGET);
+    HeldPaths.release(elsewhere);
+    Path answer = new Path(new ArrayList<>(List.of(new Node(3, 64, -7))), AT, true);
+    Path ended = HeldPaths.hold(AT, TARGET);
+    HeldPaths.release(ended);
+
+    assertFalse(HeldPaths.swallows(stillHeld, hold));
+    assertFalse(HeldPaths.swallows(hold, hold));
+    assertFalse(HeldPaths.swallows(elsewhere, hold));
+    assertFalse(HeldPaths.swallows(null, hold));
+    assertFalse(HeldPaths.swallows(ended, answer));
+    assertFalse(HeldPaths.swallows(ended, null));
+  }
+
+  @Test
   void anOrdinaryPathIsNotHeld() {
     List<Node> nodes = new ArrayList<>(List.of(new Node(0, 64, 0), new Node(1, 64, 0)));
     Path path = new Path(nodes, TARGET, true);

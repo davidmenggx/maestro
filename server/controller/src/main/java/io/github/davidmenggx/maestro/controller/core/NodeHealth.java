@@ -8,14 +8,15 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Which nodes may be sent requests. A node leaves service on either signal: overdue heartbeats by a
- * phi accrual detector (a frozen or cut-off node), or a quiet request path (requests left and none
- * was answered within the tick budget, as with blocked datagrams or answers too late to use). A
- * node out of service gets no requests, so its mobs fall back to the server. Heartbeats alone
- * restore a suspected node. A quiet path is probed once after a backoff that doubles per failed
- * probe, and any answer in time ends it.
+ * phi accrual detector (a frozen or cut-off node), or a quiet request path (requests fell due
+ * unanswered and none was answered within the tick budget, as with blocked datagrams or answers too
+ * late to use). A node out of service gets no requests, so its mobs fall back to the server.
+ * Heartbeats alone restore a suspected node. A quiet path is probed once after a backoff that
+ * doubles per failed probe, and any answer in time ends it.
  *
  * <p>The detector uses the controller's clock at transport arrival, so server stalls do not stretch
  * learned intervals. Phi uses {@code StrictMath} so runs replay on every platform.
@@ -38,20 +39,20 @@ public final class NodeHealth {
   public static final long ACCEPTABLE_PAUSE_NANOS = 1_000_000_000L;
 
   /**
-   * Requests first sent since the last timely answer before a quiet path takes the node out of
-   * service. One lost request and its resends do not.
+   * Requests that fell due unanswered since the last timely answer before a quiet path takes the
+   * node out of service. One lost request and its resends do not.
    */
   public static final int QUIET_REQUESTS = 2;
 
   /**
-   * Ticks since the oldest of those requests left before the path counts as quiet: past the tick
-   * budget.
+   * Ticks since the oldest of those requests first left before the path counts as quiet: past the
+   * tick budget.
    */
   public static final int QUIET_TICKS = RequestTracker.MAX_TICKS_LATE + 1;
 
   /**
-   * Ticks an unanswered request counts toward a quiet path. An older loss says little about the
-   * path now.
+   * Ticks from its first send an unanswered request counts toward a quiet path. An older loss says
+   * little about the path now.
    */
   public static final int QUIET_WINDOW_TICKS = 2 * QUIET_TICKS;
 
@@ -88,10 +89,12 @@ public final class NodeHealth {
     private Circuit circuit = Circuit.CLOSED;
 
     /**
-     * Ticks at which requests were first sent since the last timely answer, the first {@link
-     * #QUIET_REQUESTS}. They belong to their link, which forgets them.
+     * Requests that fell due unanswered since the last timely answer, counted by the tick each
+     * first left. They belong to their link, which forgets them.
      */
-    private final List<Long> quietSends = new ArrayList<>(QUIET_REQUESTS);
+    private final TreeMap<Long, Integer> missed = new TreeMap<>();
+
+    private int missedCount;
 
     private long reopensAt;
     private long probeTick;
@@ -106,6 +109,11 @@ public final class NodeHealth {
       if (intervals.size() > MAX_SAMPLES) {
         intervals.removeFirst();
       }
+    }
+
+    private void forgetMissed() {
+      missed.clear();
+      missedCount = 0;
     }
 
     private void restart(long arrived) {
@@ -184,15 +192,17 @@ public final class NodeHealth {
     Health health = health(node);
     health.lastArrival = NONE;
     health.suspected = false;
-    health.quietSends.clear();
+    health.forgetMissed();
   }
 
-  /** Requests left for the node: {@code first} of them for the first time. */
-  void sent(NodeId node, long tick, int first) {
-    List<Long> sends = health(node).quietSends;
-    for (int i = 0; i < first && sends.size() < QUIET_REQUESTS; i++) {
-      sends.add(tick);
-    }
+  /**
+   * A request first sent at {@code firstSent} fell due unanswered. No cancel was sent for it, so
+   * the node could not have dropped it on purpose.
+   */
+  void missed(NodeId node, long firstSent) {
+    Health health = health(node);
+    health.missed.merge(firstSent, 1, Integer::sum);
+    health.missedCount++;
   }
 
   /**
@@ -201,7 +211,7 @@ public final class NodeHealth {
    */
   void answered(NodeId node) {
     Health health = health(node);
-    health.quietSends.clear();
+    health.forgetMissed();
     if (health.circuit != Circuit.CLOSED) {
       health.circuit = Circuit.CLOSED;
       health.backoff = FIRST_BACKOFF_TICKS;
@@ -220,6 +230,10 @@ public final class NodeHealth {
    * Whether requests the node holds may still be answered: not suspected and path not quiet. A
    * probe out keeps it in service.
    */
+  boolean inService(NodeId node) {
+    return inService(health(node));
+  }
+
   private static boolean inService(Health health) {
     return !health.suspected && health.circuit != Circuit.OPEN;
   }
@@ -233,6 +247,12 @@ public final class NodeHealth {
       health.probeRequest = requestId;
       metrics.count("node.circuit", 1, "node", node.toString(), "state", "probing");
     }
+  }
+
+  /** Whether the request is the node's probe, which is sent until answered or out of time. */
+  boolean probing(NodeId node, long requestId) {
+    Health health = health(node);
+    return health.circuit == Circuit.PROBING && health.probeRequest == requestId;
   }
 
   /**
@@ -268,11 +288,11 @@ public final class NodeHealth {
       }
       switch (health.circuit) {
         case CLOSED -> {
-          List<Long> sends = health.quietSends;
-          while (!sends.isEmpty() && tick - sends.get(0) > QUIET_WINDOW_TICKS) {
-            sends.remove(0);
+          TreeMap<Long, Integer> missed = health.missed;
+          while (!missed.isEmpty() && tick - missed.firstKey() > QUIET_WINDOW_TICKS) {
+            health.missedCount -= missed.pollFirstEntry().getValue();
           }
-          if (sends.size() >= QUIET_REQUESTS && tick - sends.get(0) >= QUIET_TICKS) {
+          if (health.missedCount >= QUIET_REQUESTS && tick - missed.firstKey() >= QUIET_TICKS) {
             metrics.count("node.quiet", 1, "node", label);
             open(health, tick, label);
           }
@@ -296,7 +316,7 @@ public final class NodeHealth {
         metrics.gauge("node.in_service", inService ? 1 : 0, "node", label);
         if (!inService) {
           // Its requests are canceled now, so unanswered ones show nothing.
-          health.quietSends.clear();
+          health.forgetMissed();
           lost.add(node);
         }
       }
@@ -308,7 +328,7 @@ public final class NodeHealth {
   private void open(Health health, long tick, String label) {
     health.circuit = Circuit.OPEN;
     health.reopensAt = tick + health.backoff;
-    health.quietSends.clear();
+    health.forgetMissed();
     metrics.count("node.circuit", 1, "node", label, "state", "open");
   }
 

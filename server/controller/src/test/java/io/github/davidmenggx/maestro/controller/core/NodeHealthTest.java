@@ -136,13 +136,34 @@ class NodeHealthTest {
 
   @Test
   void oneLostRequestDoesNotTakeANodeOutOfService() {
-    // One request and its resends, all lost to the network.
+    // One request and its resends, all lost to the network. Only its first copy falling due counts.
     quietRequests(1);
-    health.sent(NODE, tick + 1, 0);
-    health.sent(NODE, tick + 2, 0);
 
     assertEquals(List.of(), ticks(5 * NodeHealth.QUIET_TICKS));
     assertEquals(Circuit.CLOSED, health.circuit(NODE));
+  }
+
+  @Test
+  void aQuietPathIsTimedFromWhenItsRequestsFirstLeftNotWhenTheyFellDue() {
+    long left = tick;
+    ticks(3);
+    // A queue ahead of them put their due tick three ticks after they left.
+    health.missed(NODE, left);
+    health.missed(NODE, left);
+
+    assertEquals(List.of(), ticks(NodeHealth.QUIET_TICKS - 4));
+    assertEquals(List.of(NODE), ticks(1));
+  }
+
+  @Test
+  void theOldestMissedRequestTimesTheQuietWhateverOrderTheyFellDueIn() {
+    long older = tick;
+    ticks(2);
+    quietRequests(1);
+    health.missed(NODE, older);
+
+    assertEquals(List.of(), ticks(NodeHealth.QUIET_TICKS - 3));
+    assertEquals(List.of(NODE), ticks(1));
   }
 
   @Test
@@ -162,7 +183,8 @@ class NodeHealthTest {
   void twoUnansweredRequestsWithinTheWindowAreEnough() {
     quietRequests(1);
     ticks(NodeHealth.QUIET_WINDOW_TICKS - 1);
-    // The older one is long past its budget, so the newer one shows the path is still quiet.
+    // The older one is long past its budget, and the newer one fell due unanswered too, so the
+    // path is still quiet.
     quietRequests(1);
     assertEquals(List.of(NODE), ticks(1));
   }
@@ -302,9 +324,11 @@ class NodeHealthTest {
     assertEquals(Circuit.CLOSED, health.circuit(NODE));
   }
 
-  /** {@code count} requests leave for the node in this tick, each for the first time. */
+  /** {@code count} requests first sent to the node this tick fall due unanswered at once. */
   private void quietRequests(int count) {
-    health.sent(NODE, tick, count);
+    for (int i = 0; i < count; i++) {
+      health.missed(NODE, tick);
+    }
   }
 
   /** Runs {@code count} ticks and returns the nodes that went out of service in them. */
