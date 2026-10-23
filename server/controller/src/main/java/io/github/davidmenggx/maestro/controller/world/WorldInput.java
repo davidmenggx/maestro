@@ -1,8 +1,6 @@
 package io.github.davidmenggx.maestro.controller.world;
 
-/**
- * Push side of the world boundary: events the mod, or a recorded trace, sends to the controller.
- */
+/** Push side of the world boundary. */
 @FunctionalInterface
 public interface WorldInput {
 

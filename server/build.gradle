@@ -19,11 +19,15 @@ repositories {
   }
 }
 
-// Capture and the probe behind it are development tools. They are a separate
-// mod on the classpath of `runServer` only, so the released jar holds none of
-// them.
+// Capture and its probe are a separate dev mod on the `runServer` classpath only.
 sourceSets {
   dev {
+    compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+    runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
+  }
+  // Tests that need the mixins applied. They run under Fabric's loader, which refuses block
+  // tags no server bound, so plain tests stay on a bare JVM.
+  mixinTest {
     compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
     runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
   }
@@ -56,28 +60,23 @@ configurations {
   // `include` loop below.
   otelBundle
 
-  // The controller is a library, not a mod, so its classes are merged into the
-  // mod jar rather than nested. Non-transitive: flatbuffers is nested on its own.
+  // Merged into the mod jar, not nested. Non-transitive: flatbuffers is nested on its own.
   controllerClasses {
     transitive = false
   }
 }
 
 dependencies {
-  // Minecraft 26.1 is unobfuscated: there is no `mappings` dependency, and mod
-  // dependencies are plain `implementation` (nothing is remapped).
+  // 26.1 is unobfuscated: no `mappings`, and mod dependencies are plain `implementation`.
   minecraft "com.mojang:minecraft:${minecraft_version}"
   implementation "net.fabricmc:fabric-loader:${loader_version}"
   implementation "net.fabricmc.fabric-api:fabric-api:${fabric_version}"
 
-  // Controller logic and the generated FlatBuffers bindings. This module is the
-  // one under deterministic simulation, so nothing related to Minecraft may leak in.
+  // Controller logic and the generated FlatBuffers bindings. No Minecraft types may leak in.
   implementation project(':controller')
   controllerClasses project(':controller')
 
-  // flatbuffers-java has no transitive dependencies, so it is bundled into the
-  // mod jar via Fabric's Jar-in-Jar (`include`). It reaches the compile
-  // classpath through the controller's `api` dependency, so `include` alone.
+  // Bundled via Jar-in-Jar. It reaches the compile classpath through the controller's `api`.
   include "com.google.flatbuffers:flatbuffers-java:${flatbuffers_version}"
 
   // OpenTelemetry is wired onto the compile/runtime classpath via the BOM, and
@@ -94,10 +93,13 @@ dependencies {
 
   testImplementation "org.junit.jupiter:junit-jupiter:${junit_version}"
   testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+
+  mixinTestImplementation "org.junit.jupiter:junit-jupiter:${junit_version}"
+  mixinTestImplementation "net.fabricmc:fabric-loader-junit:${loader_version}"
+  mixinTestRuntimeOnly "org.junit.platform:junit-platform-launcher"
 }
 
-// Loom's `include` nests one artifact at a time and does not follow transitive
-// dependencies, so every artifact `otelBundle` resolves to is nested by hand.
+// `include` does not follow transitive dependencies, so each `otelBundle` artifact is nested.
 configurations.otelBundle.resolvedConfiguration.resolvedArtifacts.each { artifact ->
   def id = artifact.moduleVersion.id
   dependencies.add("include", "${id.group}:${id.name}:${id.version}")
@@ -120,6 +122,18 @@ test {
   useJUnitPlatform()
 }
 
+tasks.register('mixinTest', Test) {
+  description = 'Runs the tests that need the mod\'s mixins applied.'
+  group = 'verification'
+  testClassesDirs = sourceSets.mixinTest.output.classesDirs
+  classpath = sourceSets.mixinTest.runtimeClasspath
+  useJUnitPlatform()
+  // The mod's mixins are for the dedicated server, so the loader runs the tests as one.
+  systemProperty 'fabric.side', 'server'
+}
+
+check.dependsOn tasks.named('mixinTest')
+
 // Both mods take their version from the project.
 tasks.withType(ProcessResources).configureEach {
   inputs.property "version", project.version
@@ -128,10 +142,9 @@ tasks.withType(ProcessResources).configureEach {
   }
 }
 
-// Loom's `server` run configuration already passes `--nogui`, but it manages
-// neither the EULA nor `server.properties`. A superflat, fixed-seed overworld
-// keeps every dev boot and benchmark run identical. `max-tick-time=-1` stops the
-// watchdog from killing a server paused in a debugger.
+// Loom's `server` run manages neither the EULA nor `server.properties`. A superflat, fixed-seed
+// overworld keeps dev and benchmark runs identical. `max-tick-time=-1` stops the watchdog killing
+// a server paused in a debugger. Mobs run with no player online, so it never pauses when empty.
 def devRunDir = file("${projectDir}/run")
 def worldFixtureDir = file("${projectDir}/../worlds")
 def devServerProperties = [
@@ -140,6 +153,7 @@ def devServerProperties = [
   "online-mode": "false",
   "spawn-protection": "0",
   "max-tick-time": "-1",
+  "pause-when-empty-seconds": "0",
 ]
 
 tasks.matching { it.name in ["runServer", "runReleaseServer"] }.configureEach {
@@ -161,9 +175,7 @@ tasks.matching { it.name in ["runServer", "runReleaseServer"] }.configureEach {
 
       levelName = "world-${project.world}"
       def working = new File(devRunDir, levelName)
-      // The server writes back to whichever world it loads, so each run starts
-      // from a fresh copy of the fixture. `-PkeepWorld` retains the working copy
-      // when iterating on terrain instead.
+      // Each run starts from a fresh fixture copy. `-PkeepWorld` keeps the working copy.
       if (working.isDirectory() && project.hasProperty("keepWorld")) {
         logger.lifecycle("Maestro: reusing existing world at ${working}")
       } else {
@@ -184,16 +196,14 @@ tasks.matching { it.name in ["runServer", "runReleaseServer"] }.configureEach {
       propertiesFile.withInputStream { properties.load(it) }
     }
     devServerProperties.each { key, value -> properties.setProperty(key, value) }
-    // Always written: a previous `-Pworld=` run would otherwise leave its
-    // `level-name` behind and silently redirect the next default boot.
+    // Always written, so a previous `-Pworld=` run's `level-name` cannot redirect the next boot.
     properties.setProperty("level-name", levelName)
     propertiesFile.withOutputStream { properties.store(it, "Written by the server run tasks") }
   }
 }
 
 jar {
-  // Merged rather than nested: `controllerClasses` resolves to the controller
-  // jar alone, and the closure keeps resolution out of the configuration phase.
+  // The closure keeps resolution out of the configuration phase.
   dependsOn configurations.controllerClasses
   from({ configurations.controllerClasses.collect { zipTree(it) } }) {
     exclude 'META-INF/**'

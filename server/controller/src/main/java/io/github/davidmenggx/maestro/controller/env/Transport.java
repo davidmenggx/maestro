@@ -2,17 +2,12 @@ package io.github.davidmenggx.maestro.controller.env;
 
 import java.nio.ByteBuffer;
 
-/**
- * Byte-level link to the compute fleet. Frames are encoded FlatBuffers, so the simulation uses the
- * same serialization as the real fleet, and a captured frame can serve as a node-side fixture.
- */
+/** Byte-level link to the compute fleet. Frames are encoded FlatBuffers. */
 public interface Transport {
 
   /**
-   * Independent streams to one node. Frames are ordered within a channel, not across channels.
-   * {@link #ordered} says whether a frame can be lost or reordered without breaking the connection.
-   * On an ordered channel (TCP) it cannot, so a loss shows up as a disconnect. The unordered
-   * channel is UDP, one frame per datagram.
+   * Independent streams to one node, ordered within a channel only. On an ordered channel (TCP) a
+   * loss shows up as a disconnect. The unordered channel is UDP, one frame per datagram.
    */
   enum Channel {
     /**
@@ -21,8 +16,8 @@ public interface Transport {
      */
     WORLD(true),
     /**
-     * Path requests: at-least-once, idempotent, may arrive out of order or twice. Datagrams are not
-     * part of the link, so one in flight when the link changes still arrives.
+     * Path requests: at-least-once, may arrive out of order or twice. A datagram in flight when the
+     * link changes still arrives.
      */
     REQUEST(false),
     /** Mob profiles to the node; {@code Hello} and heartbeats back. */
@@ -42,29 +37,29 @@ public interface Transport {
   /** Callbacks run on the controller thread, never inside a call into the transport. */
   interface Listener {
 
-    void onFrame(NodeId node, Channel channel, ByteBuffer frame);
+    /**
+     * {@code arrivedNanos} is when the transport heard the frame, on the {@link Clock#nowNanos}
+     * scale. The callback may run much later.
+     */
+    void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrivedNanos);
 
     void onConnected(NodeId node);
 
     /**
-     * The link is gone (process death or reset), or a {@link #connect} attempt failed. Not the same
-     * as an unresponsive node.
+     * The link is gone, or a {@link #connect} attempt failed. Not the same as an unresponsive node.
      */
     void onDisconnected(NodeId node);
   }
 
   /**
-   * Frames are copied or fully consumed before returning, so the caller may reuse the buffer. A
-   * send to a node that is not connected is discarded, with no error return, because backpressure
-   * is decided from the node's reported queue depth, not the socket.
+   * The caller must not change the frame after this returns. A send to a node that is not connected
+   * is discarded silently; backpressure comes from the node's reported queue depth.
    */
   void send(NodeId node, Channel channel, ByteBuffer frame);
 
   /**
-   * Opens a link to the node, replacing any it has. The transport knows each node's addresses.
-   * Every attempt ends in exactly one {@link Listener#onConnected} or {@link
-   * Listener#onDisconnected}. The controller's first frame on each ordered channel of a new link is
-   * its {@code Join}, which the transport carries like any other frame.
+   * Opens a link to the node, replacing any it has. Every attempt ends in exactly one {@link
+   * Listener#onConnected} or {@link Listener#onDisconnected}.
    */
   void connect(NodeId node);
 

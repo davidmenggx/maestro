@@ -11,7 +11,6 @@ pluginManagement {
 
 rootProject.name = 'maestro'
 
-// The controller is a plain Java module: no Loom, no Minecraft, no Fabric. Its
-// deterministic simulation tests therefore run on a bare JVM, and controller
-// code cannot reach a game class even by accident.
+// The controller is a plain Java module (no Loom, Minecraft or Fabric), so its simulation
+// tests run on a bare JVM and it cannot reach a game class.
 include 'controller'

@@ -3,33 +3,32 @@ package io.github.davidmenggx.maestro.controller.world;
 import java.util.List;
 import java.util.Objects;
 
-/**
- * What the controller returns to the server, on the main thread. Exactly one call per request:
- * either a path or a drop.
- */
+/** What the controller returns to the server, on the main thread. One call per request. */
 public interface WorldOutput {
 
-  /** Why a request will not produce a computed path. The server then computes its own. */
+  /** Why a request will not produce a computed path. The server then searches itself. */
   enum DropReason {
-    /** Rejected before sending because the owning node would answer past the tick budget. */
+    /** Rejected before sending: the owning node would answer past the tick budget. */
     QUEUE_DEPTH,
     /**
-     * No node can take the request now: none owns the region, the owner has not been sent the chunk
-     * the search starts in, or a position does not fit the wire. Also an answer the node searched
-     * before that chunk reached it.
+     * No node can serve it: it starts outside every region, its search could read past its region,
+     * or a position does not fit the wire. Also an answer searched before the start chunk reached
+     * the node.
      */
     NO_NODE,
     /**
-     * The owning node did not have this mob profile yet. It is registered as part of the send, and
-     * if the request still arrives before the registration, the node answers that it is unknown.
+     * No holder of the region is linked, in service and holding the start chunk, as while a node is
+     * down or its region is resent.
+     */
+    UNAVAILABLE,
+    /**
+     * The node did not hold this profile yet. It is registered with the send; a request that
+     * overtakes it is answered as unknown.
      */
     CLASS_UNREGISTERED,
-    /** The owning node died before answering. */
+    /** The owning node was lost before answering: its link went, or it was taken out of service. */
     NODE_LOST,
-    /**
-     * No answer arrived in time, resends included: the request or its answers were lost, or the
-     * node stopped answering while its connection stayed up.
-     */
+    /** No answer arrived in time, resends included. */
     TIMEOUT,
     /** The mob was removed while the request was in flight. */
     MOB_GONE,
@@ -50,8 +49,8 @@ public interface WorldOutput {
   }
 
   /**
-   * The arguments of {@code Path(nodes, target, reached)}, plus the tick the request was issued, so
-   * the server knows how old the answer is. Empty {@code nodes} means no path.
+   * The arguments of {@code Path(nodes, target, reached)}, plus the tick the request was issued.
+   * Empty {@code nodes} means no path.
    */
   record PathResult(
       int mobId, Pos target, boolean reached, List<Node> nodes, float cost, long issuedTick) {

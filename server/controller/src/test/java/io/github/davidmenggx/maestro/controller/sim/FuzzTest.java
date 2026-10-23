@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.util.EnumSet;
@@ -14,31 +15,19 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
- * Seed sweeps. The suite grows with {@code -Dmaestro.dst.runs}, not by adding cases, and a failing
- * seed is replayed with `make fuzz SEED=...`.
- *
- * <p>Each sweep has a tier in addition to the {@code fuzz} tag, and each tier runs as its own task
- * and CI job.
+ * Seed sweeps, each tier its own task and CI job. The suite grows with {@code -Dmaestro.dst.runs},
+ * and a failing seed is replayed with `make fuzz SEED=...`.
  */
 @Tag("fuzz")
 class FuzzTest {
 
-  /**
-   * One run per seed with every setting fixed. The seed changes only the event ordering and network
-   * behavior. Cheapest per seed, so this tier sweeps the most seeds.
-   */
+  /** One run per seed with every setting fixed. Cheapest, so it sweeps the most seeds. */
   static final String SHALLOW = "shallow";
 
-  /**
-   * Several runs per seed, or a run whose whole configuration is drawn from the seed. Costs a
-   * multiple of a shallow seed, so it sweeps proportionally fewer seeds.
-   */
+  /** Several runs per seed, or a run drawn wholly from the seed. Sweeps fewer seeds. */
   static final String DEEP = "deep";
 
-  /**
-   * Checks what the sampler reaches, not any one run, so its size is fixed and it neither shards
-   * nor grows with the run count.
-   */
+  /** Checks what the sampler reaches, so its size is fixed. */
   static final String COVERAGE = "coverage";
 
   private static final long TICKS = 150;
@@ -50,8 +39,7 @@ class FuzzTest {
   @Test
   @Tag(SHALLOW)
   void everySeedProducesItsOwnRun() {
-    // Catches the seed being ignored somewhere. Two runs matching by chance would
-    // need a 64-bit digest collision.
+    // Catches the seed being ignored somewhere.
     Set<Long> digests = new LinkedHashSet<>();
     for (int i = 0; i < SimRun.runCount(); i++) {
       digests.add(
@@ -67,7 +55,7 @@ class FuzzTest {
     for (int i = 0; i < SimRun.runCount(); i++) {
       SimRun run = SimRun.of(SimRun.baseSeed() + i, FaultPlan.reliable(), TICKS).go();
       assertEquals(List.of(), run.violations(), run.describe());
-      heldToTheSlo += run.fitsCapacity() ? 1 : 0;
+      heldToTheSlo += run.heldToTheSlo() ? 1 : 0;
       assertTrue(run.out.answered() > 0, run.describe());
       assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
       assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
@@ -138,8 +126,7 @@ class FuzzTest {
       scenarios.add(run.scenario);
       answered += run.out.answered();
 
-      // The SLO is checked only when the run fits the fleet's capacity and nothing
-      // in its fault plan can delay or lose a request.
+      // Held to the SLO only when the load fits and nothing can delay or lose a request.
       assertEquals(List.of(), run.violations(), run.describe());
       assertEquals(
           run.sim.digest().value(), SimRun.fuzzed(seed).go().sim.digest().value(), run.describe());
@@ -170,6 +157,8 @@ class FuzzTest {
     long emptyServers = 0;
     long heldToTheSlo = 0;
     long heldAtTheEdge = 0;
+    long healthyThroughAStall = 0;
+    long healthyThroughSlowTicks = 0;
     long abandonedAnswers = 0;
     long answersBehindTheirChunk = 0;
     long canceledInQueue = 0;
@@ -177,19 +166,24 @@ class FuzzTest {
     long lostToRestart = 0;
     long foreignAnswers = 0;
     long pausedRuns = 0;
+    long blackholedRuns = 0;
+    long suspicions = 0;
+    long quietPaths = 0;
+    long probesAnswered = 0;
+    long refusedUnavailable = 0;
+    long failOpenJudged = 0;
     long checkpoints = 0;
     long deferredReads = 0;
 
-    // This checks what the sampler reaches, not any one run, so it uses its own size
-    // regardless of `maestro.dst.runs`. A few seeds cannot reach every outcome, and a
-    // very large sweep only repeats the result.
+    // Uses its own size: a few seeds miss outcomes, and a very large sweep only repeats them.
     int seeds = Math.clamp(SimRun.runCount(), MIN_COVERAGE_SEEDS, MAX_COVERAGE_SEEDS);
     for (int i = 0; i < seeds; i++) {
       SimRun run = SimRun.fuzzed(SimRun.baseSeed() + i).go();
       assertEquals(List.of(), run.violations(), run.describe());
 
       drops.addAll(run.out.drops().keySet());
-      boolean held = run.fitsCapacity() && run.out.answered() > 0;
+      boolean held = run.heldToTheSlo() && run.out.answered() > 0;
+      boolean judgedHealthy = run.fitsCapacity() && run.out.answered() > 0;
       heldToTheSlo += held ? 1 : 0;
       heldAtTheEdge +=
           held
@@ -197,6 +191,14 @@ class FuzzTest {
                       == FaultPlan.edgeLatency(run.scenario.maxCostSteps(run.topology.nodeCount()))
               ? 1
               : 0;
+      healthyThroughAStall +=
+          judgedHealthy
+                  && run.faults.faults().stream()
+                      .anyMatch(fault -> fault instanceof FaultPlan.ServerStalled)
+              ? 1
+              : 0;
+      healthyThroughSlowTicks +=
+          judgedHealthy && run.scenario.chances().get(Chance.SLOW_TICK) > 0 ? 1 : 0;
       abandonedAnswers += run.sim.metrics().total("path.response.abandoned");
       answersBehindTheirChunk += run.sim.metrics().total("path.response.behind");
       replicated.add(run.topology.replicated());
@@ -217,6 +219,15 @@ class FuzzTest {
       foreignAnswers += run.sim.metrics().total("path.response.foreign");
       pausedRuns +=
           run.faults.faults().stream().anyMatch(fault -> fault instanceof FaultPlan.Paused) ? 1 : 0;
+      blackholedRuns +=
+          run.faults.faults().stream().anyMatch(fault -> fault instanceof FaultPlan.Blackholed)
+              ? 1
+              : 0;
+      suspicions += run.sim.metrics().total("node.suspected");
+      quietPaths += run.sim.metrics().total("node.quiet");
+      probesAnswered += run.sim.metrics().total("node.circuit", "state", "closed");
+      refusedUnavailable += run.sim.metrics().counter("path.rejected", "reason", "unavailable");
+      failOpenJudged += run.sim.failOpenJudged();
       checkpoints += run.sim.checkpointsCompared();
       deferredReads += run.sim.metrics().total("world.chunks.deferred");
       for (ModeledNode node : run.sim.nodes()) {
@@ -242,6 +253,9 @@ class FuzzTest {
     assertTrue(nodesCompared > 0, "no node ever caught up far enough to compare its state");
     assertTrue(heldToTheSlo > 0, "no run that answered requests was held to the latency SLO");
     assertTrue(heldAtTheEdge > 0, "no run at the latency edge was held to the SLO");
+    assertTrue(healthyThroughAStall > 0, "no healthy fleet was judged through a stalled server");
+    assertTrue(
+        healthyThroughSlowTicks > 0, "no healthy fleet was judged through a server falling behind");
     assertTrue(abandonedAnswers > 0, "no node ever answered a request after it was abandoned");
     assertTrue(answersBehindTheirChunk > 0, "no node ever searched before its start chunk arrived");
     assertTrue(canceledInQueue > 0, "no cancel ever reached a request still waiting on its node");
@@ -249,6 +263,12 @@ class FuzzTest {
     assertTrue(lostToRestart > 0, "no request was open when its controller restarted");
     assertTrue(foreignAnswers > 0, "no answer for an earlier controller run reached a new one");
     assertTrue(pausedRuns > 0, "no node process was ever paused");
+    assertTrue(blackholedRuns > 0, "no node ever lost its datagrams with its link up");
+    assertTrue(suspicions > 0, "no node's heartbeats were ever overdue enough to suspect it");
+    assertTrue(quietPaths > 0, "no node's request path ever went quiet");
+    assertTrue(probesAnswered > 0, "no probe ever brought a node back into service");
+    assertTrue(refusedUnavailable > 0, "no request was ever refused for a node out of service");
+    assertTrue(failOpenJudged > 0, "no node that could not answer was sent enough to judge");
     assertTrue(checkpoints > 0, "no node ever reached a mid-run checkpoint");
     assertTrue(deferredReads > 0, "chunk reads never ran past one tick's budget");
     System.out.println(

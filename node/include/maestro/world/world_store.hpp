@@ -38,18 +38,14 @@ enum class ApplyStatus {
 class WorldStore {
 public:
   /// Applies `Frame`, which has passed verification. Any result but `Applied`
-  /// drops all held state, because the node and controller no longer agree on
-  /// the stream. The node then drops its link, the controller reconnects, the
-  /// next `Hello` reports nothing held, and the controller sends the whole
-  /// area again.
+  /// drops all held state, since the node and controller disagree on the
+  /// stream.
   ApplyStatus apply(const fbs::WorldFrame &Frame);
 
   /// Drops all held state.
   void clear() { Current.store(nullptr); }
 
-  /// The current version, or null if nothing is held. `Hello` reports `run`,
-  /// `regionId` and `sequence` from one pinned version, so they always
-  /// describe the same stream position.
+  /// The current version, or null if nothing is held.
   std::shared_ptr<const Area> pin() const { return Current.load(); }
 
 private:

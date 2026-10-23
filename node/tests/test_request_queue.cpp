@@ -168,7 +168,6 @@ TEST(RequestQueue, ARequestQueuedAgainAfterItsCancelExpiredIsServedOnce) {
   RequestQueue Queue(Retention);
   ASSERT_EQ(admit(Queue, 1), Admission::Queued);
   ASSERT_TRUE(Queue.cancel(1, Start));
-  // The canceled job is still in the queue, behind nothing.
   ASSERT_EQ(admit(Queue, 1, Start + Retention), Admission::Queued);
   ASSERT_EQ(admit(Queue, 2, Start + Retention), Admission::Queued);
   EXPECT_EQ(Queue.depth(), 2u);

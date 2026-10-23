@@ -1,4 +1,4 @@
-package io.github.davidmenggx.maestro.controller.sim;
+package io.github.davidmenggx.maestro.controller.core;
 
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
@@ -11,6 +11,7 @@ import io.github.davidmenggx.maestro.controller.wire.Reply;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
+import io.github.davidmenggx.maestro.controller.world.SearchReach;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
@@ -25,42 +26,28 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
-/**
- * Every path request from admission to its outcome: which holder serves it, whether its node can
- * answer it in time, the per-tick batches that carry it, its resends and cancels, and the answer
- * that settles it.
- */
-final class RequestTracker {
+/** Admission, batching, resends, cancels and answers for path requests. */
+public final class RequestTracker {
+
+  /** Requests that cannot be answered within this many ticks are not sent. */
+  public static final int MAX_TICKS_LATE = 10;
+
+  /** Ticks from a request to the earliest tick its node usually serves it. */
+  public static final int SEND_TICKS = 1;
 
   /**
-   * A request that cannot be answered within this many ticks is not sent, and is not waited for.
-   */
-  static final int MAX_TICKS_LATE = 10;
-
-  /**
-   * Ticks from a request to the earliest tick its node usually serves it: the batch is encoded off
-   * the main thread and leaves at the end of the next tick, and the node serves it in the tick
-   * after that.
-   */
-  static final int SEND_TICKS = 2;
-
-  /**
-   * A request is sent again under the same id once its answer is this many ticks late, at most
-   * {@link #MAX_RESENDS} times. An answer is due once the node has served the requests it held
-   * ahead of it when it left. A node answers a request it has seen with the same bytes, so a resend
-   * that crosses a slow answer costs only bandwidth.
+   * Ticks late before a request is resent under the same id, at most {@link #MAX_RESENDS} times. A
+   * node answers a seen request with the same bytes, so a crossed resend costs only bandwidth.
    */
   static final int RESEND_TICKS = 1;
 
-  static final int MAX_RESENDS = 2;
+  public static final int MAX_RESENDS = 2;
 
   /**
-   * {@code request} is kept so it can be resent, and so the result can be returned as a complete
-   * {@code Path}. {@code startChunk} is the chunk the search starts in, whose residency on the node
-   * decides whether an answer is valid. {@code dueTick} is the tick by whose end the latest copy
-   * should be answered, or {@link #NOT_SENT} while that copy waits to be encoded. An {@code
-   * abandoned} request has already been reported dropped, but its node may still be working on it,
-   * so it still counts against the node.
+   * {@code request} is kept for resends. {@code startChunk} is the chunk the search starts in.
+   * {@code firstSent} is when the first copy left. {@code dueTick} is when the latest copy should
+   * be answered. Both are {@link #NOT_SENT} until then. An {@code abandoned} request is reported
+   * dropped but still counts against its node, and is {@code canceled} if a cancel was sent for it.
    */
   private record Outstanding(
       int mobId,
@@ -69,23 +56,55 @@ final class RequestTracker {
       long startChunk,
       long issuedTick,
       Frames.Request request,
+      long firstSent,
       long dueTick,
       int resends,
-      boolean abandoned) {
+      boolean abandoned,
+      boolean canceled) {
 
-    Outstanding sent(long due) {
+    Outstanding sent(long tick, long due) {
       return new Outstanding(
-          mobId, node, region, startChunk, issuedTick, request, due, resends, abandoned);
+          mobId,
+          node,
+          region,
+          startChunk,
+          issuedTick,
+          request,
+          resends == 0 ? tick : firstSent,
+          due,
+          resends,
+          abandoned,
+          canceled);
     }
 
     Outstanding resent() {
       return new Outstanding(
-          mobId, node, region, startChunk, issuedTick, request, NOT_SENT, resends + 1, abandoned);
+          mobId,
+          node,
+          region,
+          startChunk,
+          issuedTick,
+          request,
+          firstSent,
+          NOT_SENT,
+          resends + 1,
+          abandoned,
+          canceled);
     }
 
-    Outstanding abandon() {
+    Outstanding abandon(boolean cancel) {
       return new Outstanding(
-          mobId, node, region, startChunk, issuedTick, request, dueTick, resends, true);
+          mobId,
+          node,
+          region,
+          startChunk,
+          issuedTick,
+          request,
+          firstSent,
+          dueTick,
+          resends,
+          true,
+          cancel);
     }
   }
 
@@ -98,10 +117,8 @@ final class RequestTracker {
     private int inFlight;
 
     /**
-     * Depth the node reported in its last heartbeat, less the answers seen since. Requests the node
-     * finished after the controller stopped waiting, or dropped on a cancel, are not taken off, so
-     * it errs high until the next heartbeat. Admission takes the larger of it and {@link
-     * #inFlight}.
+     * Depth in the last heartbeat, less answers seen since. Errs high until the next heartbeat.
+     * Admission uses the larger of it and {@link #inFlight}.
      */
     private int reportedDepth;
 
@@ -120,6 +137,7 @@ final class RequestTracker {
   private final WorldOutput out;
   private final RegionMap regions;
   private final NodeLinks links;
+  private final NodeHealth health;
   private final WorldStreams streams;
   private final Encoder encoder;
   private final Violations violations;
@@ -130,20 +148,25 @@ final class RequestTracker {
   private final Map<NodeId, Load> loads = new LinkedHashMap<>();
 
   /**
-   * Every request that counts against a node, abandoned ones included. Insertion-ordered, and
-   * request ids only increase, so this is also in issue-tick order. Changed only through {@link
-   * #put} and {@link #remove}, which keep the indexes below in step.
+   * Every request counting against a node, abandoned included, in issue order. Changed only through
+   * {@link #put} and {@link #remove}.
    */
   private final Map<Long, Outstanding> outstanding = new LinkedHashMap<>();
 
-  /**
-   * Request ids by the tick their answer is due. An entry goes stale when its request changes, so
-   * each is checked against {@link #outstanding} when read.
-   */
+  /** Request ids by due tick. Entries can go stale, so check against {@link #outstanding}. */
   private final TreeMap<Long, List<Long>> dueIndex = new TreeMap<>();
 
   /** Each mob's live request. */
   private final Map<Integer, Long> requestByMob = new LinkedHashMap<>();
+
+  /** A request given up on that no longer counts against its node, and when it was issued. */
+  private record GivenUp(NodeId node, long issuedTick) {}
+
+  /**
+   * Given-up requests that stopped counting against their node, by id, until their tick budget
+   * ends. A late answer within it shows the request path works.
+   */
+  private final Map<Long, GivenUp> givenUp = new LinkedHashMap<>();
 
   private long nextRequestId = 1;
   private int requestsIssued;
@@ -154,6 +177,7 @@ final class RequestTracker {
       WorldOutput out,
       RegionMap regions,
       NodeLinks links,
+      NodeHealth health,
       WorldStreams streams,
       Encoder encoder,
       Violations violations,
@@ -167,6 +191,7 @@ final class RequestTracker {
     this.out = out;
     this.regions = regions;
     this.links = links;
+    this.health = health;
     this.streams = streams;
     this.encoder = encoder;
     this.violations = violations;
@@ -208,12 +233,10 @@ final class RequestTracker {
     requestsIssued++;
     int mobId = event.mobId();
     if (!mobs.contains(mobId)) {
-      out.pathDropped(mobId, DropReason.MOB_GONE);
+      drop(mobId, DropReason.MOB_GONE);
       return;
     }
-    // One live request per mob. A repeat replaces the older one even if it is not admitted
-    // itself, since the mob no longer wants the older answer. The older one is reported as
-    // dropped, so every request still ends in exactly one callback.
+    // A repeat replaces the mob's older request, which is reported dropped.
     Long previousRequest = requestByMob.get(mobId);
     if (previousRequest != null) {
       abandon(previousRequest, DropReason.SUPERSEDED);
@@ -225,47 +248,56 @@ final class RequestTracker {
     if (region == null
         || !Frames.fits(event.start(), region.minX(), region.minZ())
         || !Frames.fits(event.target(), region.minX(), region.minZ())) {
-      out.pathDropped(mobId, DropReason.NO_NODE);
+      env.metrics().count("path.rejected", 1, "reason", "outside");
+      drop(mobId, DropReason.NO_NODE);
       return;
     }
-    // The chunk the search starts in must be resident on the node. Its frame is produced at a
-    // tick boundary, before the request, so it usually reaches the node a tick ahead of it. If
-    // it does not, as when its encode is retried, the answer's world sequence shows it.
+    MobClass profile = world.mobClass(classId);
+    if (profile == null) {
+      violations.add("request named profile " + classId + ", which the world does not hold");
+      drop(mobId, DropReason.CLASS_UNREGISTERED);
+      return;
+    }
+    // A search that could read past the region would see air as a cliff.
+    if (!SearchReach.fits(
+        region.minX(),
+        region.minZ(),
+        region.size(),
+        event.start(),
+        event.search().maxPathLength(),
+        profile.shape().width())) {
+      env.metrics().count("path.rejected", 1, "reason", "reach");
+      drop(mobId, DropReason.NO_NODE);
+      return;
+    }
+    // The start chunk must be resident on the node. Its frame usually arrives a tick ahead; if
+    // not, the answer's world sequence shows it.
     long startChunk = Chunks.key(Chunks.of(event.start().x()), Chunks.of(event.start().z()));
-    NodeId node = holderFor(mobId, region, startChunk);
+    NodeId node = holderFor(mobId, region, startChunk, true);
     if (node == null) {
-      out.pathDropped(mobId, DropReason.NO_NODE);
+      // A ready holder out of service would have taken it, so search on the server.
+      boolean unavailable = holderFor(mobId, region, startChunk, false) != null;
+      env.metrics().count("path.rejected", 1, "reason", unavailable ? "unavailable" : "not_ready");
+      drop(mobId, DropReason.UNAVAILABLE);
       return;
     }
 
-    // A profile is interned when a mob first needs it, so the node may not have it yet.
-    // Registering it abandons this request. The profile leaves now on the ordered control
-    // channel, and requests naming it leave at the end of the tick, so they usually arrive
-    // after it. One made later in this tick trails it by less than a tick. A request that
-    // still overtakes it is answered `UnknownProfile`.
+    // A new profile abandons this request. The profile leaves now on the ordered control
+    // channel, ahead of requests naming it; one that overtakes it is answered `UnknownProfile`.
     if (links.register(node, classId)) {
-      MobClass profile = world.mobClass(classId);
-      if (profile == null) {
-        links.unregister(node, classId);
-        violations.add("request named profile " + classId + ", which the world does not hold");
-        out.pathDropped(mobId, DropReason.CLASS_UNREGISTERED);
-        return;
-      }
       links.send(node, Channel.CONTROL, Frames.mobClass(profile));
       env.metrics().count("mobclass.registered", 1, "node", node.toString());
-      out.pathDropped(mobId, DropReason.CLASS_UNREGISTERED);
+      drop(mobId, DropReason.CLASS_UNREGISTERED);
       return;
     }
 
-    // The node serves this request once it has served the ones ahead of it and this one, at
-    // the capacity admission assumes, and no sooner than `SEND_TICKS` from now. The larger of
-    // the reported depth and the requests counted against the node estimates how many are
-    // ahead.
+    // Due once the requests ahead are served at the assumed capacity, and no sooner than
+    // `SEND_TICKS`. The larger of reported depth and counted requests estimates those ahead.
     Load load = loads.get(node);
     long ahead = Math.max(load.reportedDepth, load.inFlight);
     if ((ahead + 1) / nodeCapacity + SEND_TICKS > MAX_TICKS_LATE) {
       env.metrics().count("path.rejected", 1, "reason", "queue_depth");
-      out.pathDropped(mobId, DropReason.QUEUE_DEPTH);
+      drop(mobId, DropReason.QUEUE_DEPTH);
       return;
     }
 
@@ -276,22 +308,34 @@ final class RequestTracker {
     put(
         requestId,
         new Outstanding(
-            mobId, node, region, startChunk, event.tick(), request, NOT_SENT, 0, false));
+            mobId,
+            node,
+            region,
+            startChunk,
+            event.tick(),
+            request,
+            NOT_SENT,
+            NOT_SENT,
+            0,
+            false,
+            false));
     load.batch.put(requestId, request);
+    health.admitted(node, requestId, event.tick());
   }
 
   /**
-   * The holder to serve a mob's request: a region's holders split its mobs between them by id, and
-   * a mob whose own holder is not ready goes to the next one that is, in holder order. A holder is
-   * ready once it has greeted the controller and has the chunk the search starts in. Null if no
-   * holder is ready.
+   * The holder to serve a mob's request: its own by id, else the next ready one in holder order.
+   * Ready means greeted, holding the start chunk, and, if {@code inService}, admitted by {@link
+   * NodeHealth}. Null if none.
    */
-  private NodeId holderFor(int mobId, Region region, long startChunk) {
+  private NodeId holderFor(int mobId, Region region, long startChunk, boolean inService) {
     List<NodeId> holders = regions.holders(region.id());
     int first = Math.floorMod(mobId, holders.size());
     for (int i = 0; i < holders.size(); i++) {
       NodeId node = holders.get((first + i) % holders.size());
-      if (links.greeted(node) && streams.residentSince(node, startChunk) != null) {
+      if (links.greeted(node)
+          && (!inService || health.admits(node))
+          && streams.residentSince(node, startChunk) != null) {
         return node;
       }
     }
@@ -303,6 +347,11 @@ final class RequestTracker {
     if (request == null) {
       // A retry, or the answer to a request that was already settled.
       env.metrics().count("path.response.stale", 1);
+      GivenUp gone = givenUp.remove(answer.requestId());
+      if (gone != null && gone.node().equals(node)) {
+        answered(node);
+        health.answered(node);
+      }
       return;
     }
     if (!request.node().equals(node)) {
@@ -310,15 +359,14 @@ final class RequestTracker {
       return;
     }
     answered(node);
+    health.answered(node);
     if (request.abandoned()) {
       // The node is done with it, and the mob no longer wants it.
       remove(answer.requestId());
       env.metrics().count("path.response.abandoned", 1);
       return;
     }
-    // The node must have held the chunk the search starts in when it searched. If the chunk
-    // reached it later, or the node has held it as air since, as after its stream started
-    // over, it searched air there, and a resend could get the same answer back.
+    // The node must have held the start chunk when it searched, else it searched air.
     Long since = streams.residentSince(node, request.startChunk());
     if (since == null || answer.worldSequence() < since) {
       env.metrics().count("path.response.behind", 1, "node", node.toString());
@@ -328,6 +376,7 @@ final class RequestTracker {
     remove(answer.requestId());
     requestByMob.remove(request.mobId());
     env.metrics().record("path.latency.ticks", env.clock().tick() - request.issuedTick());
+    env.metrics().count("path.answered", 1);
     out.pathComputed(
         new WorldOutput.PathResult(
             request.mobId(),
@@ -339,10 +388,8 @@ final class RequestTracker {
   }
 
   /**
-   * The request arrived before the profile it names, which is still on the control channel. That
-   * channel either delivers the profile or breaks the connection, so nothing is resent. The request
-   * is dropped sooner than its timeout would drop it. The node never queued it, so its depth is
-   * unchanged.
+   * The request beat its profile on the control channel, which delivers it or breaks the
+   * connection, so nothing is resent. Dropped early; the node never queued it.
    */
   void refusal(NodeId node, Reply.Refusal refusal) {
     env.metrics().count("path.profile.unknown", 1, "node", node.toString());
@@ -351,15 +398,13 @@ final class RequestTracker {
       env.metrics().count("path.response.stale", 1);
       return;
     }
-    // A request outstanding on a node was admitted on its current connection, so its profile
-    // was sent on that connection too. One that was not is a controller bug, which the node
-    // cannot tell from a delay.
+    health.answered(node);
+    // An outstanding request was admitted on this connection, so a missing profile is a
+    // controller bug.
     if (!links.registered(node, (short) refusal.classId())) {
       violations.add(node + " was asked to use profile " + refusal.classId() + " never sent");
     }
-    // The node does not remember a refusal, so a resent copy that arrives after the profile
-    // would still be served. It is canceled, and the request stops counting against the node
-    // like any other the node drops.
+    // The node does not remember refusals, so a late resend would be served. Cancel it.
     if (request.resends() > 0) {
       loads.get(node).cancels.add(refusal.requestId());
     }
@@ -392,8 +437,25 @@ final class RequestTracker {
       Outstanding request = remove(requestId);
       if (!request.abandoned()) {
         requestByMob.remove(request.mobId());
-        out.pathDropped(request.mobId(), DropReason.NODE_LOST);
+        drop(request.mobId(), DropReason.NODE_LOST);
       }
+    }
+  }
+
+  /**
+   * The node left service with its link up: live requests are dropped but count against it until
+   * due.
+   */
+  void outOfService(NodeId node) {
+    List<Long> live = new ArrayList<>();
+    for (Map.Entry<Long, Outstanding> entry : outstanding.entrySet()) {
+      Outstanding request = entry.getValue();
+      if (request.node().equals(node) && !request.abandoned()) {
+        live.add(entry.getKey());
+      }
+    }
+    for (long requestId : live) {
+      abandon(requestId, DropReason.NODE_LOST);
     }
   }
 
@@ -404,13 +466,11 @@ final class RequestTracker {
   }
 
   /**
-   * A request not answered within the budget, resends included, is abandoned. This handles repeated
-   * loss on the request stream, and a request to a node that went silent without resetting its
-   * connection. Admission keeps a node's work within the budget, so an abandoned request older than
-   * it stops counting against the node too. {@code outstanding} is in issue order, so the scan
-   * stops at the first younger entry.
+   * Abandons a request unanswered within the budget, resends included. Older abandoned ones stop
+   * counting against the node. The scan stops at the first younger entry.
    */
   void expire(long tick) {
+    givenUp.values().removeIf(gone -> tick - gone.issuedTick() > MAX_TICKS_LATE);
     Iterator<Map.Entry<Long, Outstanding>> entries = outstanding.entrySet().iterator();
     while (entries.hasNext()) {
       Outstanding request = entries.next().getValue();
@@ -424,14 +484,14 @@ final class RequestTracker {
       }
       requestByMob.remove(request.mobId());
       env.metrics().count("path.expired", 1);
-      out.pathDropped(request.mobId(), DropReason.TIMEOUT);
+      drop(request.mobId(), DropReason.TIMEOUT);
     }
   }
 
   /**
-   * Acts on every request whose answer is due by now, in issue order. A live one is added to its
-   * node's batch again, so a lost request or answer costs a few ticks rather than a timeout. An
-   * abandoned one stops counting against its node, which has served it by now.
+   * Acts on requests due by now, in issue order. One whose first copy fell due unanswered shows the
+   * node missed it, unless it was canceled. Live ones and probes rejoin the batch; other abandoned
+   * ones stop counting.
    */
   void settleDue(long tick) {
     TreeSet<Long> due = new TreeSet<>();
@@ -446,8 +506,12 @@ final class RequestTracker {
     }
     for (long requestId : due) {
       Outstanding request = outstanding.get(requestId);
-      if (request.abandoned()) {
+      if (request.resends() == 0 && !request.canceled()) {
+        health.missed(request.node(), request.firstSent());
+      }
+      if (request.abandoned() && !health.probing(request.node(), requestId)) {
         remove(requestId);
+        givenUp.put(requestId, new GivenUp(request.node(), request.issuedTick()));
         continue;
       }
       if (request.resends() >= MAX_RESENDS) {
@@ -460,8 +524,8 @@ final class RequestTracker {
   }
 
   /**
-   * Each node's requests and cancels for the tick, in frames that each fit one datagram. They leave
-   * together, so they may arrive in any order, and each request may wait behind the whole batch.
+   * Each node's requests and cancels for the tick, in datagram-sized frames. They may arrive in any
+   * order.
    */
   void flush() {
     for (Map.Entry<NodeId, Load> entry : loads.entrySet()) {
@@ -481,9 +545,8 @@ final class RequestTracker {
           Offload.Lane.REQUESTS,
           () -> requestFrames(run, region, batch, cancels),
           frames -> {
-            // A retried encode can finish after the link it was built for ended. Its requests
-            // were dropped with that link, and the profiles they name may not be registered on
-            // this one.
+            // The link ended while this encode retried; its requests were dropped and
+            // its profiles may be missing here.
             if (links.attempt(node) != attempt) {
               env.metrics().count("requests.discarded", 1, "node", node.toString());
               return;
@@ -512,22 +575,21 @@ final class RequestTracker {
             frameCount(batch.size(), Frames.MAX_REQUESTS_PER_FRAME),
             "node",
             node.toString());
-    // The node serves requests in the order they arrive, after the ones it is still expected
-    // to hold, so the last of the batch is done once all of them are. Timing starts when the
-    // batch leaves, not when it is built.
+    // The node serves in arrival order, so the last request is done once all are. Timing starts
+    // when the batch leaves.
     long tick = env.clock().tick();
     long due = tick + RESEND_TICKS + (expectedQueue(node, tick) + batch.size()) / nodeCapacity;
     for (Frames.Request request : batch) {
       Outstanding waiting = outstanding.get(request.requestId());
       if (waiting != null) {
-        put(request.requestId(), waiting.sent(due));
+        put(request.requestId(), waiting.sent(tick, due));
       }
     }
   }
 
   /**
-   * A batch given up on goes back to its node's next batch, if its link still stands: each request
-   * still waiting for it, and each cancel. A request that times out meanwhile leaves on its own.
+   * Returns a given-up batch's waiting requests and cancels to the node's next batch if its link
+   * stands. Waiting means live, or the probe.
    */
   private void requeue(NodeId node, long attempt, List<Frames.Request> batch, List<Long> cancels) {
     if (links.attempt(node) != attempt) {
@@ -535,18 +597,18 @@ final class RequestTracker {
     }
     Load load = loads.get(node);
     for (Frames.Request request : batch) {
-      Outstanding waiting = outstanding.get(request.requestId());
-      if (waiting != null && !waiting.abandoned() && waiting.dueTick() == NOT_SENT) {
-        load.batch.put(request.requestId(), request);
+      long requestId = request.requestId();
+      Outstanding waiting = outstanding.get(requestId);
+      if (waiting != null
+          && waiting.dueTick() == NOT_SENT
+          && (!waiting.abandoned() || health.probing(node, requestId))) {
+        load.batch.put(requestId, request);
       }
     }
     load.cancels.addAll(cancels);
   }
 
-  /**
-   * {@code batch} in frames of at most {@link Frames#MAX_REQUESTS_PER_FRAME}, then {@code cancels}
-   * in frames of at most {@link Frames#MAX_CANCELS_PER_FRAME}.
-   */
+  /** {@code batch} then {@code cancels}, each in frames within the {@link Frames} limits. */
   private static List<byte[]> requestFrames(
       long run, Region region, List<Frames.Request> batch, List<Long> cancels) {
     List<byte[]> frames = new ArrayList<>();
@@ -566,10 +628,7 @@ final class RequestTracker {
     return (items + perFrame - 1) / perFrame;
   }
 
-  /**
-   * Requests the node is expected to still hold: sent to it, and not yet due. The controller
-   * assumes every node serves {@code nodeCapacity} a tick.
-   */
+  /** Requests sent to the node and not yet due, at {@code nodeCapacity} served a tick. */
   private int expectedQueue(NodeId node, long tick) {
     int queued = 0;
     for (int count : loads.get(node).dueCounts.tailMap(tick, false).values()) {
@@ -598,11 +657,14 @@ final class RequestTracker {
   }
 
   /**
-   * Reports a live request dropped because its mob no longer wants it. One whose first copy is
-   * still waiting for its batch never leaves and is simply removed. Otherwise a copy may be on its
-   * way to the node or in the node's queue, so the node is told to drop it, and the request keeps
-   * counting against the node until its answer is due or arrives, since the cancel may be lost or
-   * come too late.
+   * Reports a live request dropped because its mob no longer wants it. A request whose first copy
+   * awaits a batch is just removed. Otherwise it counts against the node until due or answered, and
+   * a sent copy is canceled (best effort). Two are not canceled:
+   *
+   * <ul>
+   *   <li>A first copy still being encoded: the cancel would race it.
+   *   <li>The probe: its answer is what brings the node back, so it is sent until answered.
+   * </ul>
    */
   private void abandon(long requestId, DropReason reason) {
     Outstanding request = outstanding.get(requestId);
@@ -611,21 +673,36 @@ final class RequestTracker {
     }
     requestByMob.remove(request.mobId());
     Load load = loads.get(request.node());
-    boolean waiting = load.batch.remove(requestId) != null;
+    boolean probe = health.probing(request.node(), requestId);
+    boolean waiting = load.batch.containsKey(requestId);
     if (waiting && request.resends() == 0) {
+      load.batch.remove(requestId);
       remove(requestId);
+      health.withdrawn(request.node(), requestId);
+    } else if (probe) {
+      put(requestId, request.abandon(false));
     } else {
-      load.cancels.add(requestId);
-      put(requestId, request.abandon());
+      boolean encoding = !waiting && request.dueTick() == NOT_SENT && request.resends() == 0;
+      load.batch.remove(requestId);
+      if (!encoding) {
+        load.cancels.add(requestId);
+      }
+      put(requestId, request.abandon(!encoding));
     }
-    out.pathDropped(request.mobId(), reason);
+    drop(request.mobId(), reason);
   }
 
   /** Reports a live request dropped once its node is done with it or never had it. */
   private void finish(long requestId, Outstanding request, DropReason reason) {
     remove(requestId);
     requestByMob.remove(request.mobId());
-    out.pathDropped(request.mobId(), reason);
+    drop(request.mobId(), reason);
+  }
+
+  /** Reports a request dropped, counted by reason so every drop shows in the metrics. */
+  private void drop(int mobId, DropReason reason) {
+    env.metrics().count("path.dropped", 1, "reason", reason.name());
+    out.pathDropped(mobId, reason);
   }
 
   /** Adds or replaces a request, keeping the in-flight counters and due indexes in step. */
@@ -668,8 +745,8 @@ final class RequestTracker {
   }
 
   /**
-   * One mob mapping per live request, per-node in-flight counters that sum to the requests that
-   * count against nodes, and due counts that match the requests sent.
+   * One mob mapping per live request, in-flight counters summing to the requests counting against
+   * nodes, and due counts matching sent requests.
    */
   void check(List<String> found) {
     int counted = 0;

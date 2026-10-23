@@ -1,10 +1,9 @@
 package io.github.davidmenggx.maestro.controller.world;
 
 /**
- * How far from its start a search reads the world. A node reads everything outside its area as air,
- * which turns real ground into a cliff and gives a wrong path instead of none. A request is
- * therefore sent only to a node whose area contains every block its search can read. Height is not
- * checked, because areas are full height.
+ * How far from its start a search reads the world. A node reads outside its area as air, which
+ * gives a wrong path instead of none, so a request goes only to a node whose area contains every
+ * block it can read. Height is not checked, since areas are full height.
  */
 public final class SearchReach {
 
@@ -12,9 +11,9 @@ public final class SearchReach {
 
   /**
    * Blocks a search may read past its start along either horizontal axis. A node is expanded only
-   * while it is nearer the start than {@code maxPathLength}. Its neighbours are one block further.
-   * The footprint test reads {@code floor(width + 1) - 1} blocks past each neighbour, and each of
-   * those cells reads the cells around it to find its type.
+   * while nearer the start than {@code maxPathLength}. Its neighbours are one block further, the
+   * footprint test reads {@code floor(width + 1) - 1} past each, and each cell reads its
+   * surroundings for its type.
    */
   public static int blocks(float maxPathLength, float width) {
     if (!(maxPathLength > 0 && maxPathLength <= WorldEvent.Search.MAX_PATH_LENGTH)) {

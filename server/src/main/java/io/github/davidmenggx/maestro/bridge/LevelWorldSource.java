@@ -17,8 +17,8 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 /**
  * The world boundary's pull side over a Minecraft level. Read on the server thread only.
  *
- * <p>Blocks are read through their chunk, and only while it is loaded at {@code FULL} status, so a
- * read never loads a chunk. A chunk that is not loaded reads as air, as the node holds it.
+ * <p>A read never loads a chunk. A chunk not loaded at {@code FULL} status reads as air, as the
+ * node holds it.
  */
 public final class LevelWorldSource implements WorldSource {
 
@@ -111,12 +111,10 @@ public final class LevelWorldSource implements WorldSource {
   }
 
   /**
-   * Reads a section's cells from its palette instead of block by block. A block's type is a
-   * function of its state, and so is its floor unless the block has a dynamic shape, whose
-   * collision shape is not cached per state and may read the position or a block entity (shulker
-   * boxes and moving pistons read their block entity). So each distinct state is read once per
-   * section, at the first block that has it, and only a dynamic shape's floor is read per block.
-   * Blocks are read through {@code level}, which holds the section.
+   * Reads a section's cells from its palette instead of block by block. A block's type and floor
+   * are functions of its state, except for dynamic shapes (shulker boxes, moving pistons), whose
+   * shape may read the position or block entity. So each distinct state is read once per section,
+   * and only a dynamic shape's floor is read per block.
    */
   static final class Sections {
 
@@ -135,8 +133,7 @@ public final class LevelWorldSource implements WorldSource {
 
     /**
      * Uniform if the section is air, or its palette holds a single state whose floor is not read
-     * per block. A palette can still list a state no block has any more, so such a section is not
-     * reported uniform. {@code (minX, minY, minZ)} is its lowest corner.
+     * per block. A palette can list a state no block has any more, so that is not uniform.
      */
     int uniformCell(BlockGetter level, LevelChunkSection blocks, int minX, int minY, int minZ) {
       if (blocks.hasOnlyAir()) {

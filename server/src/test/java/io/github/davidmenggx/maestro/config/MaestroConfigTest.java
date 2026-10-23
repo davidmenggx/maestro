@@ -19,7 +19,7 @@ class MaestroConfigTest {
 
     assertEquals(MaestroConfig.DEFAULT, MaestroConfig.load(path));
 
-    // The written file must round-trip, otherwise the second boot fails.
+    // The written file must round-trip.
     assertTrue(Files.exists(path));
     assertEquals(MaestroConfig.DEFAULT, MaestroConfig.load(path));
   }
@@ -33,6 +33,12 @@ class MaestroConfigTest {
             {
               "mode": "stateless",
               "subMode": "stream",
+              "offload": "shadow",
+              "nodes": [
+                {"host": "10.0.0.5", "worldPort": 1, "controlPort": 2, "requestPort": 3},
+                {"host": "node-2"}
+              ],
+              "nodeCapacity": 40,
               "otlpEndpoint": "http://collector:4317"
             }
             """);
@@ -41,7 +47,24 @@ class MaestroConfigTest {
 
     assertEquals(MaestroConfig.Mode.STATELESS, config.mode());
     assertEquals(MaestroConfig.SubMode.STREAM, config.subMode());
+    assertEquals(MaestroConfig.Offload.SHADOW, config.offload());
+    assertEquals(
+        List.of(
+            new MaestroConfig.NodeAddress("10.0.0.5", 1, 2, 3),
+            // A port left out is the node's default.
+            new MaestroConfig.NodeAddress(
+                "node-2",
+                MaestroConfig.NodeAddress.DEFAULT_WORLD_PORT,
+                MaestroConfig.NodeAddress.DEFAULT_CONTROL_PORT,
+                MaestroConfig.NodeAddress.DEFAULT_REQUEST_PORT)),
+        config.nodes());
+    assertEquals(40, config.nodeCapacity());
     assertEquals("http://collector:4317", config.otlpEndpoint());
+  }
+
+  @Test
+  void theDefaultOffloadsNothing() {
+    assertEquals(List.of(), MaestroConfig.DEFAULT.nodes());
   }
 
   @Test
@@ -64,8 +87,8 @@ class MaestroConfigTest {
   void rejectsAFileItCannotUse(@TempDir Path dir) throws IOException {
     List<String> unusable =
         List.of(
-            // An unknown enum value, an explicit null, a value of the wrong type, a blank
-            // endpoint, truncated JSON, an empty file, and a value that is not an object.
+            // Unknown enum value, null, wrong type, blank endpoint, truncated JSON, empty file,
+            // non-object.
             """
             {"mode": "sharded", "subMode": "batch", "otlpEndpoint": "http://localhost:4317"}
             """,
@@ -80,7 +103,23 @@ class MaestroConfigTest {
             """,
             "{\"mode\": ",
             "",
-            "[]");
+            "[]",
+            // Unknown offload, no host, port out of range, capacity below one, empty list.
+            """
+            {"offload": "maybe"}
+            """,
+            """
+            {"nodes": [{"worldPort": 1}]}
+            """,
+            """
+            {"nodes": [{"host": "a", "requestPort": 70000}]}
+            """,
+            """
+            {"nodeCapacity": 0}
+            """,
+            """
+            {"nodes": [null]}
+            """);
 
     for (String json : unusable) {
       Path path = write(dir, json);
@@ -106,6 +145,16 @@ class MaestroConfigTest {
     IllegalStateException thrown =
         assertThrows(IllegalStateException.class, () -> MaestroConfig.load(path));
     assertTrue(thrown.getMessage().contains("devMode"), thrown.getMessage());
+
+    // Inside a node too.
+    Path node =
+        write(
+            dir,
+            """
+            {"nodes": [{"host": "a", "worldport": 1}]}
+            """);
+    thrown = assertThrows(IllegalStateException.class, () -> MaestroConfig.load(node));
+    assertTrue(thrown.getMessage().contains("worldport"), thrown.getMessage());
   }
 
   private static Path write(Path dir, String json) throws IOException {

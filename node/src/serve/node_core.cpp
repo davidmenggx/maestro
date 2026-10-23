@@ -249,8 +249,7 @@ Outcome NodeCore::run(const Job &Next, Scratch &With) {
     With.Search->find(*Held, *Next.Mob, Next.Call, With.Path);
     Sequence = Held->sequence();
   } else {
-    // No path at sequence 0, which the controller reads as a search that ran
-    // too early.
+    // Sequence 0 reads as a search that ran too early.
     With.Path.Nodes.clear();
     With.Path.Reached = false;
     With.Path.Cost = 0.0F;

@@ -1,7 +1,4 @@
-# Builds *only* the FlatBuffers compiler (flatc), pinned to the same tag the
-# node's runtime library uses. The top-level Makefile invokes the resulting
-# binary to generate both the C++ and Java bindings, so schema generation has a
-# single source of truth.
+# Builds only `flatc`, pinned to the tag the node's runtime library uses.
 cmake_minimum_required(VERSION 3.24)
 project(maestro_tools LANGUAGES CXX)
 
@@ -23,7 +20,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(flatbuffers)
 
-# Emit flatc at a stable, predictable path: <build>/bin/flatc
+# `flatc` lands at <build>/bin/flatc.
 if(TARGET flatc)
   set_target_properties(flatc PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

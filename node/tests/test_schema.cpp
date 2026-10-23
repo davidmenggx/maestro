@@ -49,10 +49,9 @@ TEST(Schema, WorldFrameCarriesRunLengthEncodedChunk) {
   constexpr int Columns = Width * Width;
   constexpr int Height = 384;
 
-  // Every column is superflat except two. Column 1 is topped by a slab, whose
-  // run has the same type as the run below and differs only in `floor`.
-  // Column 2 has water on the surface. Run counts differ per column, so a
-  // reader cannot assume a fixed stride into `runs`.
+  // Superflat except column 1 (slab on top, same type as the run below, only
+  // `floor` differs) and column 2 (surface water). Run counts differ, so
+  // readers cannot assume a fixed stride into `runs`.
   std::vector<std::uint16_t> RunCounts(Columns, 2);
   RunCounts[1] = 3;
   RunCounts[2] = 3;
@@ -103,7 +102,6 @@ TEST(Schema, WorldFrameCarriesRunLengthEncodedChunk) {
   ASSERT_EQ(Decoded->run_counts()->size(), Columns);
   ASSERT_EQ(Decoded->runs()->size(), Runs.size());
 
-  // The slab run has the same type as the run below it and a different floor.
   const unsigned SlabOffset = Decoded->run_counts()->Get(0);
   EXPECT_EQ(Decoded->runs()->Get(SlabOffset)->node_type(),
             Decoded->runs()->Get(SlabOffset + 1)->node_type());
@@ -125,15 +123,13 @@ TEST(Schema, AChunkWithNoColumnsIsNotResident) {
   const auto *Decoded =
       fbs::GetWorldFrame(Fbb.GetBufferPointer())->body_as_ChunkSnapshot();
   ASSERT_NE(Decoded, nullptr);
-  // Absent, not empty, so the reader can tell "no columns" from a zero-length
-  // vector it could index into.
+  // Absent, not empty, so "no columns" differs from a zero-length vector.
   EXPECT_EQ(Decoded->run_counts(), nullptr);
   EXPECT_EQ(Decoded->runs(), nullptr);
 }
 
 TEST(Schema, PathTypeOrdinalsArePinned) {
-  // The server sends vanilla ordinals unchanged, so check the first, the
-  // last, and one in the middle against the vanilla enum.
+  // Spot-check the first, middle and last ordinals against vanilla.
   static_assert(static_cast<int>(fbs::PathType::BLOCKED) == 0);
   static_assert(static_cast<int>(fbs::PathType::WATER) == 9);
   static_assert(static_cast<int>(fbs::PathType::BIG_MOBS_CLOSE_TO_DANGER) ==

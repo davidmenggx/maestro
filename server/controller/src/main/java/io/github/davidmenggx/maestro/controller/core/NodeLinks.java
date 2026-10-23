@@ -1,4 +1,4 @@
-package io.github.davidmenggx.maestro.controller.sim;
+package io.github.davidmenggx.maestro.controller.core;
 
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
@@ -15,10 +15,10 @@ import java.util.Set;
  * Each node's link: dialing it, the {@code Join} and {@code Hello} handshake, and the profiles sent
  * on it. Every frame to a node leaves through {@link #send}.
  */
-final class NodeLinks {
+public final class NodeLinks {
 
   /** How often a disconnected node is dialed again. */
-  static final int RECONNECT_TICKS = 20;
+  public static final int RECONNECT_TICKS = 20;
 
   private static final class Link {
 
@@ -28,8 +28,8 @@ final class NodeLinks {
     private boolean connecting;
 
     /**
-     * Counts the links opened to the node. It names the link in its {@code Join}, and a request
-     * batch built for one link is never sent on a later one.
+     * Counts links opened to the node. Names the link in its {@code Join}; a batch built for one
+     * link is never sent on a later one.
      */
     private long attempt;
 
@@ -117,10 +117,6 @@ final class NodeLinks {
     return link(node).registeredClasses.add(classId);
   }
 
-  void unregister(NodeId node, short classId) {
-    link(node).registeredClasses.remove(classId);
-  }
-
   boolean registered(NodeId node, short classId) {
     return link(node).registeredClasses.contains(classId);
   }
@@ -159,9 +155,7 @@ final class NodeLinks {
     }
   }
 
-  /**
-   * A node of the fleet. Frames and callbacks from any other are dropped before this is reached.
-   */
+  /** A node of the fleet. Frames and callbacks from any other are dropped earlier. */
   private Link link(NodeId node) {
     Link link = links.get(node);
     if (link == null) {

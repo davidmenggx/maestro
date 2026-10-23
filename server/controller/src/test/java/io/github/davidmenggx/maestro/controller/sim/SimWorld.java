@@ -14,19 +14,16 @@ import java.util.Map;
 import maestro.fbs.PathType;
 
 /**
- * Terrain owned by the simulated server: a square superflat world with mild hills, matching the
- * fuzz-test world shape, covering the {@link Topology}'s grid on both sides of the origin. A
- * column's terrain is a hash of the run's terrain seed and its position, made for a whole chunk the
- * first time the chunk is read, so only the part of the world a run touches is made, and every read
- * is O(1). Block changes are few, so they are kept in a map that is only looked up, never iterated,
- * and no iteration order can affect a run.
+ * Terrain owned by the simulated server: a superflat world with mild hills covering the {@link
+ * Topology}'s grid around the origin. A column's terrain is a hash of the terrain seed and its
+ * position, made per chunk on first read, so reads are O(1). Block changes are kept in a map that
+ * is only looked up, never iterated.
  *
- * <p>Vertical extent, floor and hill relief come from the {@link Topology}, so a sweep covers
- * negative floors and columns that encode into more than a couple of runs.
+ * <p>Vertical extent, floor and relief come from the {@link Topology}.
  */
 public final class SimWorld implements WorldSource {
 
-  /** A bottom slab, so a column's top block can differ from the ones below it only in floor. */
+  /** A bottom slab, so a column's top block can differ from those below in floor. */
   private static final int SLAB_FLOOR = Cells.FULL_FLOOR / 2;
 
   private static final int FENCE_FLOOR = Cells.FULL_FLOOR * 3 / 2;
@@ -52,10 +49,7 @@ public final class SimWorld implements WorldSource {
   private final long terrainSeed;
   private final int lowestGround;
 
-  /**
-   * Each chunk's columns once made, by chunk index then column {@code dx * Chunks.SIZE + dz}, as
-   * {@code ground << 1 | slabTopped}.
-   */
+  /** Each chunk's columns once made, by chunk index then {@code dx * Chunks.SIZE + dz}. */
   private final int[][] terrainByChunk;
 
   /** Changed blocks as {@link Cells#pack packed} cells, by {@link #blockKey}. */
@@ -70,10 +64,7 @@ public final class SimWorld implements WorldSource {
   /** The tick each chunk was last loaded at, or {@link #NOT_LOADED}. */
   private final long[] loadedSince;
 
-  /**
-   * Indices of the loaded chunks, the first {@link #loadedCount} of them, in no meaningful but a
-   * deterministic order, so a workload can draw one in O(1).
-   */
+  /** The first {@link #loadedCount} entries are the loaded chunks, in deterministic order. */
   private final int[] loaded;
 
   /** Where each chunk index sits in {@link #loaded}, or -1. */
@@ -165,10 +156,7 @@ public final class SimWorld implements WorldSource {
     return terrainAt(x, z) >> 1;
   }
 
-  /**
-   * The column's terrain as {@code ground << 1 | slabTopped}, where the top block is a bottom slab
-   * in one column of four.
-   */
+  /** The column's terrain as {@code ground << 1 | slabTopped}. One column in four has a slab. */
   private int terrainAt(int x, int z) {
     int chunkX = Chunks.of(x);
     int chunkZ = Chunks.of(z);
@@ -270,9 +258,8 @@ public final class SimWorld implements WorldSource {
   }
 
   /**
-   * The {@link ModeledNode.AreaDigest#chunkHash} of the chunk as a node holds it once it has every
-   * frame: its blocks if it is loaded, and air if not. Kept until the chunk changes, since every
-   * checkpoint reads every chunk of a region.
+   * The {@link ModeledNode.AreaDigest#chunkHash} of the chunk as a caught-up node holds it. Cached
+   * until the chunk changes.
    */
   public long chunkHash(int chunkX, int chunkZ) {
     int index = chunkIndex(chunkX, chunkZ);
@@ -289,10 +276,7 @@ public final class SimWorld implements WorldSource {
     return hash;
   }
 
-  /**
-   * A collision height that matches the type, as a placed block would have: solid blocks are full
-   * or slabs, fences are a block and a half, and everything else has no collision.
-   */
+  /** A collision height matching the type: full or slab if solid, 1.5 for fences, else none. */
   public static int floorFor(byte pathType, Rng rng) {
     if (pathType == (byte) PathType.BLOCKED) {
       return rng.nextBoolean() ? Cells.FULL_FLOOR : SLAB_FLOOR;
@@ -341,9 +325,8 @@ public final class SimWorld implements WorldSource {
   }
 
   /**
-   * Every block of a loaded chunk, as {@link #cellAt} gives it, indexed {@code (dx * Chunks.SIZE +
-   * dz) * height + dy}. Each column is filled as terrain in three runs, then a changed block in it
-   * is written over its run.
+   * Every block of a loaded chunk as {@link #cellAt} gives it, indexed {@code (dx * Chunks.SIZE +
+   * dz) * height + dy}.
    */
   private void fillChunk(int chunkX, int chunkZ, byte[] cells, byte[] floors) {
     int height = topology.height();
@@ -373,11 +356,7 @@ public final class SimWorld implements WorldSource {
     }
   }
 
-  /**
-   * A section is uniform when no block in it was changed and every column's ground lies wholly
-   * above it, so it is solid, or wholly below it, so it is air. Anything else is read block by
-   * block, which is always correct.
-   */
+  /** A section is uniform if it has no changed block and all grounds are above it or below it. */
   @Override
   public int uniformCell(int chunkX, int chunkZ, int section) {
     if (!chunkLoaded(chunkX, chunkZ)
@@ -403,10 +382,7 @@ public final class SimWorld implements WorldSource {
     return solid ? Cells.pack(Cells.FULL_FLOOR, (byte) PathType.BLOCKED) : NOT_UNIFORM;
   }
 
-  /**
-   * Reads even sections whole and leaves odd ones to block reads, so every run encodes chunks both
-   * ways and the state comparisons check both.
-   */
+  /** Reads even sections whole and odd ones block by block, so both paths get compared. */
   @Override
   public boolean readSection(int chunkX, int chunkZ, int section, int[] cells) {
     if (section % 2 == 1 || !chunkLoaded(chunkX, chunkZ)) {
@@ -425,10 +401,7 @@ public final class SimWorld implements WorldSource {
     return true;
   }
 
-  /**
-   * One randomly drawn {@code WalkNodeEvaluator} profile. Every field the wire carries is drawn, so
-   * the mob class table is encoded and decoded with values that vary between runs, not constants.
-   */
+  /** One randomly drawn {@code WalkNodeEvaluator} profile, with every field the wire carries. */
   private static MobClass profile(short classId, Rng rng) {
     float[] malus = new float[PathTypes.count()];
     for (int ordinal = 0; ordinal < malus.length; ordinal++) {
@@ -467,11 +440,7 @@ public final class SimWorld implements WorldSource {
     return chunkIndex(chunkX, chunkZ) * sections + section;
   }
 
-  /**
-   * A block position as one key: x in the high half, y and z in the low, so the key's hash code,
-   * which folds the halves together, spreads. Y fits 12 bits and z 20 in any world a topology
-   * makes.
-   */
+  /** A block position as one key: x in the high half, y and z in the low (12 and 20 bits). */
   private static long blockKey(int x, int y, int z) {
     return ((long) x << 32) | ((long) (y & 0xFFF) << 20) | (z & 0xFFFFF);
   }

@@ -53,7 +53,7 @@ class EnvContractTest {
         public void record(String name, double value, String... labels) {}
 
         @Override
-        public void gauge(String name, long value, String... labels) {}
+        public void gauge(String name, double value, String... labels) {}
       };
 
   @Test

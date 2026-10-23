@@ -7,14 +7,12 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.phys.AABB;
 
 /**
- * Compares the node's model of the world with vanilla's while a capture runs, query by query. The
- * node treats every cell as a full-width box of its collision height and reads only path types for
- * water, so it can answer a collision or floor query differently. A search where every query got
- * the same answer cannot have been changed by the model.
+ * Compares the node's world model with vanilla's during a capture, query by query. The node treats
+ * every cell as a full-width box of its collision height and reads only path types for water, so it
+ * can answer a query differently. A search where every query agreed was not changed by the model.
  *
- * <p>It also notes when the search reads the mob's own position for a sweep, which the node
- * replaces with its start node. The world border is not compared: the node ignores it, so a capture
- * runs far inside it. Entities need no comparison, since vanilla's search does not see them.
+ * <p>It also notes when a search reads the mob's position for a sweep, which the node replaces with
+ * its start node. The world border and entities are not compared.
  *
  * <p>Fed from {@code WalkNodeEvaluatorMixin} on the server thread.
  */

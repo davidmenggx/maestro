@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Runs a pinned google-java-format over the given Java files, in place. Used by
-# the local pre-commit hook. The jar is cached under XDG_CACHE_HOME on first use.
+# Formats the given Java files in place with a pinned google-java-format, cached
+# under XDG_CACHE_HOME.
 #
-# gjf 1.35.0 is the first line we verified to run on JDK 25; older releases hit a
-# NoSuchMethodError against the JDK 25 javac internals.
+# 1.35.0 is the first release verified on JDK 25; older ones hit a
+# NoSuchMethodError in the javac internals.
 set -euo pipefail
 
 GJF_VERSION=1.35.0
@@ -17,7 +17,7 @@ if [[ ! -f "${JAR}" ]]; then
   curl -fsSL -o "${JAR}" "${URL}"
 fi
 
-# JDK 16+ requires these exports to reach the javac internals gjf uses.
+# JDK 16+ needs these exports for the javac internals.
 exec java \
   --add-exports jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED \
   --add-exports jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED \

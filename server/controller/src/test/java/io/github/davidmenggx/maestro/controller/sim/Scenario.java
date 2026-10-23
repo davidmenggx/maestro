@@ -6,23 +6,18 @@ import java.util.EnumMap;
 import java.util.Map;
 
 /**
- * The load a run puts on the fleet, and how much the world changes during it. Separate from {@link
- * FaultPlan}, which describes network behavior instead of server requests, and from {@link
- * Topology}, which describes the world's shape.
+ * The load a run puts on the fleet, and how much the world changes during it. See {@link FaultPlan}
+ * for network faults and {@link Topology} for the world's shape.
  *
- * <p>Each setting is declared once below, with a minimum it may never go below and a maximum that
- * {@link #sample} draws up to. The sampler, the validation and the coverage assertions all read
- * this table. The maximum limits only the draw, and a focused test may set a higher value.
+ * <p>Each setting is declared once, with a minimum and a maximum that {@link #sample} draws up to.
+ * The sampler, validation and coverage assertions all read this table. A focused test may exceed
+ * the maximum.
  */
 public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) {
 
   /** A whole-number setting. */
   public enum Count {
-    /**
-     * Requests one worker serves per tick on average, so a node serves {@link #WORKERS} times this.
-     * A request on a normal node costs at most a tick and a half, and on a slow one four times
-     * that.
-     */
+    /** Requests one worker serves per tick on average. A slow node costs four times as much. */
     WORKER_CAPACITY(1, 12),
     /** Searches a node runs at once. */
     WORKERS(1, 4),
@@ -34,7 +29,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     MOBS(0, 48),
     MOB_CLASSES(1, 4),
     BLOCK_CHANGES_PER_TICK(0, 6),
-    PLAYERS(0, 3);
+    PLAYERS(0, 3),
+    /** How much of a tick the server works, as a percentage. It idles for the rest. */
+    SERVER_BUSY_PERCENT(20, 100);
 
     private final int floor;
     private final int ceiling;
@@ -53,9 +50,7 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     }
   }
 
-  /**
-   * The probability that the workload emits the event, per mob or per tick depending on the event.
-   */
+  /** The probability that the workload emits the event, per mob or per tick. */
   public enum Chance {
     REQUEST(0.3),
     CANCEL(0.1),
@@ -64,7 +59,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     PLAYER_CHURN(0.1),
     STRAY_REQUEST(0.1),
     /** A mob that asks again in the same tick, as when a goal changes mid-tick. */
-    REPEAT_REQUEST(0.1);
+    REPEAT_REQUEST(0.1),
+    /** A tick whose work runs past its time, so the server falls behind and catches up. */
+    SLOW_TICK(0.2);
 
     private final double ceiling;
 
@@ -107,7 +104,8 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
               Count.MOBS, 12,
               Count.MOB_CLASSES, 2,
               Count.BLOCK_CHANGES_PER_TICK, 3,
-              Count.PLAYERS, 1),
+              Count.PLAYERS, 1,
+              Count.SERVER_BUSY_PERCENT, 50),
           Map.of(
               // A mob repaths about every 15 ticks, roughly as in vanilla.
               Chance.REQUEST, 0.07,
@@ -116,7 +114,8 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
               Chance.CHUNK_CHURN, 0.0,
               Chance.PLAYER_CHURN, 0.01,
               Chance.STRAY_REQUEST, 0.0,
-              Chance.REPEAT_REQUEST, 0.0));
+              Chance.REPEAT_REQUEST, 0.0,
+              Chance.SLOW_TICK, 0.0));
 
   /** Far more demand than the fleet can serve, so pre-send rejection must limit the load. */
   public static final Scenario SATURATED =
@@ -126,12 +125,13 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
           .with(Count.MOBS, 40)
           .with(Chance.REQUEST, 0.25);
 
-  /**
-   * Chunks are repeatedly unloaded and loaded, so regions keep becoming unreadable and readable.
-   */
+  /** Chunks are repeatedly unloaded and loaded, so regions keep becoming unreadable. */
   public static final Scenario CHURN = DEFAULT.with(Chance.CHUNK_CHURN, 0.08);
 
-  /** One draw from the full range of every setting, including loads the fleet cannot serve. */
+  /** Share of sampled runs whose server falls behind. The rest can be held to the latency SLO. */
+  static final double SLOW_SERVER_SHARE = 0.3;
+
+  /** One draw from the full range of every setting. Few draws have slow ticks. */
   public static Scenario sample(Rng rng) {
     Map<Count, Integer> counts = new EnumMap<>(Count.class);
     for (Count setting : Count.values()) {
@@ -140,6 +140,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     Map<Chance, Double> chances = new EnumMap<>(Chance.class);
     for (Chance setting : Chance.values()) {
       chances.put(setting, rng.nextDouble() * setting.ceiling());
+    }
+    if (rng.nextDouble() >= SLOW_SERVER_SHARE) {
+      chances.put(Chance.SLOW_TICK, 0.0);
     }
     return new Scenario(counts, chances);
   }
@@ -157,10 +160,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
   }
 
   /**
-   * How the {@code n}th node serves. Its workers each take a cost drawn evenly within {@link
-   * Count#COST_SPREAD_PERCENT} of the mean either side of it, and the mean gives a worker {@link
-   * Count#WORKER_CAPACITY} a tick. A few nodes are four times slower than the rest, so admission
-   * control, which assumes uniform capacity, is tested against a fleet that does not have it.
+   * How the {@code n}th node serves. Worker costs are drawn within {@link
+   * Count#COST_SPREAD_PERCENT} of the mean, which gives {@link Count#WORKER_CAPACITY} a tick. A few
+   * nodes are four times slower, so admission is tested against non-uniform capacity.
    */
   public ModeledNode.Service serviceOf(int nodeIndex) {
     int slowdown = nodeIndex < counts.get(Count.SLOW_NODES) ? 4 : 1;
@@ -182,6 +184,12 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
       highest = Math.max(highest, serviceOf(i).maxCostSteps());
     }
     return highest;
+  }
+
+  /** Steps of each tick the server works, from {@link Count#SERVER_BUSY_PERCENT}. */
+  public int serverBusySteps() {
+    int steps = Simulation.STEPS_PER_TICK * counts.get(Count.SERVER_BUSY_PERCENT) / 100;
+    return Math.max(1, Math.min(Simulation.MAX_BUSY_STEPS, steps));
   }
 
   /** The capacity the controller assumes every node has, which differs from the truth. */

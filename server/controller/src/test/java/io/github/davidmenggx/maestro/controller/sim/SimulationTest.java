@@ -4,12 +4,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.core.NodeLinks;
+import io.github.davidmenggx.maestro.controller.core.WorldStreams;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
@@ -21,11 +27,7 @@ class SimulationTest {
   /** Tick at which the node chosen by the retention test loses its connection. */
   private static final long CUT_TICK = 40;
 
-  /**
-   * How long that node stays away. A region emits at most one world frame a tick, so the partition
-   * must last several times the replay window before the stream moves past the resume point. If the
-   * margin is too short, the resume count below becomes non-zero.
-   */
+  /** How long that node stays away: several replay windows, past the resume point. */
   private static final long AWAY_TICKS = 4L * WorldStreams.RETENTION_FRAMES;
 
   /** Quiet ticks after the partition ends, for the new snapshot to arrive and the run to settle. */
@@ -34,22 +36,28 @@ class SimulationTest {
   /** Tick at which a node dies, two ticks before the controller's next reconnect attempt. */
   private static final long DEATH_TICK = 38;
 
-  /**
-   * Tick at which the control channel stalls: after the fleet connects, before profiles are
-   * registered.
-   */
+  /** Tick at which the control channel stalls, before profiles register. */
   private static final long STALL_TICK = 2;
 
   /** Long enough for several requests to name a profile that is still held behind the stall. */
   private static final long STALL_TICKS = 15;
+
+  /** Four workers serve each tick's few requests at once; a batch leaves a tick before due. */
+  private static final Scenario EDGE_SCENARIO =
+      Scenario.DEFAULT.with(Count.WORKERS, 4).with(Count.SERVER_BUSY_PERCENT, 100);
+
+  /** Holds the origin's region, where the spawn chunks keep the world loaded. */
+  private static final NodeId SPAWN_HOLDER = NodeId.of(0);
+
+  /** The default grid with no region held twice, so a node that cannot answer has no stand-in. */
+  private static final Topology ALONE = Topology.DEFAULT.withReplicated(0);
 
   /** Block changes per tick, enough that most regions see one on most ticks. */
   private static final int CHANGES_PER_TICK = 2 * Topology.DEFAULT.nodeCount();
 
   @Test
   void sameSeedReplaysIdentically() {
-    // Both runs share a JVM, so identity hash codes differ between them, and an
-    // identity-ordered collection anywhere produces a digest mismatch.
+    // Identity hash codes differ between runs, so identity-ordered collections break the digest.
     SimRun first = SimRun.of(7L, FaultPlan.reliable(), TICKS).go();
     SimRun second = SimRun.of(7L, FaultPlan.reliable(), TICKS).go();
 
@@ -70,9 +78,22 @@ class SimulationTest {
         run.sim.metrics().counter("offload.submitted", "job", "delta")
             > run.regions.regions().size(),
         run.describe());
+    // A region where no chunk was ever loaded has nothing to stream.
+    Set<Integer> loaded = new TreeSet<>();
+    for (int i = 0; i < run.world.loadedCount(); i++) {
+      long chunk = run.world.loadedChunk(i);
+      Region region =
+          run.regions.regionAt((int) (chunk >> 32) * Chunks.SIZE, (int) chunk * Chunks.SIZE);
+      if (region != null) {
+        loaded.add(region.id());
+      }
+    }
+    assertFalse(loaded.isEmpty(), run.describe());
     for (ModeledNode node : run.sim.nodes()) {
-      assertTrue(node.hasState(), run.describe());
-      assertTrue(node.lastSequence() > 1, run.describe());
+      if (loaded.contains(run.regions.regionOf(node.id()))) {
+        assertTrue(node.hasState(), run.describe());
+        assertTrue(node.lastSequence() > 1, run.describe());
+      }
     }
   }
 
@@ -88,14 +109,10 @@ class SimulationTest {
     assertEquals(0, run.sim.metrics().gauge("controller.outstanding"), run.describe());
   }
 
-  /**
-   * Each way takes the most at which one request at the highest cost is still answered in time, so
-   * a round trip and a search take nearly a tick and the SLO leaves the controller no slack. Four
-   * workers serve each tick's few requests at once.
-   */
+  /** Each way takes the most at which one request at the highest cost is still answered in time. */
   @Test
   void aCleanRunAtTheLatencyEdgeStillMeetsTheSlo() {
-    Scenario wide = Scenario.DEFAULT.with(Count.WORKERS, 4);
+    Scenario wide = EDGE_SCENARIO;
     int edgeLatency = FaultPlan.edgeLatency(wide.maxCostSteps(Topology.DEFAULT.nodeCount()));
     FaultPlan edge = new FaultPlan(edgeLatency - 10, edgeLatency, 0.0, 0.0, 0.0, List.of());
     SimRun run = SimRun.of(3L, edge, TICKS, wide).go();
@@ -109,13 +126,10 @@ class SimulationTest {
     assertEquals(0, run.sim.metrics().total("path.resent"), run.describe());
   }
 
-  /**
-   * The negative control: a little past the edge for even the cheapest search, every answer is a
-   * tick late, and the run is known from its inputs not to fit.
-   */
+  /** The negative control: a little past the edge, every answer is a tick late. */
   @Test
   void aLatencyPastTheEdgeMakesEvenACorrectControllerLate() {
-    Scenario wide = Scenario.DEFAULT.with(Count.WORKERS, 4);
+    Scenario wide = EDGE_SCENARIO;
     int late = FaultPlan.edgeLatency(wide.serviceOf(0).minCostSteps()) + 1;
     SimRun run =
         SimRun.of(3L, new FaultPlan(late, late, 0.0, 0.0, 0.0, List.of()), TICKS, wide).go();
@@ -127,8 +141,7 @@ class SimulationTest {
 
   @Test
   void aRunWithAFaultIsNotHeldToTheSlo() {
-    // A lost request times out, which the SLO counts as a miss, so a lossy run is held
-    // only to the other invariants.
+    // A lost request times out and counts as a miss, so a lossy run skips the SLO.
     SimRun run = SimRun.of(3L, FaultPlan.reliable().withDropRate(0.05), TICKS).go();
 
     assertFalse(run.fitsCapacity(), run.describe());
@@ -139,8 +152,7 @@ class SimulationTest {
   void aDuplicatedRequestIsAnsweredOnceByTheController() {
     SimRun run = SimRun.of(5L, FaultPlan.reliable().withDuplicateRate(0.4), TICKS).go();
 
-    // The node answers a retry with identical bytes, so the controller sees more
-    // responses than requests and must discard the extras, not apply them twice.
+    // A retry gets identical bytes, so the controller must discard the extra responses.
     assertTrue(run.sim.nodes().stream().mapToLong(ModeledNode::duplicateRequests).sum() > 0);
     assertTrue(run.sim.metrics().counter("path.response.stale") > 0, run.describe());
     assertEquals(List.of(), run.violations(), run.describe());
@@ -150,8 +162,7 @@ class SimulationTest {
   void everyNodeIsToldAProfileBeforeItIsAskedToUseIt() {
     SimRun run = SimRun.of(17L, FaultPlan.reliable(), TICKS).go();
 
-    // With nothing delaying the control channel, no request arrives before its profile.
-    // Registration costs one request per profile, as the drop count shows.
+    // Registration costs one request per profile.
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(0, run.sim.metrics().total("path.profile.unknown"), run.describe());
     assertTrue(run.out.dropped(DropReason.CLASS_UNREGISTERED) > 0, run.describe());
@@ -165,8 +176,7 @@ class SimulationTest {
 
   @Test
   void aRequestThatOvertakesItsProfileIsDroppedAtOnce() {
-    // The control channel stalls just after the fleet connects, so profiles registered in
-    // the first ticks are held back while requests naming them arrive over UDP.
+    // The stall holds back early profile registrations while requests naming them arrive over UDP.
     FaultPlan plan = FaultPlan.reliable();
     for (NodeId node : nodeIds()) {
       plan =
@@ -185,8 +195,7 @@ class SimulationTest {
     assertEquals(List.of(), run.violations(), run.describe());
     long unknown = run.sim.metrics().total("path.profile.unknown");
     assertTrue(unknown > 0, run.describe());
-    // Each was dropped immediately, with the same reason as the registering request,
-    // and none timed out.
+    // Each was dropped at once, with the registering request's reason.
     assertTrue(run.out.dropped(DropReason.CLASS_UNREGISTERED) >= unknown, run.describe());
     assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
     assertTrue(run.fleetCounter("transport.held", Channel.CONTROL) > 0, run.describe());
@@ -197,13 +206,13 @@ class SimulationTest {
   void aFailedEncodeIsRetriedUnderTheSameSequence() {
     SimRun run = SimRun.of(41L, FaultPlan.reliable().withOffloadFailureRate(0.3), TICKS).go();
 
-    // A retry builds the same frame with the same sequence number, so the stream has no
-    // gap and every node ends with the same state as a fresh snapshot.
+    // A retry reuses the frame and sequence, so the stream has no gap.
     assertEquals(List.of(), run.violations(), run.describe());
     assertTrue(run.sim.metrics().total("offload.failed") > 0, run.describe());
+    // Each failure is retried, unless it was the last attempt.
     assertEquals(
         run.sim.metrics().total("offload.failed"),
-        run.sim.metrics().total("offload.retried"),
+        run.sim.metrics().total("offload.retried") + run.sim.metrics().total("offload.abandoned"),
         run.describe());
     assertTrue(run.sim.metrics().counter("offload.retried", "job", "chunk") > 0, run.describe());
     assertTrue(run.sim.metrics().counter("offload.retried", "job", "delta") > 0, run.describe());
@@ -214,20 +223,19 @@ class SimulationTest {
 
   @Test
   void aRequestBatchThatOutlivesItsConnectionIsNotSent() {
-    // Encodes fail often, so a batch built before the node dies is still being retried
-    // after it returns. Its requests were dropped with the old connection, and the
-    // profiles they name are not registered on the new one, so sending it would ask the
-    // node for profiles it never received.
+    // Encodes fail often, so a batch built before the node dies may still be retrying after it
+    // returns. Its profiles are not registered on the new link, so it must not be sent.
     NodeId victim = NodeId.of(0);
+    long back = 2 * NodeLinks.RECONNECT_TICKS;
     FaultPlan plan =
         FaultPlan.reliable()
             .withOffloadFailureRate(0.7)
             .with(
-                new FaultPlan.NodeDied(DEATH_TICK, victim),
-                new FaultPlan.NodeRecovered(DEATH_TICK + 1, victim));
+                new FaultPlan.NodeDied(back - 1, victim),
+                new FaultPlan.NodeRecovered(back, victim));
 
     long discarded = 0;
-    for (long seed = 1; seed <= 10; seed++) {
+    for (long seed = 1; seed <= 30; seed++) {
       SimRun run = SimRun.of(seed, plan, TICKS, Scenario.DEFAULT.with(Chance.REQUEST, 0.3)).go();
       assertEquals(List.of(), run.violations(), run.describe());
       assertEquals(0, run.sim.metrics().total("path.profile.unknown"), run.describe());
@@ -242,8 +250,7 @@ class SimulationTest {
 
     assertTrue(run.out.dropped(DropReason.QUEUE_DEPTH) > 0, run.describe());
     assertTrue(run.out.answered() > 0, run.describe());
-    // Everything admitted is answered in time: requests the controller gave up on still
-    // counted against their node until it was done with them.
+    // Requests the controller gave up on still counted against their node.
     assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
     // A saturated fleet is not held to the 3-tick SLO. Shedding exists for that case.
     assertFalse(run.fitsCapacity(), run.describe());
@@ -255,8 +262,7 @@ class SimulationTest {
     SimRun run = SimRun.of(SimRun.baseSeed(), FaultPlan.reliable(), TICKS, Scenario.SATURATED).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    // Mobs ask again while their older requests still wait behind a backlog, so the
-    // cancels reach requests the node has not started.
+    // Mobs ask again behind a backlog, so cancels reach requests the node has not started.
     assertTrue(run.sim.metrics().total("path.cancels") > 0, run.describe());
     assertTrue(
         run.sim.nodes().stream().mapToLong(ModeledNode::canceledRequests).sum() > 0,
@@ -276,10 +282,9 @@ class SimulationTest {
     assertEquals(first.sim.digest().value(), second.sim.digest().value(), first.describe());
     assertEquals(List.of(), first.violations(), first.describe());
     assertTrue(
-        first.out.dropped(DropReason.NODE_LOST) + first.out.dropped(DropReason.NO_NODE) > 0,
+        first.out.dropped(DropReason.NODE_LOST) + first.out.dropped(DropReason.UNAVAILABLE) > 0,
         first.describe());
-    // The world stream restarts with a new send instead of resuming into a gap, and
-    // the rebuilt node state must equal a fresh recomputation of the same world.
+    // The stream restarts instead of resuming into a gap, and must equal a fresh recomputation.
     assertTrue(first.sim.node(victim).hasState(), first.describe());
     assertTrue(
         first.sim.metrics().counter("offload.submitted", "job", "chunk") > first.chunkCount(),
@@ -292,7 +297,7 @@ class SimulationTest {
 
   @Test
   void aLinkResetReplaysTheWorldStreamInsteadOfResnapshotting() {
-    NodeId victim = NodeId.of(2);
+    NodeId victim = SPAWN_HOLDER;
     FaultPlan plan = FaultPlan.reliable().with(new FaultPlan.LinkReset(60, victim));
 
     SimRun run = SimRun.of(23L, plan, TICKS).go();
@@ -311,7 +316,7 @@ class SimulationTest {
 
   @Test
   void aNodeThatFallsPastTheRetentionWindowIsResnapshotted() {
-    NodeId victim = NodeId.of(2);
+    NodeId victim = SPAWN_HOLDER;
     FaultPlan plan =
         FaultPlan.reliable()
             .with(
@@ -361,40 +366,141 @@ class SimulationTest {
   }
 
   @Test
-  void aPartitionedNodeIsSilentAndItsRequestsTimeOut() {
-    NodeId victim = NodeId.of(1);
+  void aPartitionedNodeIsTakenOutOfServiceAndProbedBackOnceItAnswers() {
+    NodeId victim = SPAWN_HOLDER;
     FaultPlan plan =
         FaultPlan.reliable()
             .with(
                 new FaultPlan.Partitioned(40, victim, true),
-                new FaultPlan.Partitioned(80, victim, false));
+                new FaultPlan.Partitioned(100, victim, false));
 
-    SimRun run = SimRun.of(13L, plan, TICKS).go();
+    SimRun run = SimRun.of(13L, plan, 200, ALONE, Scenario.DEFAULT).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    // No reset, so nothing tells the controller the node is gone. Only the request
-    // timeout does, which is the gap a failure detector fills.
-    assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
-    assertTrue(run.out.dropped(DropReason.TIMEOUT) > 0, run.describe());
+    // No reset tells the controller. Unanswered requests do, so the rest are dropped or
+    // refused and their mobs search on the server.
+    assertEquals(1, opened(run, victim), run.describe());
+    assertTrue(run.out.dropped(DropReason.NODE_LOST) > 0, run.describe());
+    assertTrue(
+        run.sim.metrics().counter("path.rejected", "reason", "unavailable") > 0, run.describe());
+    assertTrue(run.sim.failOpenJudged() > 0, run.describe());
+    // A probe during the partition goes unanswered, and one after it brings the node back.
+    assertTrue(circuit(run, victim, "probing") >= 2, run.describe());
+    assertEquals(1, circuit(run, victim, "closed"), run.describe());
+    assertEquals(1, run.sim.metrics().gauge("node.in_service", "node", victim.toString()));
     // Frames are held, not lost, so the stream has no gap once the partition ends.
     assertTrue(run.fleetCounter("transport.held", Channel.WORLD) > 0, run.describe());
-    assertTrue(run.sim.node(victim).lastSequence() > 1, run.describe());
+    assertTrue(Invariants.caughtUp(run.controller, run.sim.node(victim)), run.describe());
   }
 
   @Test
-  void aPausedNodeKeepsItsLinkWhileItsRequestsTimeOut() {
-    NodeId victim = NodeId.of(1);
+  void aPausedNodeIsSuspectedFromItsHeartbeatsAndServedAgainOnceItResumes() {
+    NodeId victim = SPAWN_HOLDER;
+    // Long enough for heartbeats to be overdue even with no request in flight.
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(new FaultPlan.Paused(40, victim, true), new FaultPlan.Paused(140, victim, false));
+
+    SimRun run = SimRun.of(13L, plan, 220, ALONE, Scenario.DEFAULT.with(Chance.REQUEST, 0.0)).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    // The links stay up, so only the heartbeats show it.
+    assertEquals(
+        1, run.sim.metrics().counter("node.suspected", "node", victim.toString()), run.describe());
+    assertEquals(0, opened(run, victim), run.describe());
+    assertEquals(1, run.sim.metrics().gauge("node.in_service", "node", victim.toString()));
+    assertTrue(Invariants.caughtUp(run.controller, run.sim.node(victim)), run.describe());
+  }
+
+  @Test
+  void aPausedNodeWithRequestsInFlightIsTakenOutBeforeItsHeartbeatsAreOverdue() {
+    NodeId victim = SPAWN_HOLDER;
     FaultPlan plan =
         FaultPlan.reliable()
             .with(new FaultPlan.Paused(40, victim, true), new FaultPlan.Paused(70, victim, false));
 
-    SimRun run = SimRun.of(13L, plan, TICKS).go();
+    SimRun run = SimRun.of(13L, plan, TICKS, ALONE, Scenario.DEFAULT).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    // The links stay up, so only the timeout notices, and the node catches up afterwards.
-    assertEquals(0, run.out.dropped(DropReason.NODE_LOST), run.describe());
-    assertTrue(run.out.dropped(DropReason.TIMEOUT) > 0, run.describe());
+    assertEquals(1, opened(run, victim), run.describe());
+    assertEquals(
+        0, run.sim.metrics().counter("node.suspected", "node", victim.toString()), run.describe());
+    assertTrue(run.out.dropped(DropReason.NODE_LOST) > 0, run.describe());
     assertTrue(Invariants.caughtUp(run.controller, run.sim.node(victim)), run.describe());
+  }
+
+  @Test
+  void aNodeWhoseDatagramsAreLostIsAvoidedThoughItsLinkAndHeartbeatsCarryOn() {
+    NodeId victim = SPAWN_HOLDER;
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(
+                new FaultPlan.Blackholed(40, victim, true),
+                new FaultPlan.Blackholed(100, victim, false));
+
+    SimRun run = SimRun.of(17L, plan, 200, ALONE, Scenario.DEFAULT).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(
+        0, run.sim.metrics().counter("node.suspected", "node", victim.toString()), run.describe());
+    assertEquals(1, opened(run, victim), run.describe());
+    assertTrue(
+        run.sim.metrics().counter("path.rejected", "reason", "unavailable") > 0, run.describe());
+    assertEquals(1, circuit(run, victim, "closed"), run.describe());
+    assertTrue(run.sim.failOpenJudged() > 0, run.describe());
+    // Its link never broke, so it kept its stream and nothing was sent twice.
+    assertEquals(0, run.sim.metrics().total("world.resnapshot") - nodes(run), run.describe());
+  }
+
+  @Test
+  void aServerThatStallsTakesNoNodeOutOfService() {
+    // Heartbeats keep arriving while the server hears nothing, and are read by when they came.
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(new FaultPlan.ServerStalled(40, 3 * 20 * Simulation.STEPS_PER_TICK));
+
+    SimRun run = SimRun.of(17L, plan, 200, ALONE, Scenario.DEFAULT).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(run.fitsCapacity(), run.describe());
+    assertFalse(run.heldToTheSlo(), run.describe());
+    assertEquals(0, run.sim.metrics().total("node.suspected"), run.describe());
+    assertEquals(0, run.sim.metrics().total("node.quiet"), run.describe());
+    assertTrue(run.out.answered() > 0, run.describe());
+  }
+
+  @Test
+  void aServerThatFallsBehindTakesNoNodeOutOfService() {
+    SimRun run =
+        SimRun.of(
+                17L, FaultPlan.reliable(), 200, ALONE, Scenario.DEFAULT.with(Chance.SLOW_TICK, 0.2))
+            .go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(run.fitsCapacity(), run.describe());
+    assertEquals(0, run.sim.metrics().total("node.suspected"), run.describe());
+    assertEquals(0, run.sim.metrics().total("node.quiet"), run.describe());
+    assertTrue(run.out.answered() > 0, run.describe());
+  }
+
+  @Test
+  void aRegionWithASecondHolderIsServedByItWhileTheFirstCannotAnswer() {
+    NodeId victim = SPAWN_HOLDER;
+    NodeId replica = run(Topology.DEFAULT).regions.holders(1).get(1);
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(
+                new FaultPlan.Blackholed(40, victim, true),
+                new FaultPlan.Blackholed(100, victim, false));
+
+    SimRun run = SimRun.of(17L, plan, 200, Topology.DEFAULT, Scenario.DEFAULT).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, opened(run, victim), run.describe());
+    assertEquals(0, opened(run, replica), run.describe());
+    // Every mob of the region found a holder in service, so none was refused for it.
+    assertEquals(
+        0, run.sim.metrics().counter("path.rejected", "reason", "unavailable"), run.describe());
   }
 
   @Test
@@ -418,9 +524,8 @@ class SimulationTest {
   }
 
   /**
-   * After a world frame is given up on, the stream starts over and its holders hold the region as
-   * air until its chunks arrive again, so an answer searched meanwhile must not be accepted. The
-   * controller sees that from the chunk's residency, not from the sequence it had at admission.
+   * After a world frame is given up on, holders hold the region as air until its chunks return, so
+   * an answer searched meanwhile must not be accepted. The controller reads that from residency.
    */
   @Test
   void anAnswerSearchedAfterTheStreamStartedOverIsNotAccepted() {
@@ -469,5 +574,23 @@ class SimulationTest {
 
   private static List<NodeId> nodeIds() {
     return IntStream.range(0, Topology.DEFAULT.nodeCount()).mapToObj(NodeId::of).toList();
+  }
+
+  /** Times the node's request path went quiet and was taken out of service. */
+  private static long opened(SimRun run, NodeId node) {
+    return run.sim.metrics().counter("node.quiet", "node", node.toString());
+  }
+
+  private static long circuit(SimRun run, NodeId node, String state) {
+    return run.sim.metrics().counter("node.circuit", "node", node.toString(), "state", state);
+  }
+
+  /** A run's fleet first greets with nothing held, so each node is resnapshotted once. */
+  private static long nodes(SimRun run) {
+    return run.sim.nodes().size();
+  }
+
+  private static SimRun run(Topology topology) {
+    return SimRun.of(1L, FaultPlan.reliable(), 1, topology, Scenario.DEFAULT);
   }
 }

@@ -30,13 +30,10 @@ enum class Port { World, Control };
 using ConnectionId = std::uint64_t;
 
 struct NodeOptions {
-  /// How long an answer or a cancel is kept for later copies of its request:
-  /// twice the 10 ticks after which the controller gives up on a request, so a
-  /// resend still finds its answer when the server's ticks run long.
+  /// How long an answer or a cancel is kept for later copies of its request.
   Clock::duration Retention = std::chrono::milliseconds(1000);
-  /// How long a job may wait between its admission and a worker taking it.
-  /// One that waited longer is not searched, since its answer would come too
-  /// late, and is settled as a canceled request is.
+  /// Longest a job may wait for a worker. A later one is settled unsearched,
+  /// as a canceled request is.
   Clock::duration MaxWait = std::chrono::milliseconds(1000);
   /// How long a new connection may wait before its first frame.
   Clock::duration JoinTimeout = std::chrono::seconds(5);
@@ -46,9 +43,7 @@ struct NodeOptions {
 /// Largest answer the node sends: the largest UDP payload over IPv4.
 inline constexpr std::size_t MaxAnswerSize = 65507;
 
-/// A copy of `Frame` to send as an answer, or null if it is larger than
-/// `MaxAnswerSize`, which no valid request's answer is, since its path is
-/// shorter than its `maxPathLength`.
+/// A copy of `Frame` to send as an answer, or null if over `MaxAnswerSize`.
 Answer answerOf(std::span<const std::uint8_t> Frame);
 
 /// What one thread reuses from job to job.
@@ -73,28 +68,23 @@ struct Outcome {
 /// clock of its own. Events go in, and what the node does comes out through
 /// `Output`.
 ///
-/// The controller connects to the world and control ports, and the two
-/// connections form one link. A connection is pending until its first frame,
-/// which must be a `Join` naming the link it belongs to. The node keeps the
-/// newest link token it accepted, `(run, link)`, and serves one link at a
-/// time: a `Join` of another run or a later link replaces the link, one of
-/// the current link joins it once per port, and anything else is refused by
-/// closing that connection alone. Losing either joined connection loses the
-/// link, and a dropped link's token is not accepted again.
+/// A connection is pending until its first frame, which must be a `Join`
+/// naming a link `(run, link)`. The node serves one link at a time: a `Join`
+/// of another run or a later link replaces it, the current link joins once per
+/// port, and anything else is closed alone. Losing either joined connection
+/// loses the link, and a dropped link's token is not accepted again.
 ///
 /// A link starts with a `Hello` on its control connection. Losing it forgets
-/// every profile and request, since the next link may come from another
-/// controller run, whose ids mean other things. The world state stays, so the
-/// next link can resume it. A world frame the store refuses, or an assignment
-/// of another run than the link's, drops the world state too, and the link
-/// with it, so the controller reconnects and sends the area again.
+/// every profile and request, but the world state stays so the next link can
+/// resume it. A refused world frame, or an assignment of another run than the
+/// link's, drops the world state and the link, so the controller reconnects
+/// and sends the area again.
 ///
-/// A job is answered only if it is searched and its answer fits a datagram.
-/// Otherwise it settles with no answer, and a later copy is dropped.
+/// A job is answered only if it is searched and the answer fits a datagram.
+/// Otherwise it settles with no answer, and later copies are dropped.
 ///
-/// Every member but `queue`, `run` and `searchKind` must be called from one
-/// thread, the event thread, which is also the thread `Output` is called on.
-/// `queue`, `run` and `searchKind` may be called from any thread.
+/// Every member but `queue`, `run` and `searchKind` belongs to the event
+/// thread, which `Output` is also called on. Those three are thread-safe.
 class NodeCore {
 public:
   class Output {

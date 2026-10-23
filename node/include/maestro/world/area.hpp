@@ -86,12 +86,9 @@ struct CellEdit {
 };
 
 /// One immutable version of an assigned area, as of a world stream sequence.
-/// A new version shares every chunk and column it did not change, so a search
-/// can keep using its version while newer ones are published. A chunk with no
-/// state reads as air, as does anything outside the area.
-///
-/// A version also records its stream, so `run`, `regionId` and `sequence` from
-/// one version always describe the same stream position.
+/// A new version shares every chunk and column it did not change. A chunk with
+/// no state reads as air, as does anything outside the area. `run`, `regionId`
+/// and `sequence` of one version describe one stream position.
 class Area {
 public:
   /// An all-air area at position `Sequence` of the stream named by
@@ -112,8 +109,7 @@ public:
 
   Cell at(int X, int Y, int Z) const;
 
-  /// The column at `X`, `Z`, or null where it reads as air. Used to check
-  /// which columns versions share.
+  /// The column at `X`, `Z`, or null where it reads as air.
   const Column *column(int X, int Z) const;
 
   /// A version with one chunk replaced. A null `Content` clears the chunk to
@@ -122,10 +118,8 @@ public:
                                         ChunkPtr Content,
                                         std::uint64_t Sequence) const;
 
-  /// A version with `Edits` applied, a later edit to a cell winning over an
-  /// earlier one. Every edit must be inside the area. An edit that changes a
-  /// chunk with no state starts that chunk from air. Columns and chunks no
-  /// edit changes stay shared.
+  /// A version with `Edits` applied, a later edit to a cell winning. Every
+  /// edit must be inside the area.
   std::shared_ptr<const Area> withCells(std::span<const CellEdit> Edits,
                                         std::uint64_t Sequence) const;
 
@@ -143,9 +137,7 @@ private:
   std::uint64_t ControllerRun;
   std::uint32_t RegionId;
   std::uint64_t Sequence = 0;
-  /// Indexed by `ChunkX`. A frame copies this table and the rows it changes,
-  /// so a one-chunk change copies about two rows of pointers, not one pointer
-  /// per chunk in the area. A null row is air.
+  /// Indexed by `ChunkX`. A null row is air.
   std::vector<RowPtr> Rows;
   /// Shared by every chunk created from air.
   ColumnPtr AirColumn;

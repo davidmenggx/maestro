@@ -223,9 +223,8 @@ TEST(VanillaSearch, OpenDoorsPassOnlyMobsThatPassDoors) {
 }
 
 TEST(VanillaSearch, TheHeuristicIsWeighted) {
-  // A slightly costly cell straight ahead. Vanilla weights the distance to the
-  // target by 1.5, which favours this cell over the diagonal. Unweighted, the
-  // diagonal would leave the heap first.
+  // A slightly costly cell straight ahead. Vanilla's 1.5 distance weight
+  // favours it over the diagonal, which unweighted would pop first.
   DenseWorld World = flat();
   World.set(3, 0, 2, world::Cell{PathType::STICKY_HONEY, 15});
   Profile Mob;
@@ -268,8 +267,8 @@ TEST(WalkNodeEvaluator, ABigMobBesideDangerCapsItsMalus) {
   Big.Width = 1.4F;
   WalkNodeEvaluator Evaluator;
   Evaluator.prepare(*Area, Big, Call);
-  // The footprint covers the cells beside the cactus, but the node itself is
-  // cheaper, so the cost is capped at the node's.
+  // The footprint covers cells beside the cactus, but the node is cheaper, so
+  // its cost caps the result.
   EXPECT_EQ(Evaluator.getPathTypeOfMob(8, 1, 8),
             PathType::BIG_MOBS_CLOSE_TO_DANGER);
 
@@ -320,10 +319,9 @@ bool offers(const std::vector<Node> &Neighbors, BlockPos Pos) {
 } // namespace
 
 TEST(WalkNodeEvaluator, ANodeCostIsOnlyEverRaised) {
-  // A mob that avoids water, standing on honey so it cannot jump. The water
-  // beside it is checked for a floor, and each water node found gets the
-  // larger of its current cost and the water malus. A new node's cost is 0,
-  // so the -1 malus is never applied.
+  // Avoids water, stands on honey so it cannot jump. Each water node gets the
+  // larger of its cost and the water malus; a new node's cost is 0, so the -1
+  // malus never applies.
   DenseWorld World(32, -4, 16);
   World.fill(0, -4, 0, 31, 0, 31, Stone);
   World.set(2, 0, 2, world::Cell{PathType::STICKY_HONEY, 15});
@@ -345,9 +343,8 @@ TEST(WalkNodeEvaluator, ANodeCostIsOnlyEverRaised) {
 }
 
 TEST(WalkNodeEvaluator, LeavingAFenceSweepsTheMobsBox) {
-  // A wide mob whose footprint includes a fence and which tolerates fences,
-  // so its node is a fence node. A step away clears the fence; a step towards
-  // it sweeps the mob's box through the post.
+  // A wide fence-tolerant mob whose node is a fence node. Stepping away
+  // clears the fence; stepping towards it sweeps the box through the post.
   DenseWorld World = flat();
   World.set(6, 1, 2, Fence);
   const auto Area = World.load();
@@ -375,8 +372,7 @@ TEST(WalkNodeEvaluator, AJumpNeedsHeadroomOverTheTakeOff) {
   Evaluator.prepare(*Open, Mob, Call);
   EXPECT_TRUE(offers(neighborsOf(Evaluator, Call.Start), {5, 2, 2}));
 
-  // A carpet at head height is passable, so the mob still tries, but its
-  // collision box blocks the jump.
+  // Carpet at head height is passable, but its collision box blocks the jump.
   World.set(4, 3, 2, world::Cell{PathType::OPEN, 1});
   const auto Covered = World.load();
   Evaluator.prepare(*Covered, Mob, Call);
@@ -399,8 +395,8 @@ TEST(WalkNodeEvaluator, NoCornerIsCutPastAStepUp) {
 }
 
 TEST(WalkNodeEvaluator, AWideMobCutsNoCornerBesideACostlyNode) {
-  // Honey under one corner of the start. The wide footprint puts it in the
-  // north and east neighbours, so only the south-west corner can be cut.
+  // Honey under one corner puts it in the north and east neighbours, so only
+  // the south-west corner can be cut.
   DenseWorld World = flat();
   World.set(3, 0, 2, world::Cell{PathType::STICKY_HONEY, 15});
   const auto Area = World.load();
@@ -424,8 +420,8 @@ TEST(WalkNodeEvaluator, ASmallMobInTheOpenIgnoresFreeTypesAboveIt) {
   WalkNodeEvaluator Evaluator;
   const Request Call = walk({2, 1, 2}, {3, 1, 2});
   Evaluator.prepare(*Area, Mob, Call);
-  // The footprint at y = 2 contains open air and the cocoa, both free. The
-  // node itself is open, so it stays open.
+  // The y = 2 footprint holds open air and cocoa, both free; the node stays
+  // open.
   EXPECT_EQ(Evaluator.getPathTypeOfMob(8, 2, 8), PathType::OPEN);
 }
 
@@ -520,8 +516,7 @@ TEST(Search, APathPastTheWireRangeIsNotEncoded) {
 }
 
 TEST(Search, OneBuilderServesEveryResponse) {
-  // A reused builder is cleared each time, so the second frame holds only its
-  // own response.
+  // A reused builder is cleared, so the second frame holds only its response.
   Result Long;
   for (int X = 0; X < 40; ++X)
     Long.Nodes.push_back({{X, 1, -X}, PathType::WALKABLE});
@@ -634,8 +629,7 @@ TEST(Profile, RefusesAFootprintOverTheLimit) {
   // 1 by 512 by 1, then 1 by 513 by 1.
   EXPECT_TRUE(Fits(0.5F, 511.5F));
   EXPECT_FALSE(Fits(0.5F, 512.0F));
-  // Added in `float`, the width just under 8 rounds up to 9, so the footprint
-  // is 9 by 7 by 9, not 8 by 7 by 8.
+  // Added in `float`, a width just under 8 rounds up to 9: 9 by 7 by 9.
   EXPECT_FALSE(Fits(std::nextafter(8.0F, 0.0F), 6.5F));
   EXPECT_TRUE(Fits(std::nextafter(7.0F, 0.0F), 6.5F));
   // Far past the `int` range.

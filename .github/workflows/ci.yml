@@ -29,7 +29,6 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: gradle
 
-      # `flatc` is built from a pinned tag and every schema target depends on it.
       - name: Cache flatc
         uses: actions/cache@v4
         with:
@@ -42,25 +41,30 @@ jobs:
           path: build/node/_deps
           key: cpp-deps-${{ runner.os }}-${{ hashFiles('node/cmake/Dependencies.cmake') }}
 
-      # The OpenTelemetry C++ SDK builds gRPC from source and would dominate the
-      # run; the node's own code is unaffected by the toggle.
+      # The OpenTelemetry C++ SDK builds gRPC from source and dominates the run.
       - name: Unit tests
         run: make test MAESTRO_WITH_OTEL=OFF
 
-      # Mixin application is a runtime property, so it needs a real server boot.
-      # A cold runner downloads Minecraft and fabric-api first, hence the raised
+      # A cold runner downloads Minecraft and fabric-api first, hence the long
       # timeout.
       - name: Server boot
         run: make test-boot
         env:
           STARTUP_TIMEOUT: "600"
 
-      - name: Upload boot log
+      - name: End to end
+        run: make test-e2e MAESTRO_WITH_OTEL=OFF
+        env:
+          STARTUP_TIMEOUT: "600"
+
+      - name: Upload boot and end-to-end logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: boot-smoke-test-log
-          path: server/build/boot-smoke-test.log
+          name: server-logs
+          path: |
+            server/build/boot-smoke-test.log
+            server/build/e2e-*.log
           if-no-files-found: ignore
 
   sanitize:
@@ -88,20 +92,19 @@ jobs:
           path: build/tools
           key: flatc-${{ runner.os }}-${{ hashFiles('tools/CMakeLists.txt') }}
 
-      # Recent runner kernels randomize more address bits than TSan can map.
+      # TSan cannot map the address bits recent kernels randomize.
       - name: Narrow address randomization
         run: sudo sysctl vm.mmap_rnd_bits=28
 
       - name: Unit tests
         run: make node-test MAESTRO_WITH_OTEL=OFF MAESTRO_SANITIZE=${{ matrix.sanitizer }}
 
-  # One job per tier per seed range.
   fuzz:
     name: Fuzz ${{ matrix.tier }} ${{ matrix.shard }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
-      # Every shard reports its own failing seeds rather than the first one winning.
+      # Each shard reports its own failing seeds.
       fail-fast: false
       matrix:
         tier: [shallow, deep]
@@ -115,7 +118,7 @@ jobs:
             shard: 6
           - tier: shallow
             shard: 7
-        # Sized so a shard's sweep takes about 15 minutes on a hosted runner.
+        # About 15 minutes per shard.
         include:
           - tier: shallow
             seeds: 8000
@@ -146,7 +149,6 @@ jobs:
             SEED=$((1 + ${{ matrix.shard }} * ${{ matrix.seeds }})) \
             RUNS=${{ matrix.seeds }}
 
-      # The failing seed is printed with the run that produced it.
       - name: Upload fuzz report
         if: failure()
         uses: actions/upload-artifact@v4
@@ -162,7 +164,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # google-java-format runs from a local hook and needs a JDK.
+      # The local google-java-format hook needs a JDK.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

@@ -13,10 +13,9 @@ import net.minecraft.world.level.pathfinder.NodeEvaluator;
 import net.minecraft.world.level.pathfinder.PathType;
 
 /**
- * What the server reads from one intercepted {@code PathFinder.findPath} call: the mob's interned
- * profile, the start node the evaluator resolved, the target and the per-call search inputs. It is
- * read between the evaluator's {@code prepare} and {@code done}, because {@code onPathfindingStart}
- * may change the malus and {@code onPathfindingDone} may change it back.
+ * What the server reads from one intercepted {@code PathFinder.findPath} call: the interned
+ * profile, the resolved start node, the target and the per-call inputs. Read between the
+ * evaluator's {@code prepare} and {@code done}, since {@code onPathfindingStart} may change malus.
  */
 public record SearchCall(
     MobClass profile, BlockPos start, BlockPos target, WorldEvent.Search search) {
@@ -25,12 +24,11 @@ public record SearchCall(
 
   /**
    * Reads the call and interns the mob's profile in {@code profiles}. {@code maxVisitedNodes} is
-   * the budget the search runs with, already scaled by its multiplier. {@code scratch} is a buffer
-   * of {@link PathTypes#count()} floats that the malus is read into; nothing keeps it. Returns null
-   * if an input does not fit the wire or a {@link MobClass.Shape} (a mob whose footprint is over
-   * {@link MobClass.Shape#MAX_FOOTPRINT} cells does not), if two of the search's nodes could share
-   * vanilla's node hash ({@link NodeHashes}), or if the profile ids are exhausted, so the search
-   * stays vanilla.
+   * the budget already scaled by its multiplier. {@code scratch} holds {@link PathTypes#count()}
+   * floats for the malus and is not kept. Returns null, so the search stays vanilla, if an input
+   * does not fit the wire or a {@link MobClass.Shape} (including a footprint over {@link
+   * MobClass.Shape#MAX_FOOTPRINT} cells), two nodes could share vanilla's hash ({@link
+   * NodeHashes}), or profile ids are exhausted.
    */
   public static SearchCall read(
       Mob mob,

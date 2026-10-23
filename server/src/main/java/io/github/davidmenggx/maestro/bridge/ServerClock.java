@@ -3,8 +3,8 @@ package io.github.davidmenggx.maestro.bridge;
 import io.github.davidmenggx.maestro.controller.env.Clock;
 
 /**
- * Production {@link Clock}. The tick counter belongs to the mod and advances once per server tick,
- * so it stays correct across a world reload. Nanoseconds come from the JVM's monotonic timer.
+ * Production {@link Clock}. The mod owns the tick counter, advanced once per server tick, so it
+ * survives a world reload. Nanoseconds come from the JVM's monotonic timer.
  */
 public final class ServerClock implements Clock {
 

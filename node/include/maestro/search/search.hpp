@@ -53,25 +53,21 @@ struct Result {
   float Cost = 0.0F;
 };
 
-/// Encodes `Path` as a finished `ResponseFrame` of controller run `Run` in
-/// `Builder`, which is cleared first so one builder can be reused. Returns
-/// false, with nothing encoded, if a position does not fit the wire's 16 bits,
-/// which cannot happen for a request the controller admitted.
+/// Encodes `Path` as a finished `ResponseFrame` of run `Run` in `Builder`,
+/// which is cleared first. Returns false if a position does not fit 16 bits.
 [[nodiscard]] bool encodeResponse(flatbuffers::FlatBufferBuilder &Builder,
                                   std::uint64_t Run, std::uint64_t RequestId,
                                   const Result &Path,
                                   std::uint64_t WorldSequence);
 
-/// Encodes the answer to a request that names a profile this node has not
-/// received, as a finished `ResponseFrame` of controller run `Run` in
-/// `Builder`, which is cleared first.
+/// Encodes the answer to a request naming a profile this node lacks, as a
+/// finished `ResponseFrame` of run `Run` in `Builder`, which is cleared first.
 void encodeUnknownProfile(flatbuffers::FlatBufferBuilder &Builder,
                           std::uint64_t Run, std::uint64_t RequestId,
                           std::uint16_t ClassId);
 
-/// One pathfinding algorithm. A node picks one at startup and reports it in
-/// `Hello`. An instance reuses scratch state between calls to avoid
-/// allocating, so each thread needs its own.
+/// One pathfinding algorithm, chosen at startup and reported in `Hello`. An
+/// instance reuses scratch state, so each thread needs its own.
 class Search {
 public:
   virtual ~Search() = default;

@@ -2,36 +2,31 @@ include "common.fbs";
 
 namespace maestro.fbs;
 
-// Which search a node runs. `VANILLA` reproduces `PathFinder` and
-// `WalkNodeEvaluator` decision for decision. Any other entry is an
-// alternative compared against it. A node reports its search in `Hello`, so
-// the whole fleet runs one search and the controller knows which search
-// produced each result.
+// Which search a node runs, reported in `Hello`. `VANILLA` ports `PathFinder`
+// and `WalkNodeEvaluator` decision for decision; other entries are
+// alternatives compared against it.
 enum Pathfinder : ubyte {
   VANILLA
 }
 
-// At-least-once and idempotent, keyed by `request_id`. Holds only the inputs
-// of `PathFinder.findPath` that vary per call. `start` is the node that
-// `WalkNodeEvaluator.getStart` resolved on the server (it reads live entity
-// state). `reach_range` is the Manhattan distance that counts as arrival.
+// At-least-once and idempotent, keyed by `request_id`. Holds only the
+// `PathFinder.findPath` inputs that vary per call; the rest comes from the
+// `MobClass`. `start` is the node `WalkNodeEvaluator.getStart` resolved on the
+// server. `reach_range` is the Manhattan distance that counts as arrival.
 // `max_path_length` and `max_visited_nodes` (already multiplied) bound the
-// search. `max_fall_distance` is `Mob.getMaxFallDistance`, which depends on
-// the mob's target, health and the difficulty, so it varies per call.
-// Everything else about the mob comes from its `MobClass`.
+// search. `max_fall_distance` is `Mob.getMaxFallDistance`, which varies with
+// target, health and difficulty.
 //
-// The node never receives the mob's exact position. The two evaluator
-// branches that read it, the collision sweep off a fence or closed door and
-// the rail check, use `start` instead.
+// The node never receives the mob's position; the two evaluator branches that
+// read it (the collision sweep off a fence or closed door, and the rail check)
+// use `start`.
 //
-// There are no tracing fields. A request's trace id is `(run, mix(request_id))`
-// and its span id is `request_id`, where `run` is the request frame's and `mix`
-// is the splitmix64 finalizer
+// There are no tracing fields. The trace id is `(run, mix(request_id))` and
+// the span id is `request_id`, with `run` from the request frame and `mix` the
+// splitmix64 finalizer
 //   z ^= z >> 30; z *= 0xbf58476d1ce4e5b9;
 //   z ^= z >> 27; z *= 0x94d049bb133111eb;
 //   z ^= z >> 31;
-// so both sides derive the same trace id, and ratio sampling still sees random
-// bits.
 table PathRequest {
   request_id:ulong;
   class_id:ushort;
@@ -43,30 +38,26 @@ table PathRequest {
   max_fall_distance:ushort;
 }
 
-// Requests use UDP, one frame per datagram, so a batch is limited by the
-// datagram size and a tick's requests may need several.
+// One frame per datagram, so a tick's requests may need several batches.
 table PathRequestBatch {
   requests:[PathRequest];
 }
 
-// Requests the controller no longer wants, because their mobs asked again,
-// stopped or left. Best effort, like every request frame. A node drops such a
-// request if it has not started it, and ignores a copy that arrives later. A
-// dropped request is never answered.
+// Requests the controller no longer wants. Best effort: a node drops one it
+// has not started, ignores later copies, and never answers it.
 table PathCancel {
   request_ids:[ulong];
 }
 
-// One node of a Minecraft `Path`. `type` is the resolved `PathType`, which
-// the navigation reads while following the path.
+// One node of a Minecraft `Path`; `type` is the resolved `PathType`.
 struct PathNode {
   pos:Vec3s;
   type:PathType;
 }
 
-// Empty `nodes` means no path was found. `reached` mirrors `Path.reached`.
-// `cost` is the malus-weighted A* cost of the end node. `world_sequence` is
-// the stream position the node actually answered against.
+// Empty `nodes` means no path. `reached` mirrors `Path.reached`. `cost` is the
+// malus-weighted A* cost of the end node. `world_sequence` is the stream
+// position the answer was computed against.
 table PathResponse {
   request_id:ulong;
   reached:bool;
@@ -75,11 +66,9 @@ table PathResponse {
   world_sequence:ulong;
 }
 
-// The request named a `class_id` the node has not received. A profile is sent
-// on the control channel a tick before any request that uses it, but that
-// channel is TCP, and a retransmit can delay it for several ticks while
-// requests still arrive over UDP. Replying immediately lets the controller
-// drop the request instead of waiting for a timeout.
+// The request named a `class_id` the node lacks. A TCP retransmit can delay
+// the profile past the UDP request; replying lets the controller drop the
+// request instead of timing out.
 table UnknownProfile {
   request_id:ulong;
   class_id:ushort;

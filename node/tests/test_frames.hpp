@@ -13,8 +13,7 @@ namespace maestro::test {
 
 using Bytes = std::vector<std::uint8_t>;
 
-/// The link and area the frames below name unless told otherwise. The flat
-/// test world of the server and node tests is assigned with these.
+/// Default link and area named by the frames below.
 inline constexpr std::uint64_t TestRun = 9;
 inline constexpr std::uint32_t TestRegion = 2;
 inline constexpr std::uint16_t TestClass = 3;
@@ -39,10 +38,9 @@ Bytes cancelFrame(const std::vector<std::uint64_t> &Ids,
                   std::uint64_t Run = TestRun,
                   std::uint32_t RegionId = TestRegion);
 
-/// Runs `Core`'s waiting jobs on the calling thread, oldest first, and
-/// delivers their answers: `Count` of them, or every one if `Count` is 0. A
-/// job dropped unsearched, because it was canceled or waited past `MaxWait`,
-/// is not counted. Returns how many ran.
+/// Runs `Core`'s waiting jobs on this thread, oldest first, delivering their
+/// answers: `Count` of them, or all if 0. Jobs dropped unsearched (canceled or
+/// past `MaxWait`) are not counted. Returns how many ran.
 std::size_t serveWaiting(serve::NodeCore &Core, serve::Scratch &With,
                          std::size_t Count = 0);
 

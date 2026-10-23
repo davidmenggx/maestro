@@ -1,4 +1,4 @@
-package io.github.davidmenggx.maestro.controller.sim;
+package io.github.davidmenggx.maestro.controller.core;
 
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
@@ -17,21 +17,20 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * The controller. It streams each region's world to the nodes holding it ({@link WorldStreams}),
- * admits, batches, resends and cancels path requests and applies their answers ({@link
- * RequestTracker}), and keeps a link to every node ({@link NodeLinks}). Failover, resharding and
- * the failure detector are not built.
+ * Streams each region's world to its holders ({@link WorldStreams}), handles path requests ({@link
+ * RequestTracker}), links to nodes ({@link NodeLinks}) and removes unresponsive nodes from service
+ * ({@link NodeHealth}). Failover and resharding are not built.
  */
 public final class Controller implements WorldInput, Transport.Listener {
 
   private final ControllerEnv env;
   private final Violations violations = new Violations();
   private final NodeLinks links;
+  private final NodeHealth health;
   private final WorldStreams streams;
   private final RequestTracker requests;
 
-  /** Identifies this controller process to the fleet. */
-  final long run;
+  private final long run;
 
   public Controller(
       ControllerEnv env, WorldSource world, WorldOutput out, RegionMap regions, int nodeCapacity) {
@@ -42,30 +41,30 @@ public final class Controller implements WorldInput, Transport.Listener {
     this.run = env.run();
     Encoder encoder = new Encoder(env);
     this.links = new NodeLinks(env, run, regions.nodes());
+    this.health = new NodeHealth(env.metrics(), regions.nodes());
     this.streams = new WorldStreams(env, world, regions, links, encoder, violations, run);
     this.requests =
         new RequestTracker(
-            env, world, out, regions, links, streams, encoder, violations, run, nodeCapacity);
+            env,
+            world,
+            out,
+            regions,
+            links,
+            health,
+            streams,
+            encoder,
+            violations,
+            run,
+            nodeCapacity);
     env.transport().listen(this);
   }
 
-  /** The classes the controller is made of, for checks that read compiled code. */
-  public static final class Parts {
+  // Accessors for harness assertions and production checks.
 
-    private Parts() {}
-
-    public static List<Class<?>> all() {
-      return List.of(
-          Controller.class,
-          NodeLinks.class,
-          WorldStreams.class,
-          RequestTracker.class,
-          Encoder.class,
-          Violations.class);
-    }
+  /** Identifies this controller process to the fleet. */
+  public long run() {
+    return run;
   }
-
-  // Accessors for harness assertions. Everything below this point is behavior.
 
   public int requestsIssued() {
     return requests.requestsIssued();
@@ -86,6 +85,16 @@ public final class Controller implements WorldInput, Transport.Listener {
     return streams.regionSettled(regionId);
   }
 
+  /** Whether the node is past its handshake on a live link. */
+  public boolean linked(NodeId node) {
+    return links.greeted(node);
+  }
+
+  /** Whether the node is neither suspected nor has a quiet request path. */
+  public boolean inService(NodeId node) {
+    return health.inService(node);
+  }
+
   /** Bookkeeping that must be consistent, and every violation the controller noticed itself. */
   public List<String> selfCheck() {
     List<String> found = new ArrayList<>(violations.list());
@@ -100,6 +109,9 @@ public final class Controller implements WorldInput, Transport.Listener {
     switch (event) {
       case WorldEvent.TickBegan began -> {
         requests.expire(began.tick());
+        for (NodeId node : health.evaluate(began.tick(), env.clock().nowNanos())) {
+          requests.outOfService(node);
+        }
         links.dial(began.tick());
       }
       case WorldEvent.TickEnded ended -> {
@@ -119,7 +131,7 @@ public final class Controller implements WorldInput, Transport.Listener {
       case WorldEvent.MobRemoved removed -> requests.mobRemoved(removed.mobId());
       case WorldEvent.PathRequested requested -> requests.pathRequested(requested);
       case WorldEvent.PathCanceled canceled -> requests.pathCanceled(canceled.mobId());
-      // Shedding and the failover budget will read player positions. Nothing does yet.
+      // Shedding and the failover budget will read player positions.
       case WorldEvent.PlayerMoved ignored -> {}
       case WorldEvent.PlayerLeft ignored -> {}
     }
@@ -142,11 +154,12 @@ public final class Controller implements WorldInput, Transport.Listener {
       return;
     }
     links.disconnected(node);
+    health.disconnected(node);
     requests.linkLost(node);
   }
 
   @Override
-  public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
+  public void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrivedNanos) {
     if (!links.inFleet(node)) {
       env.metrics().count("transport.unknown.node", 1);
       return;
@@ -171,13 +184,15 @@ public final class Controller implements WorldInput, Transport.Listener {
       case Reply.Refusal refusal -> requests.refusal(node, refusal);
       case Reply.Greeting greeting -> {
         links.greeted(node, greeting.pathfinder());
+        health.greeted(node, arrivedNanos);
         streams.hello(node, greeting);
       }
       case Reply.Depth depth -> {
         requests.depth(node, depth.queueDepth());
-        // The only view of a node's backlog in production, and the arrivals a failure
-        // detector reads.
+        health.heartbeat(node, arrivedNanos);
+        // The only view of a node's backlog in production.
         env.metrics().record("node.queue.reported", depth.queueDepth(), "node", node.toString());
+        env.metrics().gauge("node.queue.depth", depth.queueDepth(), "node", node.toString());
       }
       case Reply.Foreign ignored -> env.metrics().count("path.response.foreign", 1);
       case null -> env.metrics().count("controller.unknown.frame", 1, "channel", channel.name());

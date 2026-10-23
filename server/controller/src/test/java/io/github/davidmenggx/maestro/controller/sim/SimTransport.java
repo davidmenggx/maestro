@@ -15,22 +15,27 @@ import java.util.Set;
 
 /**
  * Modeled network. An ordered channel keeps frame order and cannot lose a frame without breaking
- * the connection. An unordered channel may drop, duplicate and reorder frames, which the
- * at-least-once request path must tolerate. Its frames are UDP datagrams, so one too large to send
- * is refused, one split into IP fragments is lost if any fragment is, and one in flight when the
- * link changes still arrives.
+ * the connection. An unordered channel may drop, duplicate and reorder frames. Its frames are UDP
+ * datagrams: one too large is refused, one split into fragments is lost if any fragment is, and one
+ * in flight when the link changes still arrives.
  *
  * <p>Process death resets the connection, so the controller sees it. A partition does not, so only
- * a failure detector can find it. A stall holds only the ordered channels, like TCP holding a
- * stream during a retransmit, so unordered frames can overtake the held ones. A paused process
- * keeps its connections but handles nothing, so what reaches it waits until it resumes.
+ * a failure detector can find it. A stall holds only the ordered channels, so unordered frames can
+ * overtake them. A paused process keeps its connections but handles nothing until it resumes. A
+ * blackhole loses every datagram to and from the node while its links carry on.
  *
- * <p>Overlapping faults of one kind on one node are counted, so a fault ends only when every
- * interval of it has.
+ * <p>A partitioned, paused or blackholed node cannot answer, whatever its links show. The
+ * simulation is told when that starts and ends ({@link Simulation#unresponsive}).
  *
- * <p>Each controller process gets its own {@link Session}. A restarted controller's links are gone
- * and its old session sends nothing, but datagrams still in flight reach the new process. The first
- * frame the node reads on each ordered connection is the one it joins the link with.
+ * <p>Overlapping faults of one kind on a node are counted, so a fault ends when all its intervals
+ * have.
+ *
+ * <p>Each controller process gets its own {@link Session}. A restarted controller's old session
+ * sends nothing, but datagrams in flight reach the new process. The first frame on each ordered
+ * connection is the node's `Join`.
+ *
+ * <p>Frames and link changes reach the controller in arrival order at the next hand-over ({@link
+ * Simulation#toController}).
  */
 public final class SimTransport {
 
@@ -57,13 +62,12 @@ public final class SimTransport {
   private final Map<NodeId, Integer> partitioned = new LinkedHashMap<>();
   private final Map<NodeId, Integer> stalled = new LinkedHashMap<>();
   private final Map<NodeId, Integer> paused = new LinkedHashMap<>();
+  private final Map<NodeId, Integer> blackholed = new LinkedHashMap<>();
 
   /** Counts each node's connect attempts and link changes. A frame is valid only in its own. */
   private final Map<NodeId, Integer> epoch = new LinkedHashMap<>();
 
-  /**
-   * Ordered links whose first frame, which should be a `Join`, the node has handled in this epoch.
-   */
+  /** Ordered links whose first frame, which should be a `Join`, the node handled this epoch. */
   private final Set<Link> opened = new LinkedHashSet<>();
 
   private final Map<Link, Long> lastDelivery = new LinkedHashMap<>();
@@ -79,10 +83,7 @@ public final class SimTransport {
     this.nodes = nodes;
   }
 
-  /**
-   * The transport of one controller process. Once a newer session starts, this one sends nothing
-   * and hears nothing.
-   */
+  /** The transport of one controller process. Once a newer session starts, this one is silent. */
   public final class Session implements Transport {
 
     private Listener listener;
@@ -126,18 +127,27 @@ public final class SimTransport {
               return;
             }
             if (epoch.get(node) != attempt || isDead(node) || count(partitioned, node) > 0) {
-              listener.onDisconnected(node);
+              hear("connect-failed:" + node, lost(node));
               return;
             }
             connected.add(node);
-            listener.onConnected(node);
+            hear(
+                "connected:" + node,
+                listener -> {
+                  sim.metrics().count("transport.connected", 1, "node", node.toString());
+                  listener.onConnected(node);
+                });
           });
     }
 
     /** Runs {@code callback} on the listener later, if this session is still the live one. */
     private void notify(String name, Callback callback) {
-      sim.schedule(
-          latency(),
+      sim.schedule(latency(), name, () -> hear(name, callback));
+    }
+
+    /** Queues {@code callback} for the controller thread, if this session is still the live one. */
+    private void hear(String name, Callback callback) {
+      sim.toController(
           name,
           () -> {
             if (session == this && listener != null) {
@@ -182,7 +192,7 @@ public final class SimTransport {
         sim.metrics().count("transport.link.dropped", 1, "node", node.toString());
         bumpEpoch(node);
         dropLink(node);
-        session.notify("link-dropped:" + node, listener -> listener.onDisconnected(node));
+        session.notify("link-dropped:" + node, lost(node));
       }
 
       @Override
@@ -207,6 +217,14 @@ public final class SimTransport {
     };
   }
 
+  /** Tells the listener the node's link is gone, and the fail-open check that it heard so. */
+  private Callback lost(NodeId node) {
+    return listener -> {
+      sim.linkLost(node);
+      listener.onDisconnected(node);
+    };
+  }
+
   /** Whether the node's process is running, whatever the state of its link. */
   public boolean alive(NodeId node) {
     return !isDead(node);
@@ -221,7 +239,7 @@ public final class SimTransport {
     heldAtNode.remove(node);
     nodes.get(node).kill();
     if (dropLink(node)) {
-      session.notify("reset:" + node, listener -> listener.onDisconnected(node));
+      session.notify("reset:" + node, lost(node));
     }
   }
 
@@ -233,22 +251,45 @@ public final class SimTransport {
     }
   }
 
-  /**
-   * The connection breaks but the process lives, so the node keeps its world state and forgets what
-   * belonged to the link.
-   */
+  /** The connection breaks but the process lives: the node keeps world state, forgets the link. */
   public void resetLink(NodeId node) {
     bumpEpoch(node);
     if (connected.contains(node)) {
       sim.metrics().count("transport.link.reset", 1, "node", node.toString());
       closeLink(node);
-      session.notify("link-reset:" + node, listener -> listener.onDisconnected(node));
+      session.notify("link-reset:" + node, lost(node));
     }
   }
 
   /** Ordered frames are held and replayed when the partition ends. Unordered ones are lost. */
   public void partition(NodeId node, boolean active) {
+    boolean before = unresponsive(node);
     hold(partitioned, node, active);
+    responsiveness(node, before);
+  }
+
+  /** Unordered frames to and from the node are lost. Ordered ones flow. */
+  public void blackhole(NodeId node, boolean active) {
+    boolean before = unresponsive(node);
+    if (active) {
+      increment(blackholed, node);
+    } else {
+      release(blackholed, node);
+    }
+    responsiveness(node, before);
+  }
+
+  /** Whether the node cannot answer a request now: it is partitioned, paused or blackholed. */
+  public boolean unresponsive(NodeId node) {
+    return count(partitioned, node) + count(paused, node) + count(blackholed, node) > 0;
+  }
+
+  /** Tells the simulation if the node started or stopped being able to answer. */
+  private void responsiveness(NodeId node, boolean before) {
+    boolean after = unresponsive(node);
+    if (after != before) {
+      sim.unresponsive(node, after);
+    }
   }
 
   /** Ordered frames are held and replayed when the stall ends. Unordered ones still flow. */
@@ -258,6 +299,12 @@ public final class SimTransport {
 
   /** The node's process freezes: its links stay up, and frames that reach it wait. */
   public void pause(NodeId node, boolean active) {
+    boolean before = unresponsive(node);
+    pauseProcess(node, active);
+    responsiveness(node, before);
+  }
+
+  private void pauseProcess(NodeId node, boolean active) {
     if (active) {
       if (increment(paused, node) == 1) {
         nodes.get(node).pause(true);
@@ -318,11 +365,13 @@ public final class SimTransport {
     byte[] bytes = new byte[frame.remaining()];
     frame.duplicate().get(bytes);
     sim.digest().mix(bytes);
+    if (channel == Transport.Channel.WORLD && direction == Direction.TO_NODE) {
+      sim.worldFrameSent(node, bytes);
+    }
     String nodeLabel = node.toString();
     sim.metrics().count("transport.sent", 1, "node", nodeLabel, "channel", channel.name());
 
-    // The receiving side would refuse it: a node drops a stream frame past its limit, and a
-    // socket will not send a datagram past the protocol's.
+    // The receiver would refuse it: a frame past its limit, or a datagram past the protocol's.
     if (bytes.length > (channel.ordered() ? Frames.MAX_FRAME_BYTES : Frames.MAX_DATAGRAM_BYTES)) {
       sim.metrics().count("transport.oversize", 1, "node", nodeLabel, "channel", channel.name());
       return;
@@ -349,7 +398,10 @@ public final class SimTransport {
       return;
     }
 
-    if (isDead(node) || count(partitioned, node) > 0) {
+    if (channel == Transport.Channel.REQUEST && direction == Direction.TO_NODE) {
+      sim.requestFrameSent(node, bytes);
+    }
+    if (isDead(node) || count(partitioned, node) > 0 || count(blackholed, node) > 0) {
       sim.metrics().count("transport.lost", 1, "node", nodeLabel, "channel", channel.name());
       return;
     }
@@ -387,9 +439,16 @@ public final class SimTransport {
     }
     if (direction == Direction.TO_CONTROLLER) {
       sim.metrics().count("transport.received", 1, "node", label, "channel", channel.name());
-      if (session.listener != null) {
-        session.listener.onFrame(node, channel, ByteBuffer.wrap(bytes));
-      }
+      // Dropped if a restart ended the receiving process first.
+      Session receiver = session;
+      long arrived = sim.env().clock().nowNanos();
+      sim.toController(
+          "received:" + channel,
+          () -> {
+            if (session == receiver && receiver.listener != null) {
+              receiver.listener.onFrame(node, channel, ByteBuffer.wrap(bytes), arrived);
+            }
+          });
       return;
     }
     if (isDead(node)) {
@@ -452,7 +511,9 @@ public final class SimTransport {
   /** Each fragment is lost at the plan's rate, and a datagram is lost with any of its fragments. */
   private double lossChance(int bytes) {
     int fragments = (bytes + FRAGMENT_BYTES - 1) / FRAGMENT_BYTES;
-    return fragments <= 1 ? faults.dropRate() : 1 - Math.pow(1 - faults.dropRate(), fragments);
+    return fragments <= 1
+        ? faults.dropRate()
+        : 1 - StrictMath.pow(1 - faults.dropRate(), fragments);
   }
 
   private int latency() {

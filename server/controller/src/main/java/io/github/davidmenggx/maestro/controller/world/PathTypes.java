@@ -3,11 +3,9 @@ package io.github.davidmenggx.maestro.controller.world;
 import maestro.fbs.PathType;
 
 /**
- * The part of the {@code PathType} contract the controller is responsible for. A cell may carry
- * only a type that {@code getPathTypeFromState} can return. The other types are computed on the
- * node from the cell below and the 24 surrounding cells, and cannot be known from one block state.
- *
- * <p>Sending a derived type would silently disagree with vanilla, so the boundary rejects it.
+ * A cell may carry only a type that {@code getPathTypeFromState} can return. The other types are
+ * derived on the node from the cell below and the 24 surrounding cells, so the boundary rejects
+ * them.
  */
 public final class PathTypes {
 

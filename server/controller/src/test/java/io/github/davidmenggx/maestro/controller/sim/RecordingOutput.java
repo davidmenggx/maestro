@@ -1,9 +1,12 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
+import io.github.davidmenggx.maestro.controller.core.WorldStreams;
 import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionMap;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
+import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
+import io.github.davidmenggx.maestro.controller.world.SearchReach;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput;
 import java.util.ArrayDeque;
@@ -15,35 +18,26 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * Records what came back out of the controller, and folds it into the run digest. It also keeps a
- * ledger of the requests that went in, so each outcome is matched to exactly one of them, and the
- * latency of each answer is measured here rather than taken from the controller.
+ * Records what came back out of the controller and folds it into the run digest. A ledger of the
+ * requests that went in matches each outcome to exactly one, and answer latency is measured here,
+ * not taken from the controller.
  *
- * <p>A repeat request replaces its mob's older one, so between events a mob has at most one request
- * open. While the controller handles a repeat, the older one must be closed first, as superseded.
- * An outcome therefore always names its request: the older one if it is superseded, otherwise the
- * only one.
+ * <p>A repeat request replaces its mob's older one, which must be closed first as superseded, so a
+ * mob has at most one open request between events and an outcome always names its request.
  *
- * <p>A request open when its controller process restarts has no outcome, because nothing is left to
- * report one. It is closed as lost with the process.
+ * <p>A request open when its controller process restarts is closed as lost with the process.
  *
- * <p>A request is servable when it starts in a region, in a chunk loaded long enough for any
- * backlog of chunk reads to have reached it. Dropping a servable request for want of a node counts
- * against the SLO, so a run cannot meet it by turning work away, unless the chunk left meanwhile,
- * since an answer then cannot show it was searched while the chunk was there.
+ * <p>A request is servable when it starts far enough inside a region that the search cannot read
+ * past it, in a chunk loaded long enough for chunk reads to have reached it. Dropping a servable
+ * request for want of a node counts against the SLO, unless its chunk left meanwhile. So does
+ * losing a request with its node.
  */
 public final class RecordingOutput implements WorldOutput {
 
-  /**
-   * One request with no outcome yet. {@code loadedSince} is when the chunk it starts in was loaded,
-   * as of the request, if it is servable.
-   */
+  /** One request with no outcome yet. {@code loadedSince} is when its start chunk loaded. */
   private record Open(long tick, Pos start, Pos target, boolean servable, long loadedSince) {}
 
-  /**
-   * Ticks past the reads of every chunk loaded so far after which a chunk is resident on its
-   * holders: one to greet, one to read it, and margin.
-   */
+  /** Ticks after which a loaded chunk is resident on its holders: greet, read, and margin. */
   private static final int SETTLE_TICKS = 4;
 
   private final Simulation sim;
@@ -84,7 +78,17 @@ public final class RecordingOutput implements WorldOutput {
   private boolean servable(WorldEvent.PathRequested request) {
     Pos start = request.start();
     Region region = regions.regionAt(start.x(), start.z());
-    if (region == null || !world.contains(start.x(), start.z())) {
+    MobClass profile = world.mobClass(request.classId());
+    if (region == null
+        || profile == null
+        || !world.contains(start.x(), start.z())
+        || !SearchReach.fits(
+            region.minX(),
+            region.minZ(),
+            region.size(),
+            start,
+            request.search().maxPathLength(),
+            profile.shape().width())) {
       return false;
     }
     long since = world.loadedSince(Chunks.of(start.x()), Chunks.of(start.z()));
@@ -118,8 +122,7 @@ public final class RecordingOutput implements WorldOutput {
     if (result.cost() == ModeledNode.SEARCHED_OVER_AIR) {
       answeredOverAir++;
     }
-    // A path that reached its target ends there, in world positions. The modeled node's paths
-    // are straight lines, so this checks the positions the controller put back in the world.
+    // The modeled node's paths are straight lines, so this checks the controller's world positions.
     if (result.reached()
         && (result.nodes().isEmpty()
             || !result.nodes().get(result.nodes().size() - 1).pos().equals(result.target()))) {
@@ -151,7 +154,7 @@ public final class RecordingOutput implements WorldOutput {
     sim.digest().mix(sim.now()).mix("drop").mix(mobId).mix(reason.name());
     drops.merge(reason, 1, Integer::sum);
     Open request = close(mobId, reason);
-    if (reason == DropReason.NO_NODE
+    if ((reason == DropReason.NO_NODE || reason == DropReason.UNAVAILABLE)
         && request != null
         && request.servable()
         && world.loadedSince(Chunks.of(request.start().x()), Chunks.of(request.start().z()))
@@ -189,10 +192,7 @@ public final class RecordingOutput implements WorldOutput {
     return request;
   }
 
-  /**
-   * Every outcome that matched no open request or the wrong one, then every request with none yet.
-   * Exactly one outcome per request leaves this empty once the run has drained.
-   */
+  /** Outcomes that matched no open request or the wrong one, then requests with no outcome. */
   public List<String> ledgerViolations() {
     List<String> violations = new ArrayList<>(unmatched);
     for (Map.Entry<Integer, Deque<Open>> entry : open.entrySet()) {
@@ -211,21 +211,19 @@ public final class RecordingOutput implements WorldOutput {
   }
 
   /**
-   * Requests the SLO counts as late: rejected for queue depth, never answered in time, or servable
-   * and dropped for want of a node.
+   * Requests the SLO counts as late: rejected for queue depth, never answered in time, lost with
+   * their node, or servable and dropped for want of a node.
    */
   public long sloMisses() {
-    return dropped(DropReason.QUEUE_DEPTH) + dropped(DropReason.TIMEOUT) + unservedServable;
+    return dropped(DropReason.QUEUE_DEPTH)
+        + dropped(DropReason.TIMEOUT)
+        + dropped(DropReason.NODE_LOST)
+        + unservedServable;
   }
 
   /** Answers the controller accepted although the node searched them over air. */
   public int answeredOverAir() {
     return answeredOverAir;
-  }
-
-  /** Servable requests dropped for want of a node. */
-  public int unservedServable() {
-    return unservedServable;
   }
 
   public int answered() {

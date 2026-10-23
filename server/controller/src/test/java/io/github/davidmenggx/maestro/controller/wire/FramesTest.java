@@ -123,8 +123,7 @@ class FramesTest {
 
   @Test
   void aFullFrameFitsOneDatagramWhicheverFieldsAreZero() {
-    // A field left out at its default would give requests different layouts, each costing
-    // room, so every field is written.
+    // Every field is written, since a field left at its default would change the layout.
     List<Frames.Request> batch = new ArrayList<>();
     for (int i = 0; i < Frames.MAX_REQUESTS_PER_FRAME; i++) {
       WorldEvent.Search search = new WorldEvent.Search(i % 2, 16f, 256, i % 3 == 0 ? 0 : 3);
@@ -459,10 +458,7 @@ class FramesTest {
     };
   }
 
-  /**
-   * {@code inner}, which reads blocks one at a time, but reading the sections {@code whole} picks
-   * in one call.
-   */
+  /** {@code inner}, but reading the sections {@code whole} picks in one call. */
   private static WorldSource readingSections(WorldSource inner, IntPredicate whole) {
     return new WorldSource() {
       @Override
@@ -551,9 +547,7 @@ class FramesTest {
     };
   }
 
-  /**
-   * Solid up to y = 5 and open above, with a fence post. Uniform sections are reported if asked.
-   */
+  /** Solid up to y = 5 and open above, with a fence post. */
   private static WorldSource terrain(boolean reportUniform) {
     return new WorldSource() {
       private byte type(int x, int y, int z) {

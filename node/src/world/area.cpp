@@ -23,8 +23,8 @@ int columnIndex(int X, int Z) {
   return (X % ChunkSize) * ChunkSize + Z % ChunkSize;
 }
 
-/// One edit of a delta, keyed so that sorted, the edits of one chunk are
-/// adjacent, within it those of one column, and a cell's last edit comes last.
+/// One edit of a delta, keyed so sorting groups edits by chunk, then column,
+/// with a cell's last edit last.
 struct EditKey {
   /// `ChunkX * chunksPerSide + ChunkZ`.
   std::uint32_t Chunk;

@@ -5,18 +5,12 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Interns {@link MobClass} profiles by content. The first profile with given inputs gets the next
- * id, starting at 1, and every later profile with the same inputs gets the same one. Ids are never
- * reused.
- *
- * <p>A lookup of a known profile allocates nothing, since one is made for every request.
+ * Interns {@link MobClass} profiles by content. Ids start at 1 and are never reused. A lookup of a
+ * known profile allocates nothing.
  */
 public final class ProfileTable {
 
-  /**
-   * Largest id a profile can have. The wire field is unsigned, but the controller holds an id in a
-   * signed {@code short}.
-   */
+  /** Largest id a profile can have. The controller holds ids in a signed {@code short}. */
   public static final int MAX_ID = Short.MAX_VALUE;
 
   private static final int INITIAL_SLOTS = 64;
@@ -27,9 +21,8 @@ public final class ProfileTable {
   private int[] slots = new int[INITIAL_SLOTS];
 
   /**
-   * The profile with these inputs, interned now if this is the first time they are seen. Null if
-   * the ids are exhausted, so the caller can leave the search to vanilla. {@code malus} is copied
-   * if it is kept.
+   * The profile with these inputs, interned if new. Null if ids are exhausted, so the caller can
+   * leave the search to vanilla.
    */
   public MobClass intern(MobClass.Shape shape, MobClass.Abilities abilities, float[] malus) {
     int hash = hash(shape, abilities, malus);

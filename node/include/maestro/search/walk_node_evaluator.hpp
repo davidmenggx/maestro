@@ -14,16 +14,11 @@ namespace maestro::search {
 /// Port of vanilla's `WalkNodeEvaluator`: the positions a land mob can move to
 /// from a node, and their costs. Method names match vanilla's.
 ///
-/// Vanilla's collision checks also see the world border, which the node does
-/// not model, on purpose. They see no entities, because vanilla searches a
-/// `PathNavigationRegion`, which holds none.
-///
-/// Two inputs vanilla reads are not on the wire. The mob's position is the
-/// bottom centre of the start node, and "in water" means the cell type is
-/// `WATER`, not that its fluid is water. Block shapes are approximated on
-/// purpose: each is a full-width box up to its collision height, rounded up to
-/// a sixteenth. That height is read without the mob, so a block whose collision
-/// depends on the entity, such as powder snow, can collide differently.
+/// Intentional differences from vanilla: no world border, the mob's position
+/// is the bottom centre of the start node, "in water" means a `WATER` cell,
+/// and each block is a full-width box up to its collision height (rounded up
+/// to a sixteenth) read without the mob, so entity-dependent collision such as
+/// powder snow can differ.
 class WalkNodeEvaluator {
 public:
   /// Prepares for one search. All three arguments must outlive `done`.

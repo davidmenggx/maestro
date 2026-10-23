@@ -12,10 +12,7 @@ namespace maestro::net {
 inline constexpr std::size_t HeaderSize = 4;
 
 /// Largest allowed payload. Must match the controller's
-/// `Frames.MAX_FRAME_BYTES`. A chunk's state with every block in its own run is
-/// about 400 KiB at the overworld's 384 blocks and about 4 MiB at the tallest
-/// world Minecraft allows. The controller splits a tick's block changes into
-/// deltas that stay far below it.
+/// `Frames.MAX_FRAME_BYTES`.
 inline constexpr std::uint32_t MaxPayloadSize = 8u << 20;
 
 /// Largest first frame a connection may declare. It must be a `Join`, which

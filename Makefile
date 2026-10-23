@@ -1,22 +1,3 @@
-# Maestro top-level build. Orchestrates:
-#   * flatc          - the FlatBuffers compiler (built once from a pinned tag)
-#   * schema         - generate C++ and Java bindings from schema/*.fbs
-#   * node           - the C++20 compute node (CMake + FetchContent)
-#   * server         - the Java Fabric server mod (Gradle + Loom)
-#
-# Common targets:
-#   make            build node + server
-#   make node       build the C++ compute node
-#   make server     build the Fabric mod jar
-#   make test       run both unit test suites
-#   make fuzz       run the controller's deterministic simulation seed sweeps
-#                   (TIER=shallow|deep|coverage narrows it to one tier)
-#   make test-boot  boot the released mod and assert the mixins applied
-#   make capture    record vanilla parity fixtures (SEED="1 2" N=cases)
-#   make conformance  write the node conformance fixture
-#   make clean      remove build outputs (keeps fetched deps)
-#   make help       list targets
-
 SHELL := /bin/bash
 ROOT  := $(abspath .)
 BUILD := $(ROOT)/build
@@ -29,20 +10,18 @@ GEN_JAVA := $(ROOT)/server/controller/src/generated/java
 
 FLATC := $(BUILD)/tools/bin/flatc
 
-# Minecraft 26.1 needs JDK 25. The `java.toolchain` blocks in the Gradle builds
-# select it, and Gradle finds installed JDKs on its own.
+# Minecraft 26.1 needs JDK 25, selected by the Gradle `java.toolchain` blocks.
 GRADLE := ./gradlew
 
-# Toggle the OpenTelemetry C++ SDK (heavy) for the node build.
+# The OpenTelemetry C++ SDK is heavy to build.
 MAESTRO_WITH_OTEL ?= ON
 
-# Sanitizers for the node build, e.g. `address,undefined` or `thread`. Empty
-# builds without any.
+# e.g. `address,undefined` or `thread`.
 MAESTRO_SANITIZE ?=
 
 .PHONY: all help flatc schema schema-cpp schema-java \
         node node-configure node-test \
-        server server-test fuzz test test-boot capture conformance run-node run-server \
+        server server-test fuzz test test-boot test-e2e capture conformance run-node run-server \
         clean distclean
 
 all: node server ## Build the C++ node and the Java mod
@@ -97,7 +76,7 @@ server: schema-java ## Build the Fabric server mod jar
 	cd server && $(GRADLE) build
 
 server-test: schema-java ## Run the Java unit tests (mod and controller), fuzz excluded
-	cd server && $(GRADLE) test :controller:test
+	cd server && $(GRADLE) test mixinTest :controller:test
 
 fuzz: schema-java ## Run the DST seed sweeps (TIER=shallow|deep|coverage SEED=n RUNS=n)
 	cd server && $(GRADLE) :controller:$(if $(TIER),fuzz-$(TIER),fuzz) \
@@ -109,6 +88,12 @@ run-server: schema-java ## Boot a dev server (WORLD=<name> loads worlds/<name>)
 
 test-boot: schema-java ## Boot the released mod and assert the mixins applied
 	tools/boot-smoke-test.sh
+
+# Each run is `offload:faults`.
+E2E_RUNS := $(if $(OFFLOAD),$(OFFLOAD):$(FAULTS),shadow: on: on:failover)
+
+test-e2e: node schema-java ## Run the released mod against a real node (OFFLOAD=shadow|on FAULTS=failover pick one run; all by default)
+	$(foreach run,$(E2E_RUNS),OFFLOAD=$(word 1,$(subst :, ,$(run))) FAULTS=$(word 2,$(subst :, ,$(run))) tools/e2e-test.sh &&) true
 
 capture: schema-java ## Record parity fixtures into fixtures/parity (SEED="1 2" N=cases)
 	tools/capture-fixtures.sh "$(if $(SEED),$(SEED),$(error set SEED, e.g. SEED="1 2 3"))" \

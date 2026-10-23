@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
+import io.github.davidmenggx.maestro.controller.env.Offload;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.env.Transport;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
@@ -44,11 +45,7 @@ import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 import org.junit.jupiter.api.Test;
 
-/**
- * The harness must be reliable before its runs can be trusted. These tests cover the machinery the
- * assertions depend on, the samplers that decide what a sweep explores, and the guards that report
- * harness misuse as an error message.
- */
+/** Tests for the harness machinery: assertions, samplers and misuse guards. */
 class HarnessGuardsTest {
 
   private static final int DRAWS = 300;
@@ -68,9 +65,11 @@ class HarnessGuardsTest {
   void sampledScenariosSpanTheirRangeAndStayValid() {
     Map<Count, Span> counts = new EnumMap<>(Count.class);
     Map<Chance, Span> chances = new EnumMap<>(Chance.class);
+    int keptUp = 0;
 
     for (int seed = 0; seed < DRAWS; seed++) {
       Scenario scenario = Scenario.sample(SeededRng.of(seed).derive("fuzz"));
+      keptUp += scenario.chances().get(Chance.SLOW_TICK) == 0 ? 1 : 0;
       for (Count setting : Count.values()) {
         counts.computeIfAbsent(setting, unseen -> new Span()).see(scenario.counts().get(setting));
       }
@@ -86,6 +85,9 @@ class HarnessGuardsTest {
     for (Chance setting : Chance.values()) {
       chances.get(setting).assertCovers(setting, 0, setting.ceiling());
     }
+    // The latency SLO applies only to a server that keeps up, so most draws must, and some not.
+    assertTrue(keptUp > DRAWS / 2, keptUp + " of " + DRAWS + " servers kept up");
+    assertTrue(keptUp < DRAWS, "no sampled server fell behind");
   }
 
   @Test
@@ -131,6 +133,7 @@ class HarnessGuardsTest {
     Span failureRate = new Span();
     boolean sawPermanentLoss = false;
     boolean sawEdge = false;
+    long longestSpan = 0;
 
     for (int seed = 0; seed < DRAWS; seed++) {
       FaultPlan plan = FaultPlan.sample(SeededRng.of(seed).derive("fuzz"), 4, active, COST);
@@ -147,8 +150,7 @@ class HarnessGuardsTest {
         kinds.add(fault.getClass().getSimpleName());
         assertTrue(fault.tick() >= 1 && fault.tick() < active, "fault at tick " + fault.tick());
         assertTrue(
-            fault instanceof FaultPlan.ControllerRestarted
-                || ((FaultPlan.NodeFault) fault).node().id() < 4,
+            !(fault instanceof FaultPlan.NodeFault nodeFault) || nodeFault.node().id() < 4,
             fault.toString());
         if (fault instanceof FaultPlan.NodeDied) {
           died++;
@@ -157,11 +159,17 @@ class HarnessGuardsTest {
         }
       }
       sawPermanentLoss |= died > recovered;
+      // A fault with a start and an end is drawn as a pair.
+      for (int i = 0; i + 1 < plan.faults().size(); i++) {
+        FaultPlan.Fault start = plan.faults().get(i);
+        FaultPlan.Fault end = plan.faults().get(i + 1);
+        if (start.getClass() == end.getClass() && !(start instanceof FaultPlan.NodeDied)) {
+          longestSpan = Math.max(longestSpan, end.tick() - start.tick());
+        }
+      }
     }
 
-    // Process death, a silent partition, a stalled stream, a frozen process, a link
-    // reset and a controller restart need different recoveries, so the sweep must
-    // cover all of them.
+    // Each fault kind needs a different recovery, so the sweep must cover all of them.
     assertEquals(
         Set.of(
             "NodeDied",
@@ -169,12 +177,17 @@ class HarnessGuardsTest {
             "Partitioned",
             "Stalled",
             "Paused",
+            "Blackholed",
             "LinkReset",
-            "ControllerRestarted"),
+            "ControllerRestarted",
+            "ServerStalled"),
         kinds);
-    // Faults must be able to accumulate on one node, or the sweep can never cover a
-    // second failure during a recovery. A paired fault adds two entries, so the
-    // count only needs to exceed the number of faults drawn.
+    // Some faults outlast the detectors, or a node is never noticed and probed.
+    assertTrue(
+        longestSpan > FaultPlan.MAX_FAULT_SPAN_TICKS,
+        "no fault outlasted " + FaultPlan.MAX_FAULT_SPAN_TICKS + " ticks: " + longestSpan);
+    // Faults must be able to accumulate on one node, to reach a second failure during a
+    // recovery. A paired fault adds two entries.
     faultCount.assertCovers("fault count", 0, FaultPlan.MAX_FAULTS);
     minLatency.assertCovers("min latency", 1, FaultPlan.MAX_MIN_LATENCY_STEPS);
     maxLatency.assertCovers(
@@ -366,9 +379,8 @@ class HarnessGuardsTest {
 
     node.receive(Channel.REQUEST, requests(walk(5)));
 
-    // A request arriving before its profile is network behavior, not a controller
-    // bug, so it is not a violation. The answer is sent immediately instead of
-    // waiting for a worker.
+    // A request arriving before its profile is network behavior, not a violation. It is
+    // answered at once, without a worker.
     assertEquals(List.of(), node.violations());
     assertEquals(1, requestFramesSent(sim));
   }
@@ -457,7 +469,7 @@ class HarnessGuardsTest {
   }
 
   @Test
-  void aMissIsARejectionForQueueDepthATimeoutOrAServableRequestLeftUnserved() {
+  void aMissIsARejectionForQueueDepthATimeoutANodeLostOrAServableRequestLeftUnserved() {
     RecordingOutput out = recorder(new SimWorld(Topology.DEFAULT, 1, SeededRng.of(1)));
     DropReason[] reasons = DropReason.values();
     for (int mob = 0; mob < reasons.length; mob++) {
@@ -471,18 +483,21 @@ class HarnessGuardsTest {
       }
     }
     assertEquals(List.of(), out.ledgerViolations());
-    assertEquals(2, out.sloMisses());
+    // Queue depth, a timeout and a node lost.
+    assertEquals(3, out.sloMisses());
 
-    // A request from a chunk loaded long enough to be on its node, dropped for want of one.
+    // Requests from a chunk loaded long enough to be on its node, dropped for want of one.
     SimWorld world = new SimWorld(Topology.DEFAULT, 1, SeededRng.of(1));
     world.loadChunk(Chunks.of(ORIGIN.x()), Chunks.of(ORIGIN.z()), 0);
     RecordingOutput servable = recorder(world);
     servable.issued(request(1, 1, ORIGIN));
-    servable.pathDropped(1, DropReason.NO_NODE);
+    servable.pathDropped(1, DropReason.UNAVAILABLE);
     servable.issued(request(2, 100, ORIGIN));
-    servable.pathDropped(2, DropReason.NO_NODE);
+    servable.pathDropped(2, DropReason.UNAVAILABLE);
+    servable.issued(request(3, 100, ORIGIN));
+    servable.pathDropped(3, DropReason.NO_NODE);
     assertEquals(List.of(), servable.ledgerViolations());
-    assertEquals(1, servable.sloMisses());
+    assertEquals(2, servable.sloMisses());
   }
 
   @Test
@@ -542,31 +557,28 @@ class HarnessGuardsTest {
     world.loadChunk(0, 0, 0);
     int size = Topology.REGION_SIZE;
 
-    first.receive(Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 4, false, world)));
-    first.receive(
-        Channel.WORLD,
-        ByteBuffer.wrap(Frames.chunkSnapshot(5, 0, 0, Frames.readChunk(world, 0, 0))));
+    sendWorld(sim, first, Frames.assignment(RUN, 0, size, 4, false, world));
+    sendWorld(sim, first, Frames.chunkSnapshot(5, 0, 0, Frames.readChunk(world, 0, 0)));
     assertEquals(List.of(), sim.streamViolations());
 
-    // A node takes a fresh assignment wherever it starts if it held nothing of the stream, so
-    // the harness checks that no holder's starts behind what another holder applied.
-    second.receive(
-        Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN, 0, size, 2, false, world)));
-    second.receive(
-        Channel.WORLD,
-        ByteBuffer.wrap(Frames.chunkSnapshot(3, 0, 0, Frames.readChunk(world, 0, 0))));
+    // A fresh assignment may start anywhere, but never behind a frame sent to another holder.
+    sendWorld(sim, second, Frames.assignment(RUN, 0, size, 2, false, world));
+    sendWorld(sim, second, Frames.chunkSnapshot(3, 0, 0, Frames.readChunk(world, 0, 0)));
     assertEquals(List.of(), first.violations());
     assertEquals(List.of(), second.violations());
     assertEquals(1, sim.streamViolations().size(), sim.streamViolations().toString());
 
     // Another controller run has a stream of its own.
     ModeledNode third = linked(sim, NodeId.of(2), RUN + 1);
-    third.receive(
-        Channel.WORLD, ByteBuffer.wrap(Frames.assignment(RUN + 1, 0, size, 0, false, world)));
-    third.receive(
-        Channel.WORLD,
-        ByteBuffer.wrap(Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0))));
+    sendWorld(sim, third, Frames.assignment(RUN + 1, 0, size, 0, false, world));
+    sendWorld(sim, third, Frames.chunkSnapshot(1, 0, 0, Frames.readChunk(world, 0, 0)));
     assertEquals(1, sim.streamViolations().size(), sim.streamViolations().toString());
+  }
+
+  /** A world frame the controller sends, delivered at once. */
+  private static void sendWorld(Simulation sim, ModeledNode node, byte[] frame) {
+    sim.worldFrameSent(node.id(), frame);
+    node.receive(Channel.WORLD, ByteBuffer.wrap(frame));
   }
 
   @Test
@@ -745,10 +757,12 @@ class HarnessGuardsTest {
         IntStream.range(0, Topology.DEFAULT.nodeCount()).mapToObj(NodeId::of).toList();
     RegionMap regions = Topology.DEFAULT.regions(fleet);
     assertEquals(fleet, regions.nodes().stream().sorted((a, b) -> a.id() - b.id()).toList());
-    // The grid covers the origin from both sides, and its first region has two holders.
+    // The grid covers the origin from both sides. Its first region is centered on the origin
+    // and has two holders.
     assertEquals(4, regions.regions().size());
     assertEquals(2, regions.holders(regions.regionAt(-1, -1).id()).size());
-    assertEquals(1, regions.holders(regions.regionAt(0, 0).id()).size());
+    assertEquals(2, regions.holders(regions.regionAt(0, 0).id()).size());
+    assertEquals(1, regions.holders(regions.regionAt(200, 200).id()).size());
   }
 
   @Test
@@ -905,7 +919,8 @@ class HarnessGuardsTest {
     transport.connect(id);
     sim.run(event -> {}, (tick, input) -> {}, 1);
     assertEquals(1, listener.connected);
-    // The listener opened the link with a `Join` on each connection, and the node said hello.
+    // The listener sent a `Join` on each connection and the node said hello.
+    sim.run(event -> {}, (tick, input) -> {}, 1);
     assertEquals(0, sim.metrics().total("transport.refused"));
     assertTrue(listener.frames >= 1, "no hello");
 
@@ -917,6 +932,63 @@ class HarnessGuardsTest {
     assertEquals(2, listener.connected);
     assertEquals(0, node.knownClassCount());
     assertEquals(0, sim.metrics().total("transport.refused"));
+  }
+
+  /** The controller hears the network and finished offload work only as a tick starts and ends. */
+  @Test
+  void theControllerHearsAnythingOnlyWhenTheServerHandsOver() {
+    int busySteps = 300;
+    Simulation sim = new Simulation(1L, FaultPlan.reliable());
+    sim.serverBusySteps(busySteps);
+    NodeId id = NodeId.of(0);
+    sim.addNode(id, ModeledNode.Service.MANUAL);
+    Transport transport = sim.env().transport();
+    CountingListener counting = new CountingListener(transport, sim.env().run());
+    List<Long> heardAt = new ArrayList<>();
+    transport.listen(
+        new Transport.Listener() {
+          @Override
+          public void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrived) {
+            heardAt.add(sim.now());
+            counting.onFrame(node, channel, frame, arrived);
+          }
+
+          @Override
+          public void onConnected(NodeId node) {
+            heardAt.add(sim.now());
+            counting.onConnected(node);
+          }
+
+          @Override
+          public void onDisconnected(NodeId node) {
+            heardAt.add(sim.now());
+            counting.onDisconnected(node);
+          }
+        });
+    transport.connect(id);
+    sim.run(
+        event -> {
+          if (event instanceof WorldEvent.TickBegan) {
+            sim.env()
+                .offload()
+                .submit(
+                    "probe",
+                    Offload.Lane.WORLD,
+                    () -> 0,
+                    done -> heardAt.add(sim.now()),
+                    () -> heardAt.add(sim.now()));
+          }
+        },
+        (tick, input) -> {},
+        4);
+
+    assertEquals(1, counting.connected);
+    assertTrue(counting.frames >= 1, "no hello");
+    assertTrue(heardAt.size() > 4, heardAt.toString());
+    for (long step : heardAt) {
+      long within = step % Simulation.STEPS_PER_TICK;
+      assertTrue(within == 0 || within == busySteps, "heard at step " + within + " of its tick");
+    }
   }
 
   @Test
@@ -963,10 +1035,7 @@ class HarnessGuardsTest {
     assertTrue(listener.frames > heard, "the answer never came");
   }
 
-  /**
-   * A chunk frame with {@code columns} one-run columns of air with {@code floor}. Only a faulty
-   * encoder would send one with the wrong column count or a floor past the limit.
-   */
+  /** A chunk frame of {@code columns} one-run air columns at {@code floor}. */
   private static byte[] chunkWithColumns(long sequence, int columns, int floor) {
     FlatBufferBuilder builder = new FlatBufferBuilder(1024);
     int[] counts = new int[columns];
@@ -1123,7 +1192,7 @@ class HarnessGuardsTest {
     }
 
     @Override
-    public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {
+    public void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrived) {
       frames++;
     }
 
@@ -1143,7 +1212,7 @@ class HarnessGuardsTest {
   private static final class NoopListener implements Transport.Listener {
 
     @Override
-    public void onFrame(NodeId node, Channel channel, ByteBuffer frame) {}
+    public void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrived) {}
 
     @Override
     public void onConnected(NodeId node) {}

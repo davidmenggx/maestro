@@ -15,13 +15,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Production {@link Offload}. Work runs on a small daemon pool. Its completion or failure is queued
- * for {@link #drain}, which the server thread calls at the tick boundary, so results reach the
- * controller from one thread only. A free worker takes the oldest job of the first {@link Lane}
- * that has one, so a request job never waits behind a world job that has not started.
+ * Production {@link Offload}. Work runs on a small daemon pool. Completions and failures are queued
+ * for {@link #drain}, called at the tick boundary, so the controller sees results from one thread.
+ * A free worker takes the oldest job of the first {@link Lane} that has one, so a request job never
+ * waits behind an unstarted world job.
  *
- * <p>Every submitted job queues exactly one of the two, also after {@link #close}: a job that can
- * no longer run queues its failure.
+ * <p>Every submitted job queues exactly one of completion or failure, also after {@link #close}.
  */
 public final class PoolOffload implements Offload, AutoCloseable {
 
@@ -63,8 +62,7 @@ public final class PoolOffload implements Offload, AutoCloseable {
       try {
         result = work.get();
       } catch (Throwable e) {
-        // An `Error` is reported too: a job that posts nothing would leave its caller
-        // waiting forever. The caller decides how to handle a failure.
+        // An `Error` is reported too, or the caller would wait forever.
         LOG.error("Maestro offload job '{}' failed", name, e);
         completions.add(failure);
         return;
@@ -90,7 +88,6 @@ public final class PoolOffload implements Offload, AutoCloseable {
             threads,
             0L,
             TimeUnit.MILLISECONDS,
-            // 11 is the default initial capacity. The queue grows as needed.
             new PriorityBlockingQueue<>(11, ORDER),
             runnable -> {
               Thread thread = new Thread(runnable, "maestro-offload");
@@ -113,10 +110,9 @@ public final class PoolOffload implements Offload, AutoCloseable {
   }
 
   /**
-   * Runs the completions and failures queued before this call, on the calling thread. One queued
-   * while it runs, such as a retry submitted by a failure, waits for the next call, so a job that
-   * keeps failing cannot hold up the tick boundary. One that throws is logged and does not stop the
-   * others.
+   * Runs the completions and failures queued before this call. One queued while it runs waits for
+   * the next call, so a job that keeps failing cannot hold up the tick. One that throws is logged
+   * and does not stop the others.
    */
   public void drain() {
     // Only this thread removes entries, so at least this many are present.

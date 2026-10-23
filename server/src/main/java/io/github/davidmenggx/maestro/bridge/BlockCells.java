@@ -21,8 +21,8 @@ public final class BlockCells {
 
   /**
    * Top of the block's collision shape in sixteenths, rounded up and clamped to 0 through {@link
-   * Cells#MAX_FLOOR}, or 0 if it has none. This is the shape {@code getFloorLevel} reads. A block a
-   * piston is moving is shifted by the move, so its top can lie below or above its cell.
+   * Cells#MAX_FLOOR}, or 0 if it has none. A block a piston is moving may lie below or above its
+   * cell.
    */
   public static int floor(BlockGetter level, BlockPos pos) {
     return floor(level.getBlockState(pos), level, pos);

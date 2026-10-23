@@ -1,4 +1,4 @@
-package io.github.davidmenggx.maestro.controller.sim;
+package io.github.davidmenggx.maestro.controller.core;
 
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
@@ -22,27 +22,23 @@ import java.util.TreeMap;
 import java.util.function.Supplier;
 
 /**
- * The world stream of each region: one log of sequence-numbered frames, and each holder's place in
- * it. The log belongs to the region, not to a node holding it, so it survives a reconnect and its
- * sequence keeps rising across resnapshots. Every holder is sent the same frames.
+ * The world stream of each region: one log of sequence-numbered frames and each holder's place in
+ * it. The log belongs to the region, so it survives reconnects and its sequence keeps rising across
+ * resnapshots. Every holder is sent the same frames.
  *
- * <p>Encoding is offloaded and can finish out of order, but frames must leave in sequence order, so
- * finished frames wait in the log until the gap before them is filled. A world frame whose encode
- * keeps failing starts its region's log over.
+ * <p>Encodes can finish out of order but frames leave in sequence order, so finished frames wait
+ * for the gap before them. A frame whose encode keeps failing starts the region's log over.
  */
-final class WorldStreams {
+public final class WorldStreams {
+
+  /** Sent frames kept per region for replay. A holder further behind gets a new snapshot. */
+  public static final int RETENTION_FRAMES = 48;
 
   /**
-   * Sent frames kept per region, so a reconnecting holder can be replayed forward instead of sent a
-   * new snapshot. A holder that fell further behind gets a new snapshot.
+   * Chunks read per tick across all regions, on the main thread. A full resend of a region spreads
+   * over several ticks.
    */
-  static final int RETENTION_FRAMES = 48;
-
-  /**
-   * Chunks read per tick, across all regions. A read runs on the main thread, so a region sent
-   * again in full is spread over several ticks, and its chunks become usable as they arrive.
-   */
-  static final int MAX_CHUNK_READS_PER_TICK = 16;
+  public static final int MAX_CHUNK_READS_PER_TICK = 16;
 
   /** {@link Holder#nextToSend} before the holder's first {@code Hello}: nothing is sent. */
   private static final long NOT_STARTED = Long.MAX_VALUE;
@@ -54,8 +50,8 @@ final class WorldStreams {
     private long nextToSend = NOT_STARTED;
 
     /**
-     * Chunks the holder has resident, each with the sequence of the frame from which it holds it. A
-     * chunk sent as cleared is absent, because the holder has it as air.
+     * Chunks the holder has resident, with the sequence of the frame each came from. A cleared
+     * chunk is absent (air).
      */
     private final Map<Long, Long> resident = new LinkedHashMap<>();
   }
@@ -71,8 +67,8 @@ final class WorldStreams {
     private long ready;
 
     /**
-     * The first sequence of the log as it stands. A frame before it belongs to a log given up on,
-     * and is dropped when its encode finishes.
+     * First sequence of the current log. Earlier frames belong to a log given up on and are dropped
+     * when their encode finishes.
      */
     private long logBase = 1;
 
@@ -132,28 +128,21 @@ final class WorldStreams {
     }
   }
 
-  /**
-   * The world sequence a holder reports once it has applied everything produced for its region: the
-   * last one produced. An assignment stands at the log's position, so this holds for a holder that
-   * holds its assignment alone too.
-   */
+  /** The sequence a holder reports once it has applied everything produced for its region. */
   long heldSequence(NodeId node) {
     int region = regions.regionOf(node);
     return region == RegionMap.NONE ? 0 : logs.get(region).lastSequence;
   }
 
   /**
-   * Whether every change to the region so far is in a frame produced for it, so a holder at {@link
-   * #heldSequence} holds what the world holds now. Block changes are flushed with the tick.
+   * Whether every change so far is in a produced frame, so a holder at {@link #heldSequence}
+   * matches the world now. Block changes are flushed with the tick.
    */
   boolean regionSettled(int regionId) {
     return logs.get(regionId).dirty.isEmpty();
   }
 
-  /**
-   * The sequence from which the node has the chunk resident, or null if it has it as air. A search
-   * starting in the chunk is valid from that sequence on.
-   */
+  /** The sequence from which the node has the chunk resident, or null if it holds air there. */
   Long residentSince(NodeId node, long chunk) {
     int region = regions.regionOf(node);
     return region == RegionMap.NONE ? null : logs.get(region).holders.get(node).resident.get(chunk);
@@ -163,10 +152,7 @@ final class WorldStreams {
     pendingCells.add(change);
   }
 
-  /**
-   * A chunk that leaves is treated as air on its holders, as vanilla does for a chunk it could not
-   * fetch, so the region keeps serving and only that chunk is sent again.
-   */
+  /** A leaving chunk is air on its holders, as in vanilla, so only that chunk is sent again. */
   void chunkResidency(int chunkX, int chunkZ, boolean loaded) {
     long key = Chunks.key(chunkX, chunkZ);
     boolean changed = loaded ? loadedChunks.add(key) : loadedChunks.remove(key);
@@ -180,8 +166,8 @@ final class WorldStreams {
   }
 
   /**
-   * Decides whether to replay the log to the holder or start it over for it. Replay needs the
-   * holder to still hold this log's region, at a sequence the log still has the frames after.
+   * Replays the log to the holder, or starts it over, if the holder cannot resume from the frames
+   * the log still has.
    */
   void hello(NodeId node, Reply.Greeting hello) {
     int regionId = regions.regionOf(node);
@@ -210,9 +196,9 @@ final class WorldStreams {
   }
 
   /**
-   * Deltas per region, holding the changes to chunks its holders have resident. A chunk about to be
-   * read is read after every change in it, so its changes are left out. Sending them after it would
-   * also put a block back into a chunk that left.
+   * Deltas per region for chunks its holders have resident. A chunk about to be read is skipped,
+   * since the read includes its changes and a later delta could re-add a block to a chunk that
+   * left.
    */
   void flushCells() {
     Map<Integer, List<WorldEvent.BlockChanged>> byRegion = new TreeMap<>();
@@ -229,8 +215,7 @@ final class WorldStreams {
     pendingCells.clear();
 
     for (Map.Entry<Integer, List<WorldEvent.BlockChanged>> entry : byRegion.entrySet()) {
-      // Produced even while no holder is connected. A holder that reconnects within the
-      // retention window is replayed from here.
+      // Produced even with no holder connected, so a reconnect within retention is replayed.
       Log log = logs.get(entry.getKey());
       List<WorldEvent.BlockChanged> cells = entry.getValue();
       int minX = log.region.minX();
@@ -245,10 +230,9 @@ final class WorldStreams {
   }
 
   /**
-   * One frame per chunk whose residency or content changed, for regions with a holder to send it
-   * to. Reads stop at {@link #MAX_CHUNK_READS_PER_TICK}, and the rest stay marked for the next
-   * tick. A chunk the world cannot read now stays marked and costs no read. Regions take turns at
-   * being first.
+   * One frame per chunk whose residency or content changed, for regions with a holder. Stops at
+   * {@link #MAX_CHUNK_READS_PER_TICK}; the rest stay marked. Unreadable chunks stay marked at no
+   * cost. Regions take turns going first.
    */
   void flushChunks() {
     List<Log> order = List.copyOf(logs.values());
@@ -287,8 +271,7 @@ final class WorldStreams {
         long sequence = ++log.lastSequence;
         if (runs != null) {
           for (Holder holder : log.holders.values()) {
-            // A chunk sent again while resident never was air on the holder, so it keeps
-            // the sequence it first became resident at.
+            // A chunk resent while resident keeps its original sequence.
             holder.resident.putIfAbsent(key, sequence);
           }
           Frames.ChunkRuns read = runs;
@@ -312,9 +295,8 @@ final class WorldStreams {
   private static final Frames.ChunkRuns UNREADABLE = new Frames.ChunkRuns();
 
   /**
-   * The chunk's runs, read on the main thread, {@link #UNREADABLE}, or null if the read threw. A
-   * read that throws is a bug in the world source. Retrying it would throw every tick, so the chunk
-   * counts as unloaded until the world loads it again, and is sent as cleared.
+   * The chunk's runs, {@link #UNREADABLE}, or null if the read threw. A throwing read is a world
+   * source bug and would repeat every tick, so the chunk counts as unloaded and is sent as cleared.
    */
   private Frames.ChunkRuns read(long key, int chunkX, int chunkZ) {
     try {
@@ -349,9 +331,8 @@ final class WorldStreams {
   }
 
   /**
-   * Stores a finished frame under its sequence, then sends what the gap before it held back. A
-   * frame of a log since started over is dropped, and one whose encode is given up on starts the
-   * log over again.
+   * Stores a finished frame under its sequence and sends what the gap held back. Frames of a
+   * restarted log are dropped; one whose encode is given up on restarts the log.
    */
   private void produce(Log log, long sequence, String job, Supplier<byte[]> work) {
     encoder.encode(
@@ -376,8 +357,8 @@ final class WorldStreams {
   }
 
   /**
-   * Starts the log over at its last sequence, past a gap no frame can fill: every holder holds the
-   * region as air from there, and every chunk the world holds is read and sent again.
+   * Starts the log over past a gap no frame can fill: every holder holds air from there, and every
+   * chunk the world holds is read and sent again.
    */
   private void restart(Log log) {
     log.frames.clear();
@@ -392,9 +373,8 @@ final class WorldStreams {
   }
 
   /**
-   * Starts the log over for one holder at its last sequence: the holder will hold the region as
-   * air, and every chunk the world holds is read again. The frames still being encoded before that
-   * point are not sent to it, since the chunks read again supersede them.
+   * Starts the log over for one holder: it holds air from there and every chunk is read again.
+   * Frames still encoding before that point are not sent to it.
    */
   private void startOver(Log log, Holder holder) {
     holder.nextToSend = log.lastSequence + 1;
@@ -413,9 +393,8 @@ final class WorldStreams {
   }
 
   /**
-   * Sent on the world channel, not the control channel. The assignment must arrive before the
-   * frames it applies to, and only one channel orders them. It says where the log stands, so the
-   * node refuses a first frame that does not follow it.
+   * Sent on the world channel, which alone orders it before the frames it applies to. It says where
+   * the log stands, so the node refuses a first frame that does not follow.
    */
   private void sendAssignment(Log log, NodeId node, long sequence, boolean resume) {
     links.send(
@@ -425,9 +404,8 @@ final class WorldStreams {
   }
 
   /**
-   * Moves the log's ready point over every frame now present, and sends each greeted holder every
-   * ready frame it has not been sent. Frames behind the ready point stay as the replay window until
-   * they age out.
+   * Advances the ready point over present frames and sends each greeted holder the ready frames it
+   * lacks. Frames behind the ready point stay as the replay window.
    */
   private void drain(Log log) {
     while (log.frames.containsKey(log.ready + 1)) {

@@ -69,10 +69,8 @@ class NodeHashesTest {
   }
 
   /**
-   * Hashes every position vanilla's rules let a search create, plus the target. A node is expanded
-   * while its float distance from the start is below the bound, and creates nodes one block around
-   * it, from its fall below to its jump above. The positions come from those rules rather than from
-   * the bounds under test, so a wrong bound fails here.
+   * Hashes every position vanilla's rules let a search create, plus the target. The positions come
+   * from those rules, not the bounds under test, so a wrong bound fails here.
    */
   private static void assertNoSharedHash(Pos start, Pos target, float maxPathLength) {
     assertFalse(mayCollide(start, target, maxPathLength, true));

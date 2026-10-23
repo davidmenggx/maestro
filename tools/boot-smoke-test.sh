@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 #
-# Boots a dedicated 26.1 server with the released mod alone, through Loom's
-# `runReleaseServer`, waits for it to come up, makes a mob so `PathFinder`
-# loads, stops it, and asserts that the Maestro mixins were applied and the
-# development mod was not loaded.
+# Boots the released mod alone via `runReleaseServer`, spawns a mob so
+# `PathFinder` loads, and asserts the mixins applied and the dev mod did not
+# load.
 
 set -euo pipefail
 
@@ -32,13 +31,12 @@ mkdir -p "$(dirname "$LOG")"
 
 FIFO="$(mktemp -u)"
 mkfifo "$FIFO"
-# Opened read-write: a write-only open on a FIFO blocks until a reader attaches,
-# and holding it open keeps the server's console reader from seeing EOF.
+# Read-write open: a write-only FIFO open blocks until a reader attaches, and
+# keeps the server's console reader from seeing EOF.
 exec 3<>"$FIFO"
 
 EXIT_FILE="$(mktemp)"
-# Own session, so a timed-out or failed run can be torn down as a process group
-# rather than orphaning the forked server JVM.
+# Own session, so a failed run is torn down as a process group.
 setsid bash -c "cd '$SERVER_DIR' && ./gradlew runReleaseServer --console=plain; echo \$? >'$EXIT_FILE'" \
   <"$FIFO" >>"$LOG" 2>&1 &
 GRADLE_PID=$!
@@ -62,8 +60,8 @@ for ((i = 0; i < STARTUP_TIMEOUT; i++)); do
 done
 grep -qF "$READY_LINE" "$LOG" || fail "server did not start within ${STARTUP_TIMEOUT}s"
 
-# Sends console command $1 and waits up to $3 seconds (default 60) for a new
-# log line matching the extended regex $2.
+# Sends console command $1, waits up to $3 s (default 60) for a new log line
+# matching regex $2.
 run_command() {
   local command="$1" expected="$2" timeout="${3:-60}" before i
   before="$(grep -cE -- "$expected" "$LOG" || true)"
@@ -78,10 +76,9 @@ run_command() {
   fail "no '$expected' within ${timeout}s of '$command'"
 }
 
-# `PathFinderMixin` applies only when `PathFinder` first loads, which making any
-# mob does. A zombie next to a villager also searches for a path to it. No chunk
-# is loaded without a player, so the spawn chunk is force loaded for the mobs to
-# tick, and the mobs and the ticket are removed before the server stops.
+# `PathFinderMixin` applies when `PathFinder` first loads, which any mob does.
+# The spawn chunk is force loaded so the mobs tick, then mobs and ticket are
+# removed.
 echo "boot-smoke-test: server up, making mobs so PathFinder loads"
 run_command "forceload add ~ ~" "to be force loaded"
 for ((attempt = 0; ; attempt++)); do
@@ -95,7 +92,7 @@ run_command "summon minecraft:zombie ~ ~ ~ {Tags:[\"$MOB_TAG\"],DeathLootTable:\
   "Summoned new"
 run_command "tick sprint 40" "Sprint completed"
 run_command "kill @e[tag=$MOB_TAG]" "Killed|No entity was found"
-# Long enough for a killed mob to finish dying and leave the world.
+# Lets a killed mob finish dying.
 run_command "tick sprint 40" "Sprint completed"
 run_command "forceload remove ~ ~" "for force loading"
 
@@ -121,10 +118,8 @@ if grep -qF "$DEV_MOD" "$LOG"; then
   fail "the development mod '$DEV_MOD' was loaded"
 fi
 
-# Mixin reports application problems without necessarily killing the server, so
-# an otherwise clean boot is not on its own proof that the hooks took. A failed
-# apply is logged as "Mixin apply for mod <mod> failed ..." or "... FAILED during
-# APPLY", with the cause from one of Mixin's `throwables` packages.
+# A failed mixin apply need not kill the server, so a clean boot proves nothing.
+# It logs "Mixin apply for mod <mod> failed ..." or "... FAILED during APPLY".
 if grep -qE 'org\.spongepowered\.asm\.mixin\.([a-z]+\.)?throwables|Mixin [a-z]+ for mod .* failed|FAILED during|Critical injection failure' "$LOG"; then
   fail "mixin application reported errors"
 fi

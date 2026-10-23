@@ -31,10 +31,8 @@ import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 
 /**
- * The conformance cases both the C++ node and {@link ModeledNode} must pass: what a node does with
- * links, profiles, requests, cancels and world frames, step by step. They are the contract in
- * {@code schema/conformance.fbs}, written once here and saved as {@code
- * fixtures/conformance/node.bin} for the node's tests.
+ * The conformance cases both the C++ node and {@link ModeledNode} must pass, step by step. They are
+ * the contract in {@code schema/conformance.fbs}, saved as {@code fixtures/conformance/node.bin}.
  */
 final class ConformanceScripts {
 

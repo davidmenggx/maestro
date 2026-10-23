@@ -8,9 +8,7 @@
 namespace maestro::search {
 
 /// Vanilla's `BinaryHeap`: a min-heap on `Node::F` that keeps each node's
-/// `HeapIdx` up to date. Ported exactly, ties included, because the order in
-/// which equal-cost nodes leave the heap decides which of several equal paths
-/// is found.
+/// `HeapIdx` up to date. Ties are ported exactly, since they pick the path.
 class BinaryHeap {
 public:
   /// Heap entries are indices into `Nodes`, which may grow during use.

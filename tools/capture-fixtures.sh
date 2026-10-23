@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# Boots a dev server on a fresh copy of the `perf` world, runs
-# `/maestro capture <seed> <cases>` for each seed, stops the server, and copies
-# each fixture to `fixtures/parity/seed-<seed>.bin`.
+# Runs `/maestro capture <seed> <cases>` per seed on a fresh copy of the `perf`
+# world and copies each fixture to `fixtures/parity/seed-<seed>.bin`.
 #
 # Usage: tools/capture-fixtures.sh "<seed> [<seed>...]" <cases>
 
@@ -35,12 +34,11 @@ mkdir -p "$(dirname "$LOG")" "$OUT"
 
 FIFO="$(mktemp -u)"
 mkfifo "$FIFO"
-# Opened read-write: a write-only open on a FIFO blocks until a reader attaches,
-# and holding it open keeps the server's console reader from seeing EOF.
+# Read-write open: a write-only FIFO open blocks until a reader attaches, and
+# keeps the server's console reader from seeing EOF.
 exec 3<>"$FIFO"
 
-# Own session, so a failed run can be torn down as a process group rather than
-# orphaning the forked server JVM.
+# Own session, so a failed run is torn down as a process group.
 setsid bash -c "cd '$SERVER_DIR' && ./gradlew runServer -Pworld=perf --console=plain" \
   <"$FIFO" >>"$LOG" 2>&1 &
 GRADLE_PID=$!
@@ -52,8 +50,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Waits until the log has a line matching the first extended regex, and returns
-# 0, or one matching the optional second, and returns 1.
+# Waits for a log line matching the first regex (returns 0) or the optional
+# second (returns 1).
 await() {
   local done="$1" failed="$2" timeout="$3"
   for ((i = 0; i < timeout; i++)); do

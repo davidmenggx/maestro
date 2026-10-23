@@ -1,5 +1,8 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
+import io.github.davidmenggx.maestro.controller.core.Controller;
+import io.github.davidmenggx.maestro.controller.core.NodeLinks;
+import io.github.davidmenggx.maestro.controller.core.WorldStreams;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
@@ -8,6 +11,7 @@ import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionMap;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
+import io.github.davidmenggx.maestro.controller.world.WorldInput;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -15,42 +19,36 @@ import java.util.Map;
 import java.util.function.BiFunction;
 
 /**
- * One assembled run: world, fleet, controller and workload, all seeded from a single number. {@code
- * -Dmaestro.dst.seed} and {@code -Dmaestro.dst.runs} set the sweep, so a failing seed from CI can
- * be replayed with `make fuzz SEED=...`.
+ * One assembled run: world, fleet, controller and workload, all seeded from one number. {@code
+ * -Dmaestro.dst.seed} and {@code -Dmaestro.dst.runs} set the sweep.
  */
 public final class SimRun {
 
-  /**
-   * Quiet ticks at the end, so every in-flight request resolves before the invariants are checked.
-   */
+  /** Quiet ticks at the end, so in-flight requests resolve before invariants are checked. */
   public static final long DRAIN_TICKS = 25;
 
-  /**
-   * The SLO: p99 latency must be below this many ticks. Tighter than the admission bound in
-   * `RequestTracker`, which only keeps a saturated fleet from falling further behind.
-   */
+  /** Extra ticks a node may need to catch up after a reconnect and full send. */
+  static final long SETTLE_MARGIN_TICKS = 5;
+
+  /** The SLO: p99 latency must be below this many ticks. */
   public static final double TICK_BUDGET = 3.0;
 
   /** Sweep size when nothing sets {@code maestro.dst.runs}. */
   private static final int DEFAULT_RUNS = 100;
 
-  /**
-   * Chance per tick of a checkpoint: the state each settled region's holder must have once it
-   * reaches the stream's current sequence. A few per run, since each reads every region.
-   */
+  /** Chance per tick of a checkpoint. A few per run, since each reads every region. */
   private static final double CHECKPOINT_CHANCE = 1.0 / 32;
 
-  /**
-   * Length of a fuzzed run. The active part, before {@link #DRAIN_TICKS}, must leave room for a
-   * fault to start and end, or the shortest runs would have no faults.
-   */
+  /** Length of a fuzzed run. Before {@link #DRAIN_TICKS}, it must leave room for a fault. */
   static final long MIN_FUZZED_TICKS = 60;
 
   static final long MAX_FUZZED_TICKS = 320;
 
   public final long seed;
+
+  /** Ticks the run was asked for. It runs longer if its nodes need longer to settle. */
   public final long ticks;
+
   public final FaultPlan faults;
   public final Topology topology;
   public final Scenario scenario;
@@ -63,22 +61,20 @@ public final class SimRun {
   /** The current controller process. A restart fault replaces it. */
   public Controller controller;
 
-  /**
-   * Requests whose start is in each node's region, per tick. What the fleet was asked to do. A
-   * region's holders split its requests, but which holder serves one depends on what the controller
-   * knows, so each holder is charged them all.
-   */
+  /** Requests starting in each node's region, per tick. Each holder is charged all of them. */
   private final Map<NodeId, Map<Long, Integer>> offered = new LinkedHashMap<>();
 
   /** What the self-check of each controller process a restart replaced found. */
   private final List<String> retiredViolations = new ArrayList<>();
 
+  /** The tick the workload stops changing the world, or {@link #ticks} if it never does. */
+  private final long quietAfter;
+
+  private long ticksRun;
+
   private final Rng checkpointRng;
 
-  /**
-   * {@code quietAfter} is the tick the workload stops changing the world, from which the run
-   * settles.
-   */
+  /** {@code quietAfter} is the tick the workload stops changing the world. */
   private SimRun(
       long seed,
       FaultPlan faults,
@@ -89,11 +85,14 @@ public final class SimRun {
       BiFunction<SimWorld, Rng, Workload> workloadFactory) {
     this.seed = seed;
     this.ticks = ticks;
+    this.quietAfter = quietAfter;
     this.faults = faults;
     this.topology = topology;
     this.scenario = scenario;
     this.sim = new Simulation(seed, faults);
     sim.settleFrom(quietAfter);
+    sim.serverBusySteps(scenario.serverBusySteps());
+    sim.slowTicks(scenario.chances().get(Scenario.Chance.SLOW_TICK));
 
     List<NodeId> nodes = new ArrayList<>();
     for (int i = 0; i < topology.nodeCount(); i++) {
@@ -117,14 +116,11 @@ public final class SimRun {
     return new Controller(sim.env(), world, out, regions, scenario.assumedCapacity());
   }
 
-  /**
-   * The controller process restarted. Every request it held is gone with it, and the new process
-   * learns the world as a starting server would: every loaded chunk, mob and player.
-   */
+  /** The controller restarted. Its requests are gone, and the new one learns the world afresh. */
   private void restartController() {
     out.restarted();
     for (String violation : controller.selfCheck()) {
-      retiredViolations.add("controller of run " + controller.run + ": " + violation);
+      retiredViolations.add("controller of run " + controller.run() + ": " + violation);
     }
     controller = newController();
     workload.replayState(sim.env().clock().tick(), event -> sim.deliver(controller, event));
@@ -155,11 +151,7 @@ public final class SimRun {
         (world, rng) -> new SyntheticWorkload(world, rng, ticks - DRAIN_TICKS, scenario));
   }
 
-  /**
-   * A run whose geometry, load, length and faults are all drawn from the seed, along with its event
-   * ordering, so a sweep covers the ranges in {@link Topology}, {@link Scenario} and {@link
-   * FaultPlan}, not one fixed setting.
-   */
+  /** A run whose geometry, load, length, faults and event order are all drawn from the seed. */
   public static SimRun fuzzed(long seed) {
     Rng rng = SeededRng.of(seed).derive("fuzz");
     long ticks = MIN_FUZZED_TICKS + rng.nextLong(MAX_FUZZED_TICKS - MIN_FUZZED_TICKS + 1);
@@ -193,9 +185,8 @@ public final class SimRun {
   }
 
   public SimRun go() {
-    // A request enters the ledger before the controller sees it, because a drop can come
-    // back within the same call.
-    sim.run(
+    // Ledgered first, since a drop can come back within the same call.
+    WorldInput input =
         event -> {
           if (event instanceof WorldEvent.PathRequested requested) {
             offer(requested);
@@ -205,11 +196,34 @@ public final class SimRun {
           } else {
             controller.accept(event);
           }
-        },
-        workload,
-        ticks,
-        this::afterTick);
+        };
+    sim.run(input, workload, ticks, this::afterTick);
+    ticksRun = ticks;
+    long more = settledBy() - ticks;
+    if (more > 0) {
+      sim.run(input, workload, more, this::afterTick);
+      ticksRun += more;
+    }
     return this;
+  }
+
+  /**
+   * The tick by which every live node of a run with a quiet tail has caught up: after the last
+   * fault, a node redials, every loaded chunk is read again at the read budget, plus a margin.
+   * Scripted runs end where their script says.
+   */
+  private long settledBy() {
+    if (quietAfter >= ticks) {
+      return ticks;
+    }
+    long from = faults.offloadFailureRate() > 0 ? quietAfter : 0;
+    for (FaultPlan.Fault fault : faults.faults()) {
+      from = Math.max(from, fault.tick());
+    }
+    long reads =
+        (world.mostLoaded() + WorldStreams.MAX_CHUNK_READS_PER_TICK - 1)
+            / WorldStreams.MAX_CHUNK_READS_PER_TICK;
+    return from + NodeLinks.RECONNECT_TICKS + reads + SETTLE_MARGIN_TICKS;
   }
 
   private void offer(WorldEvent.PathRequested requested) {
@@ -224,10 +238,7 @@ public final class SimRun {
     }
   }
 
-  /**
-   * Now and then, records what each region's holder must hold once it reaches the sequence the
-   * controller produced last, for every region whose changes are all in frames.
-   */
+  /** Now and then, records what each region's holder must hold at the latest sequence. */
   private void afterTick(long tick) {
     if (checkpointRng.nextDouble() >= CHECKPOINT_CHANCE) {
       return;
@@ -248,11 +259,9 @@ public final class SimRun {
   }
 
   /**
-   * Whether the run is one the latency SLO applies to, decided from what went in, not from what the
-   * controller did: nothing in the fault plan could delay or lose a request, and every node can
-   * serve what it was offered in time. A tick's batch leaves at the end of the next tick, and its
-   * answers must arrive before the tick after that ends, so each tick's requests to a node, served
-   * by its workers at their highest cost with the slowest latency each way, must fit one tick.
+   * Whether the load fits the fleet, judged from the offered load, not the controller's actions: no
+   * fault could delay or lose a request, and each tick's requests to a node, at worst cost and
+   * latency, fit one tick.
    */
   public boolean fitsCapacity() {
     if (!faults.clean()) {
@@ -271,7 +280,18 @@ public final class SimRun {
     return true;
   }
 
-  /** The most chunks loaded at once, which is at least the frames of one full send of them. */
+  /** Whether every tick had its own time. A server behind on ticks makes the latency SLO moot. */
+  public boolean serverKeptUp() {
+    return scenario.chances().get(Scenario.Chance.SLOW_TICK) == 0
+        && faults.faults().stream().noneMatch(fault -> fault instanceof FaultPlan.ServerStalled);
+  }
+
+  /** Whether the latency SLO applies to the run: it fits the fleet, and the server kept up. */
+  public boolean heldToTheSlo() {
+    return fitsCapacity() && serverKeptUp();
+  }
+
+  /** The most chunks loaded at once, a lower bound on the frames of one full send. */
   public int chunkCount() {
     return world.mostLoaded();
   }
@@ -290,7 +310,7 @@ public final class SimRun {
     return "seed="
         + seed
         + " ticks="
-        + ticks
+        + ticksRun
         + " issued="
         + out.issuedCount()
         + " controllers="

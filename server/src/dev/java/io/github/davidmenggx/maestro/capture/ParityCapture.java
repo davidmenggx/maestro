@@ -41,10 +41,10 @@ import net.minecraft.world.level.pathfinder.PathType;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
 /**
- * Runs vanilla searches on seeded terrain and records each as a parity case. Everything happens in
- * one call on the server thread, so no tick changes the world between building it and searching it.
+ * Runs vanilla searches on seeded terrain and records each as a parity case. Runs in one server
+ * thread call, so no tick changes the world between building and searching it.
  */
-final class ParityCapture implements Searches.Observer {
+final class ParityCapture implements Searches.Interceptor {
 
   /** Side of the area in chunks. Large enough for a follow range of 64 blocks. */
   static final int AREA_CHUNKS = 10;
@@ -91,9 +91,9 @@ final class ParityCapture implements Searches.Observer {
   }
 
   /**
-   * {@code offStart} cases are approximated because the node's stand-in for the mob's position
-   * differs from it where that matters, {@code modelDiffered} because a collision or floor query
-   * got a different answer from the model. {@code deltas} is the number of block change frames.
+   * {@code offStart}: the node's stand-in for the mob's position differed where it matters. {@code
+   * modelDiffered}: a collision or floor query got a different answer from the model. {@code
+   * deltas}: number of block change frames.
    */
   record Summary(int cases, int exact, int reached, int offStart, int modelDiffered, int deltas) {}
 
@@ -186,8 +186,7 @@ final class ParityCapture implements Searches.Observer {
     int offStart = 0;
     int modelDiffered = 0;
     int deltas = 0;
-    // Block changes between batches of searches, so the node is also checked against a world it
-    // reached by deltas.
+    // Deltas between batches, so the node is also checked on a world it reached by deltas.
     int batch = Math.max(1, count / (DELTA_BATCHES + 1));
     ApproximationProbe probe = ApproximationProbe.start(world);
     try {
@@ -314,7 +313,7 @@ final class ParityCapture implements Searches.Observer {
     PathNavigation navigation = mob.getNavigation();
     recorded.clear();
     probe.reset();
-    Searches.Observer previous = Searches.observe(this);
+    Searches.Interceptor previous = Searches.intercept(this);
     try {
       if (rng.nextInt(4) == 0) {
         int maxPathLength = 8 + rng.nextInt((int) defaultLength - 7);
@@ -323,7 +322,7 @@ final class ParityCapture implements Searches.Observer {
         navigation.createPath(target, reachRange);
       }
     } finally {
-      Searches.observe(previous);
+      Searches.intercept(previous);
     }
     if (recorded.size() != 1) {
       return null;
@@ -356,8 +355,7 @@ final class ParityCapture implements Searches.Observer {
             worldSequence,
             ORIGIN,
             ORIGIN);
-    // The node puts the mob at its start node and models every cell as a box of its floor
-    // height. Either may change the answer, and the case is exact only if neither did.
+    // The case is exact only if neither the start stand-in nor the box model changed the answer.
     boolean offStart = !positionIsStandIn(mob, call.start(), probe);
     boolean exact = !offStart && !probe.disagreed();
     return new Captured(
@@ -378,8 +376,21 @@ final class ParityCapture implements Searches.Observer {
     return profiles;
   }
 
+  /** Every intercepted search, whoever asked for it, is captured. */
   @Override
-  public void searched(SearchCall call, Path vanilla) {
+  public boolean wants(Mob mob) {
+    return true;
+  }
+
+  /** Runs vanilla's search and records it. */
+  @Override
+  public Path search(Mob mob, SearchCall call, Searches.Vanilla search) {
+    Path vanilla = search.search();
+    record(call, vanilla);
+    return vanilla;
+  }
+
+  private void record(SearchCall call, Path vanilla) {
     List<WorldOutput.Node> nodes = new ArrayList<>(vanilla.getNodeCount());
     for (int i = 0; i < vanilla.getNodeCount(); i++) {
       Node node = vanilla.getNode(i);
@@ -389,9 +400,8 @@ final class ParityCapture implements Searches.Observer {
   }
 
   /**
-   * Draws the inputs that vary at runtime: the difficulty, the mob's target and health (which set
-   * its fall distance), its follow range and step height, its door and float flags, and a few malus
-   * values, as goals change them.
+   * Draws the inputs that vary at runtime: difficulty, target and health (which set fall distance),
+   * follow range, step height, door and float flags, and a few malus values.
    */
   private void configure(Mob mob, Kind kind) {
     level.getServer().setDifficulty(DIFFICULTIES[rng.nextInt(DIFFICULTIES.length)], true);
@@ -446,10 +456,7 @@ final class ParityCapture implements Searches.Observer {
     }
   }
 
-  /**
-   * A column at least {@code reach} from every edge. Some starts are inside a room or pen, so the
-   * mob has to find the door or gate.
-   */
+  /** A column at least {@code reach} from every edge. Some starts are inside a room or pen. */
   private int[] startColumn(int reach) {
     if (rng.nextInt(5) < 2) {
       List<Terrain.Enclosure> reachable = new ArrayList<>();
@@ -501,10 +508,9 @@ final class ParityCapture implements Searches.Observer {
   }
 
   /**
-   * Whether the node's stand-in for the mob's position, the bottom centre of the start node, gives
-   * the search what the mob's position did. Vanilla reads the position for a sweep, which the
-   * stand-in matches only at the bottom centre, and for the block the mob is in, which it matches
-   * whenever the mob is in the start block.
+   * Whether the node's stand-in for the mob's position (the bottom centre of the start node) gives
+   * the search what the position did. For a sweep it matches only at the bottom centre; for the
+   * mob's block, whenever the mob is in the start block.
    */
   private static boolean positionIsStandIn(Mob mob, BlockPos start, ApproximationProbe probe) {
     boolean atBottomCentre =
@@ -515,9 +521,8 @@ final class ParityCapture implements Searches.Observer {
   }
 
   /**
-   * Vanilla reads per-block types through a cache that a block change clears only in a ticking
-   * chunk. A freshly loaded chunk may not be ticking yet, so every cell the terrain wrote is
-   * cleared here, and vanilla reads the blocks as they are.
+   * Vanilla's type cache is cleared by a block change only in a ticking chunk, which a fresh chunk
+   * may not be, so every cell the terrain wrote is cleared here.
    */
   private void forgetCachedTypes() {
     BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();

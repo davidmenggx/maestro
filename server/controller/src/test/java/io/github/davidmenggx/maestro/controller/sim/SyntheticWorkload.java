@@ -15,14 +15,13 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Generated replacement for a recorded server trace, and the fuzzer of the suite. Every event the
- * boundary defines can be generated here. The kinds of activity in a tick run in an order drawn per
- * tick, so the sweep covers how they interleave, such as a block change followed by its chunk
- * leaving. {@code quietAfter} stops all world activity so the end of a run can drain. By then every
- * request has been answered or dropped, so the invariants can require it.
+ * Generated replacement for a recorded server trace. It can generate every event the boundary
+ * defines. Activity kinds run in an order drawn per tick, so a sweep covers interleavings such as a
+ * block change followed by its chunk leaving. {@code quietAfter} stops all world activity so the
+ * run can drain.
  *
- * <p>As on a server, only the chunks around spawn and around each player start loaded, a small part
- * of the regions, and mobs, block changes and requests happen in loaded chunks.
+ * <p>As on a server, only chunks around spawn and each player start loaded, and mobs, block changes
+ * and requests happen in loaded chunks.
  */
 public final class SyntheticWorkload implements Workload {
 
@@ -46,16 +45,12 @@ public final class SyntheticWorkload implements Workload {
   /** Chunks loaded around a player in every direction at the start. */
   private static final int VIEW_RADIUS = 3;
 
-  /**
-   * `reachRange` values vanilla passes: 0 and 1 at nearly every call site, and 6 for the one POI
-   * type whose `validRange` is not 1.
-   */
+  /** `reachRange` values vanilla passes: 0 and 1 almost everywhere, 6 for one POI type. */
   private static final int[] REACH_RANGES = {0, 0, 1, 6};
 
   /**
-   * `maxPathLength` is `max(FOLLOW_RANGE, requiredPathLength)`, where the attribute runs from 12 to
-   * 64 over land mobs and `requiredPathLength` defaults to 16, so the bound lands between 16 and
-   * 64. One caller passes an explicit 8 instead.
+   * `maxPathLength` is `max(FOLLOW_RANGE, requiredPathLength)`: follow range runs 12 to 64 and the
+   * default `requiredPathLength` is 16, so 16 to 64. One caller passes 8.
    */
   private static final int MIN_PATH_LENGTH = 16;
 
@@ -69,10 +64,7 @@ public final class SyntheticWorkload implements Workload {
   /** `getMaxFallDistance` for a mob with no target. */
   private static final int CALM_FALL_DISTANCE = 3;
 
-  /**
-   * Extra fall a mob with a target accepts: its health above a third of the maximum, minus a
-   * difficulty allowance. A 100-health mob on hard reaches 67.
-   */
+  /** Extra fall a mob with a target accepts: health above a third of max, less difficulty. */
   private static final int MAX_EXTRA_FALL_DISTANCE = 67;
 
   private final SimWorld world;
@@ -186,10 +178,7 @@ public final class SyntheticWorkload implements Workload {
     }
   }
 
-  /**
-   * Unloads a loaded chunk or loads any chunk of the world, evenly, so chunks leave about as often
-   * as they arrive although few of the world's are loaded.
-   */
+  /** Unloads a loaded chunk or loads any chunk, evenly, so chunks leave as often as they arrive. */
   private void churnChunks(long tick, WorldInput input) {
     if (rng.nextDouble() >= scenario.chances().get(Chance.CHUNK_CHURN)) {
       return;
@@ -224,10 +213,7 @@ public final class SyntheticWorkload implements Workload {
     }
   }
 
-  /**
-   * Changes use every type a cell may carry, in a band around the surface, so a column encodes into
-   * more than the two runs flat terrain would give.
-   */
+  /** Changes use every cell type in a band around the surface, so columns encode into many runs. */
   private void changeBlocks(long tick, WorldInput input) {
     int changes = rng.nextInt(scenario.counts().get(Count.BLOCK_CHANGES_PER_TICK) + 1);
     for (int i = 0; i < changes && world.loadedCount() > 0; i++) {
@@ -255,11 +241,7 @@ public final class SyntheticWorkload implements Workload {
     spawn(tick, input);
   }
 
-  /**
-   * Mobs wander, so successive requests for one mob can fall in different regions, and a mob's
-   * owner can change during a run. A mob never walks into a chunk that is not loaded, as vanilla
-   * does not tick it there.
-   */
+  /** Mobs wander, so a mob's region can change. They never enter unloaded chunks, as in vanilla. */
   private void moveMobs() {
     for (Map.Entry<Integer, Pos> mob : mobs.entrySet()) {
       int x = mob.getValue().x() + rng.nextInt(3) - 1;
@@ -271,7 +253,7 @@ public final class SyntheticWorkload implements Workload {
   }
 
   private void requestPaths(long tick, WorldInput input) {
-    // Safe to iterate directly, because emitting an event never calls back into the workload.
+    // Emitting never calls back into the workload, so direct iteration is safe.
     for (Map.Entry<Integer, Pos> mob : mobs.entrySet()) {
       if (rng.nextDouble() >= scenario.chances().get(Chance.REQUEST)) {
         continue;
@@ -298,9 +280,8 @@ public final class SyntheticWorkload implements Workload {
   }
 
   /**
-   * The visit budget follows the follow range, not the length bound, because the navigation updates
-   * it only when an attribute changes. A caller that passes a shorter bound therefore leaves the
-   * budget unchanged. The two are drawn separately to cover that case.
+   * The visit budget follows the follow range, not the length bound, since the navigation updates
+   * it only when an attribute changes. The two are drawn separately.
    */
   private WorldEvent.Search randomSearch() {
     int followRange = MIN_PATH_LENGTH + rng.nextInt(MAX_EXTRA_PATH_LENGTH + 1);
@@ -324,10 +305,7 @@ public final class SyntheticWorkload implements Workload {
     input.accept(new WorldEvent.PathCanceled(tick, mobsFrom(rng.nextInt(mobs.size())).next()));
   }
 
-  /**
-   * Players leave and return, and a move event announces each, so the set of players used for
-   * shedding priority changes during a run.
-   */
+  /** Players leave and return, each announced by a move event. */
   private void movePlayers(long tick, WorldInput input) {
     int playerCount = scenario.counts().get(Count.PLAYERS);
     if (playerCount > 0 && rng.nextDouble() < scenario.chances().get(Chance.PLAYER_CHURN)) {
@@ -366,10 +344,7 @@ public final class SyntheticWorkload implements Workload {
     input.accept(new WorldEvent.MobSpawned(tick, mobId, pos));
   }
 
-  /**
-   * Drawn per request, not per mob, because a mob's profile is its current evaluator inputs. A goal
-   * that changes its water malus gives it a different profile from one request to the next.
-   */
+  /** Drawn per request, since a goal can change a mob's evaluator inputs between requests. */
   private short randomClass() {
     return (short) (1 + rng.nextInt(classCount));
   }
