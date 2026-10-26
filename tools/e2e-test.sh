@@ -10,6 +10,18 @@
 # FAULTS=failover (with OFFLOAD=on) pauses the node, then kills and restarts
 # it. While it cannot answer the failover must serve the mobs, and after each
 # fault the node must come back into service and its answers move mobs again.
+#
+# FAULTS=split (with OFFLOAD=on) adds a spare node and lets the one node serve a
+# request a tick, with a crowd of husks in each half of its region, so the
+# region sheds until it is cut between them. The node must keep the lower half,
+# as its log shows, without refusing a frame, the spare must search for the
+# crowd in the upper half, and answers must move mobs after the cut.
+#
+# FAULTS=replica (with OFFLOAD=on) is the same with one crowd, which no cut can
+# divide, so the spare becomes a replica and must search for some of its mobs.
+#
+# SUBMODE=stream sends each request as soon as it is encoded instead of
+# batching a tick's requests (SUBMODE=batch, the default).
 
 set -euo pipefail
 
@@ -17,10 +29,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER_DIR="$ROOT/server"
 NODE_BIN="${NODE_BIN:-$ROOT/build/node/maestro-node}"
 OFFLOAD="${OFFLOAD:-shadow}"
+SUBMODE="${SUBMODE:-batch}"
 FAULTS="${FAULTS:-}"
-NAME="$OFFLOAD${FAULTS:+-$FAULTS}"
+NAME="$OFFLOAD-$SUBMODE${FAULTS:+-$FAULTS}"
 LOG="$SERVER_DIR/build/e2e-test-$NAME.log"
 NODE_LOG="$SERVER_DIR/build/e2e-node-$NAME.log"
+SPARE_LOG="$SERVER_DIR/build/e2e-spare-$NAME.log"
 CONFIG="$SERVER_DIR/run/config/maestro.json"
 
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-300}"
@@ -41,13 +55,25 @@ DOWN_SECONDS="${DOWN_SECONDS:-3}"
 AFTER_SECONDS="${AFTER_SECONDS:-10}"
 # Seconds a fault or a recovery may take to show in the node's state.
 STATE_TIMEOUT="${STATE_TIMEOUT:-40}"
+# Seconds the region may take to be halved: 10 s of shedding, and the warm-up.
+SPLIT_TIMEOUT="${SPLIT_TIMEOUT:-120}"
 
 WORLD_PORT=25710
 CONTROL_PORT=25711
 REQUEST_PORT=25712
+SPARE_WORLD_PORT=25713
+SPARE_CONTROL_PORT=25714
+SPARE_REQUEST_PORT=25715
 READY_LINE='Done ('
 SUMMARY_LINE='Maestro fleet stopped:'
 STATE_LINE='Maestro: node-0 is'
+# Logged once no node is spare, which in a split or replica run means the
+# region took the spare.
+SPLIT_LINE='Maestro: spare nodes []'
+# The spare node's last line, with the searches it ran.
+SEARCHES_LINE='maestro-node: stopped after'
+# The node's line when it keeps the lower half of region 1 as region 2.
+KEPT_LINE='maestro-node: kept region 1 as region 2'
 MOB_TAG='maestro_e2e'
 
 fail() {
@@ -56,6 +82,10 @@ fail() {
   tail -n 40 "$LOG" >&2 || true
   echo "--- last 20 node log lines ---" >&2
   tail -n 20 "$NODE_LOG" >&2 || true
+  if [[ "$FAULTS" == "split" || "$FAULTS" == "replica" ]]; then
+    echo "--- last 20 spare node log lines ---" >&2
+    tail -n 20 "$SPARE_LOG" >&2 || true
+  fi
   exit 1
 }
 
@@ -63,16 +93,21 @@ case "$OFFLOAD" in
 shadow | on) ;;
 *) fail "OFFLOAD must be shadow or on, not '$OFFLOAD'" ;;
 esac
+case "$SUBMODE" in
+batch | stream) ;;
+*) fail "SUBMODE must be batch or stream, not '$SUBMODE'" ;;
+esac
 case "$FAULTS" in
 "") ;;
-failover) [[ "$OFFLOAD" == "on" ]] || fail "FAULTS=failover needs OFFLOAD=on" ;;
-*) fail "FAULTS must be empty or failover, not '$FAULTS'" ;;
+failover | split | replica) [[ "$OFFLOAD" == "on" ]] || fail "FAULTS=$FAULTS needs OFFLOAD=on" ;;
+*) fail "FAULTS must be empty, failover, split or replica, not '$FAULTS'" ;;
 esac
 [[ -x "$NODE_BIN" ]] || fail "no node binary at $NODE_BIN (run 'make node')"
 
 mkdir -p "$(dirname "$LOG")" "$(dirname "$CONFIG")"
 : >"$LOG"
 : >"$NODE_LOG"
+: >"$SPARE_LOG"
 
 # An existing config is restored afterwards.
 BACKUP=""
@@ -80,20 +115,27 @@ if [[ -f "$CONFIG" ]]; then
   BACKUP="$(mktemp)"
   cp "$CONFIG" "$BACKUP"
 fi
+NODES="{\"host\": \"127.0.0.1\", \"worldPort\": $WORLD_PORT, \"controlPort\": $CONTROL_PORT, \"requestPort\": $REQUEST_PORT}"
+NODE_CAPACITY=100
+AREA_CELLS=5
+# A split or replica run has a spare, one request a tick so the region sheds, and
+# one region of two by two cells.
+SPARE_RUN=""
+if [[ "$FAULTS" == "split" || "$FAULTS" == "replica" ]]; then
+  SPARE_RUN=1
+  NODES="$NODES, {\"host\": \"127.0.0.1\", \"worldPort\": $SPARE_WORLD_PORT, \"controlPort\": $SPARE_CONTROL_PORT, \"requestPort\": $SPARE_REQUEST_PORT}"
+  NODE_CAPACITY=1
+  AREA_CELLS=2
+fi
 cat >"$CONFIG" <<EOF
 {
   "mode": "stateful",
-  "subMode": "batch",
+  "subMode": "$SUBMODE",
   "offload": "$OFFLOAD",
-  "nodes": [
-    {
-      "host": "127.0.0.1",
-      "worldPort": $WORLD_PORT,
-      "controlPort": $CONTROL_PORT,
-      "requestPort": $REQUEST_PORT
-    }
-  ],
-  "nodeCapacity": 100,
+  "nodes": [$NODES],
+  "nodeCapacity": $NODE_CAPACITY,
+  "areaCells": $AREA_CELLS,
+  "spares": 1,
   "otlpEndpoint": "http://localhost:4317"
 }
 EOF
@@ -104,6 +146,12 @@ start_node() {
   NODE_PID=$!
 }
 start_node
+SPARE_PID=""
+if [[ -n "$SPARE_RUN" ]]; then
+  "$NODE_BIN" --bind 127.0.0.1 --world-port "$SPARE_WORLD_PORT" --control-port "$SPARE_CONTROL_PORT" \
+    --request-port "$SPARE_REQUEST_PORT" --workers 2 >>"$SPARE_LOG" 2>&1 &
+  SPARE_PID=$!
+fi
 
 FIFO="$(mktemp -u)"
 mkfifo "$FIFO"
@@ -122,6 +170,7 @@ cleanup() {
   # A paused node handles the signal only once it runs again.
   kill -CONT "$NODE_PID" 2>/dev/null || true
   kill -TERM "$NODE_PID" 2>/dev/null || true
+  [[ -z "$SPARE_PID" ]] || kill -TERM "$SPARE_PID" 2>/dev/null || true
   rm -f "$FIFO" "$EXIT_FILE"
   if [[ -n "$BACKUP" ]]; then
     mv "$BACKUP" "$CONFIG"
@@ -191,21 +240,47 @@ failover_count() {
 }
 
 # Force load the spawn area so the mobs tick. Husks do not burn in daylight.
-# In a failover run Resistance V keeps every mob from being hurt, so the chases
-# last through every phase, and an iron golem chases the husks with an attack
-# goal that never gives up. An invulnerable mob would not be chased at all.
+# In a failover, split or replica run Resistance V keeps every mob from being
+# hurt, so the chases last through every phase, and an iron golem chases the
+# husks with an attack goal that never gives up. An invulnerable mob would not
+# be chased at all.
 MOB_DATA=""
-if [[ "$FAULTS" == "failover" ]]; then
+if [[ "$FAULTS" == "failover" || -n "$SPARE_RUN" ]]; then
   MOB_DATA=',active_effects:[{id:"minecraft:resistance",amplifier:4b,duration:-1,show_particles:0b}]'
 fi
+# Where mobs are summoned, as x offsets from spawn. A split run copies every mob
+# 256 blocks east: the region it runs on covers x and z from -128 to 383, so the
+# copies stand in the upper half along x, and both halves shed alike from the
+# start.
+ORIGINS="0"
+if [[ "$FAULTS" == "split" ]]; then
+  ORIGINS="0 256"
+fi
+
+# Loads the 5 by 5 chunks around `~$1 ~ ~0` and waits until they are.
+load_area() {
+  local x="$1"
+  run_command "forceload add ~$((x - 32)) ~-32 ~$((x + 32)) ~32" "force loaded|No chunks were marked"
+  for ((attempt = 0; ; attempt++)); do
+    run_command "execute if loaded ~$((x + 24)) ~ ~24" "Test (passed|failed)"
+    [[ "$(grep -oE 'Test (passed|failed)' "$LOG" | tail -n 1)" == "Test passed" ]] && break
+    ((attempt < 120)) || fail "the area at ~$x ~ ~0 did not load"
+    sleep 0.5
+  done
+}
+
+# Summons a `$1` at `~$2 ~ ~$3` from each origin, with extra NBT `$4`.
+summon() {
+  local origin
+  for origin in $ORIGINS; do
+    run_command "summon minecraft:$1 ~$((origin + $2)) ~ ~$3 {Tags:[\"$MOB_TAG\"]$4}" "Summoned new"
+  done
+}
+
 echo "e2e-test: server up, summoning husks and villagers"
 # A failed run may have left them force loaded.
-run_command "forceload add ~-32 ~-32 ~32 ~32" "force loaded|No chunks were marked"
-for ((attempt = 0; ; attempt++)); do
-  run_command "execute if loaded ~24 ~ ~24" "Test (passed|failed)"
-  [[ "$(grep -oE 'Test (passed|failed)' "$LOG" | tail -n 1)" == "Test passed" ]] && break
-  ((attempt < 120)) || fail "the spawn area did not load"
-  sleep 0.5
+for origin in $ORIGINS; do
+  load_area "$origin"
 done
 # Leftover mobs would race the block changes below.
 run_command "kill @e[tag=$MOB_TAG]" "Killed|No entity was found"
@@ -213,17 +288,32 @@ run_command "kill @e[tag=$MOB_TAG]" "Killed|No entity was found"
 # dev world persists, so a block may already be in place.
 run_command "setblock ~2 ~ ~8 minecraft:oak_fence" "Changed the block|Could not set the block"
 run_command "setblock ~-8 ~ ~2 minecraft:cobblestone" "Changed the block|Could not set the block"
-for offset in "-12 ~ -8" "10 ~ -10" "-6 ~ 12" "14 ~ 6"; do
-  read -r dx _ dz <<<"$offset"
-  run_command "summon minecraft:villager ~$dx ~ ~$dz {Tags:[\"$MOB_TAG\"]$MOB_DATA}" "Summoned new"
+HUSK_DATA=",DeathLootTable:\"minecraft:empty\"$MOB_DATA"
+for offset in "-12 -8" "10 -10" "-6 12" "14 6"; do
+  read -r dx dz <<<"$offset"
+  summon villager "$dx" "$dz" "$MOB_DATA"
 done
-for offset in "0 ~ 0" "3 ~ 3" "-3 ~ 3" "3 ~ -3" "-3 ~ -3" "6 ~ 0" "-6 ~ 0" "0 ~ 6"; do
-  read -r dx _ dz <<<"$offset"
-  run_command "summon minecraft:husk ~$dx ~ ~$dz {Tags:[\"$MOB_TAG\"],DeathLootTable:\"minecraft:empty\"$MOB_DATA}" \
-    "Summoned new"
+for offset in "0 0" "3 3" "-3 3" "3 -3" "-3 -3" "6 0" "-6 0" "0 6"; do
+  read -r dx dz <<<"$offset"
+  summon husk "$dx" "$dz" "$HUSK_DATA"
 done
+if [[ "$FAULTS" == "failover" || -n "$SPARE_RUN" ]]; then
+  summon iron_golem -10 -10 "$MOB_DATA"
+fi
+# A crowd of villagers and husks, so the region sheds every second.
+if [[ -n "$SPARE_RUN" ]]; then
+  for dx in -12 12; do
+    for dz in -12 -4 4 12; do
+      summon villager "$dx" "$dz" "$MOB_DATA"
+    done
+  done
+  for dx in -10 -6 -2 2 6 10; do
+    for dz in -10 -5 0 5 10; do
+      summon husk "$dx" "$dz" "$HUSK_DATA"
+    done
+  done
+fi
 if [[ "$FAULTS" == "failover" ]]; then
-  run_command "summon minecraft:iron_golem ~-10 ~ ~-10 {Tags:[\"$MOB_TAG\"]$MOB_DATA}" "Summoned new"
   wait_state "linked and in service" 0 >/dev/null
 
   echo "e2e-test: letting the mobs run for ${WARM_SECONDS}s"
@@ -251,6 +341,19 @@ if [[ "$FAULTS" == "failover" ]]; then
   RESTARTED="$(wait_state "linked and in service" "$before")"
   echo "e2e-test: letting the mobs run for ${AFTER_SECONDS}s"
   sleep "$AFTER_SECONDS"
+elif [[ -n "$SPARE_RUN" ]]; then
+  wait_state "linked and in service" 0 >/dev/null
+  echo "e2e-test: waiting up to ${SPLIT_TIMEOUT}s for the shedding region to take the spare"
+  for ((i = 0; i < SPLIT_TIMEOUT * 5; i++)); do
+    grep -qF "$SPLIT_LINE" "$LOG" && break
+    kill -0 "$GRADLE_PID" 2>/dev/null || fail "server exited while waiting for the spare to be taken"
+    sleep 0.2
+  done
+  SPLIT="$(grep -F "$SPLIT_LINE" "$LOG" | tail -n 1)"
+  [[ -n "$SPLIT" ]] || fail "the region did not take the spare within ${SPLIT_TIMEOUT}s"
+  echo "e2e-test: letting the mobs run for ${AFTER_SECONDS}s"
+  sleep "$AFTER_SECONDS"
+  kill -0 "$SPARE_PID" 2>/dev/null || fail "the spare node exited during the run"
 else
   echo "e2e-test: letting the mobs run for ${RUN_SECONDS}s"
   sleep "$RUN_SECONDS"
@@ -258,7 +361,9 @@ fi
 kill -0 "$NODE_PID" 2>/dev/null || fail "the node exited during the run"
 
 run_command "kill @e[tag=$MOB_TAG]" "Killed|No entity was found"
-run_command "forceload remove ~-32 ~-32 ~32 ~32" "for force loading|no longer"
+for origin in $ORIGINS; do
+  run_command "forceload remove ~$((origin - 32)) ~-32 ~$((origin + 32)) ~32" "for force loading|no longer"
+done
 
 echo "e2e-test: stopping the server"
 echo "stop" >&3
@@ -302,6 +407,36 @@ if [[ "$FAULTS" == "failover" ]]; then
   ((APPLIED_AFTER > 0)) || fail "no answer moved a mob after the node restarted"
   echo "e2e-test: failover served $SERVED_PAUSED while paused and $SERVED_DOWN while down;" \
     "answers moved $APPLIED_BETWEEN mobs between the faults and $APPLIED_AFTER after"
+elif [[ -n "$SPARE_RUN" ]]; then
+  if [[ "$FAULTS" == "split" ]]; then
+    # Requests in flight at the split are dropped, since they name the region cut.
+    grep -qE "Maestro: region 2 at x -128\.\.127, .* is held by \[node-0 " "$LOG" ||
+      fail "node-0 does not hold the lower half"
+    grep -qE "Maestro: region 3 at x 128\.\.383, .* is held by \[node-1 " "$LOG" ||
+      fail "the spare does not hold the upper half"
+    # The node logs the area it keeps, rather than one sent afresh.
+    grep -qF "$KEPT_LINE" "$NODE_LOG" || fail "node-0 did not keep its half of the region"
+  else
+    grep -qE "Maestro: region 1 at .* is held by \[node-0 at [^,]*, node-1 at " "$LOG" ||
+      fail "the spare is not a replica of the region"
+    if grep -qE "Maestro: region 2 at " "$LOG"; then
+      fail "the region was cut, though its load is in one cell"
+    fi
+  fi
+  if grep -F "refused a world frame" "$NODE_LOG" "$SPARE_LOG" >&2; then
+    fail "a node refused a world frame, so it did not keep or take its area"
+  fi
+  # The spare logs how much it searched when it stops.
+  kill -TERM "$SPARE_PID" 2>/dev/null || true
+  wait "$SPARE_PID" 2>/dev/null || true
+  SPARE_PID=""
+  SEARCHES="$(grep -F "$SEARCHES_LINE" "$SPARE_LOG" | tail -n 1 | grep -oE '[0-9]+ searches' | grep -oE '[0-9]+' || echo 0)"
+  ((SEARCHES > 0)) || fail "the spare ran no search for the mobs it took"
+  echo "e2e-test: SPARE TAKEN: ${SPLIT#*"; so far "}"
+  APPLIED_AFTER=$(($(count applied) - $(count_in "$SPLIT" applied)))
+  ((APPLIED_AFTER > 0)) || fail "no answer moved a mob after the spare was taken"
+  echo "e2e-test: $(count shed) calls shed; the spare ran $SEARCHES searches;" \
+    "answers moved $APPLIED_AFTER mobs after it was taken"
 else
   DROPPED="$(count dropped)"
   ((DROPPED == 0)) || fail "$DROPPED admitted requests were dropped instead of answered"
@@ -319,4 +454,4 @@ else
   ((APPLIED * 2 >= ANSWERED)) || fail "only $APPLIED of $ANSWERED answers moved a mob"
 fi
 
-echo "e2e-test: PASS (offload=$OFFLOAD faults=${FAULTS:-none})"
+echo "e2e-test: PASS (offload=$OFFLOAD subMode=$SUBMODE faults=${FAULTS:-none})"

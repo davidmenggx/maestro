@@ -143,7 +143,7 @@ Server::Server(asio::io_context &Io, const ServerOptions &Opts)
       Requests(Io, {asio::ip::make_address(Opts.Bind), Opts.RequestPort}),
       Heartbeat(Io), Core(
                          Opts.Node, [] { return serve::Clock::now(); }, *this),
-      Pool(Core, Opts.Workers,
+      Pool(Core, Opts.Node.Workers,
            [this](const serve::Job &Finished, serve::Answer Result) {
              asio::post(this->Io, [this, Finished, Result = std::move(Result)] {
                Core.deliver(Finished, Result);

@@ -71,13 +71,13 @@ class BoundaryContractTest {
   void eventsRejectImpossibleFields() {
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldEvent.PathRequested(-1, 1, (short) 1, SOMEWHERE, SOMEWHERE, SEARCH));
+        () -> new WorldEvent.PathRequested(-1, 1, (short) 1, SOMEWHERE, SOMEWHERE, SEARCH, true));
     assertThrows(
         IllegalArgumentException.class,
-        () -> new WorldEvent.PathRequested(0, 1, (short) -1, SOMEWHERE, SOMEWHERE, SEARCH));
+        () -> new WorldEvent.PathRequested(0, 1, (short) -1, SOMEWHERE, SOMEWHERE, SEARCH, true));
     assertThrows(
         NullPointerException.class,
-        () -> new WorldEvent.PathRequested(0, 1, (short) 1, null, SOMEWHERE, SEARCH));
+        () -> new WorldEvent.PathRequested(0, 1, (short) 1, null, SOMEWHERE, SEARCH, true));
     assertThrows(IllegalArgumentException.class, () -> new WorldEvent.Search(-1, 16f, 256, 3));
     // Each bound is the largest value its wire field holds. A silent cast would wrap it.
     new WorldEvent.Search(
@@ -204,8 +204,8 @@ class BoundaryContractTest {
             () -> new WorldEvent.BlockChanged(0, null, (byte) PathType.OPEN, 0),
             () -> new WorldEvent.MobSpawned(0, 1, null),
             () -> new WorldEvent.PlayerMoved(0, 1, null),
-            () -> new WorldEvent.PathRequested(0, 1, (short) 1, SOMEWHERE, null, SEARCH),
-            () -> new WorldEvent.PathRequested(0, 1, (short) 1, SOMEWHERE, SOMEWHERE, null));
+            () -> new WorldEvent.PathRequested(0, 1, (short) 1, SOMEWHERE, null, SEARCH, true),
+            () -> new WorldEvent.PathRequested(0, 1, (short) 1, SOMEWHERE, SOMEWHERE, null, true));
     for (Executable event : missing) {
       assertThrows(NullPointerException.class, event);
     }

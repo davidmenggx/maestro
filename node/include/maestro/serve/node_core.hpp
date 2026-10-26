@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +39,9 @@ struct NodeOptions {
   /// How long a new connection may wait before its first frame.
   Clock::duration JoinTimeout = std::chrono::seconds(5);
   fbs::Pathfinder Search = fbs::Pathfinder::VANILLA;
+  /// Search threads, reported in each heartbeat. With none, requests only
+  /// wait, which suits tests.
+  unsigned Workers = 1;
 };
 
 /// Largest answer the node sends: the largest UDP payload over IPv4.
@@ -83,8 +87,11 @@ struct Outcome {
 /// A job is answered only if it is searched and the answer fits a datagram.
 /// Otherwise it settles with no answer, and later copies are dropped.
 ///
-/// Every member but `queue`, `run` and `searchKind` belongs to the event
-/// thread, which `Output` is also called on. Those three are thread-safe.
+/// A heartbeat reports the searches finished since the timer last fired and
+/// the worker time they took, so the controller can tell the node's rate.
+///
+/// Every member but `queue`, `run`, `searches` and `searchKind` belongs to the
+/// event thread, which `Output` is also called on. Those are thread-safe.
 class NodeCore {
 public:
   class Output {
@@ -145,6 +152,9 @@ public:
 
   fbs::Pathfinder searchKind() const { return Opts.Search; }
 
+  /// Searches run over the area held, since the node started.
+  std::uint64_t searches() const { return Searches.load(); }
+
 private:
   struct Token {
     std::uint64_t Run = 0;
@@ -163,6 +173,8 @@ private:
   void onControlFrame(std::span<const std::uint8_t> Frame);
   void admit(const fbs::PathRequest &Wire, const asio::ip::udp::endpoint &From,
              std::uint64_t Run, std::uint32_t RegionId, Clock::time_point At);
+  /// Queues `Next`, or answers a copy of a request already answered.
+  void enqueue(Job Next, Clock::time_point At);
   void sendHello(ConnectionId To);
   /// Closes the link's connections and forgets what belongs to the link.
   void dropLink(std::string_view Reason);
@@ -192,6 +204,12 @@ private:
       Profiles;
   /// Scratch for frames built on the event thread.
   flatbuffers::FlatBufferBuilder Builder;
+  std::atomic<std::uint64_t> Searches{0};
+  /// Searches finished since the heartbeat timer last fired, and the worker
+  /// time they took. Read apart, so a search's time may count a beat before
+  /// the search.
+  std::atomic<std::uint64_t> BeatSearches{0};
+  std::atomic<std::uint64_t> BeatMicros{0};
 };
 
 } // namespace maestro::serve

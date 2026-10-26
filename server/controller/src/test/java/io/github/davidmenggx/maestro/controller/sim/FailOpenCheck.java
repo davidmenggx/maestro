@@ -18,12 +18,13 @@ import java.util.Set;
  *
  * <p>An episode is one stretch in which a node cannot answer, within one controller run. Once
  * earlier answers have arrived, the controller may send only the requests that show the path is
- * quiet, those admitted before it noticed, and then probes, each after a failed probe and a
- * doubling backoff. A request shows the path is quiet once its first copy fell due unanswered,
- * which its resend shows on the wire: {@link NodeHealth#QUIET_REQUESTS} of them first sent within
- * {@link NodeHealth#QUIET_WINDOW_TICKS}, the oldest {@link NodeHealth#QUIET_TICKS} old. A request
- * that is never resent is not counted, so the bound errs late. A link heard going down takes its
- * requests with it, so only requests sent since show anything.
+ * quiet and those admitted before it noticed. After that it sends no request, only probes: on each
+ * link, one at any time and each later one after a failed probe and a doubling backoff. A request
+ * shows the path is quiet once its first copy fell due unanswered, which its resend shows on the
+ * wire: {@link NodeHealth#QUIET_REQUESTS} of them first sent within {@link
+ * NodeHealth#QUIET_WINDOW_TICKS}, the oldest {@link NodeHealth#QUIET_TICKS} old. A request that is
+ * never resent is not counted, so the bound errs late. A link heard going down takes its requests
+ * with it, so only requests sent since show anything.
  */
 final class FailOpenCheck {
 
@@ -49,6 +50,7 @@ final class FailOpenCheck {
     final long run;
     final long start;
     final List<Long> firstSends = new ArrayList<>();
+    final List<Long> probes = new ArrayList<>();
     final List<Missed> missed = new ArrayList<>();
     final List<Long> linksLost = new ArrayList<>();
 
@@ -65,6 +67,9 @@ final class FailOpenCheck {
 
   /** Requests sent again at least once. */
   private final Set<Sent> resent = new LinkedHashSet<>();
+
+  /** Probes sent at least once. */
+  private final Set<Sent> probed = new LinkedHashSet<>();
 
   private final List<String> violations = new ArrayList<>();
   private long judged;
@@ -104,6 +109,14 @@ final class FailOpenCheck {
       }
     } else if (resent.add(request) && counted) {
       episode.missed.add(new Missed(first, tick));
+    }
+  }
+
+  /** A probe copy left for the node. Its first copy counts. */
+  void probeSent(NodeId node, long run, long requestId, long tick) {
+    Episode episode = open.get(node);
+    if (probed.add(new Sent(run, node, requestId)) && episode != null && episode.run == run) {
+      episode.probes.add(tick);
     }
   }
 
@@ -221,8 +234,7 @@ final class FailOpenCheck {
     }
     long settled = noticed;
     long late = blind.stream().filter(tick -> tick > settled).count();
-    long probes = end <= noticed ? 0 : probesAllowed(end - noticed);
-    if (late > probes) {
+    if (late > 0) {
       found.add(
           node
               + " could not answer from tick "
@@ -232,9 +244,36 @@ final class FailOpenCheck {
               + " but was sent "
               + late
               + " new requests after tick "
-              + noticed
-              + ", where probes allow "
-              + probes);
+              + noticed);
+    }
+    // Each link the node greets on may be probed at once, then after each doubled backoff.
+    List<Long> starts = new ArrayList<>(List.of(noticed));
+    for (long lost : episode.linksLost) {
+      if (lost > noticed) {
+        starts.add(lost);
+      }
+    }
+    for (int i = 0; i < starts.size(); i++) {
+      long linkFrom = starts.get(i);
+      long until = i + 1 < starts.size() ? starts.get(i + 1) : end;
+      long sent = episode.probes.stream().filter(tick -> tick > linkFrom && tick <= until).count();
+      long allowed = probesAllowed(until - linkFrom);
+      if (sent > allowed) {
+        found.add(
+            node
+                + " could not answer from tick "
+                + episode.start
+                + " to "
+                + end
+                + " but was sent "
+                + sent
+                + " probes from tick "
+                + linkFrom
+                + " to "
+                + until
+                + ", where backoffs allow "
+                + allowed);
+      }
     }
     return true;
   }

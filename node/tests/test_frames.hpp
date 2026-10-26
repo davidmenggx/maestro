@@ -38,6 +38,9 @@ Bytes cancelFrame(const std::vector<std::uint64_t> &Ids,
                   std::uint64_t Run = TestRun,
                   std::uint32_t RegionId = TestRegion);
 
+/// A probe under `Id`, in a frame naming `Run` and region 0.
+Bytes probeFrame(std::uint64_t Id, std::uint64_t Run = TestRun);
+
 /// Runs `Core`'s waiting jobs on this thread, oldest first, delivering their
 /// answers: `Count` of them, or all if 0. Jobs dropped unsearched (canceled or
 /// past `MaxWait`) are not counted. Returns how many ran.

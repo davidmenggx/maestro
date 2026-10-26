@@ -26,7 +26,7 @@ int columnIndex(int X, int Z) {
 /// One edit of a delta, keyed so sorting groups edits by chunk, then column,
 /// with a cell's last edit last.
 struct EditKey {
-  /// `ChunkX * chunksPerSide + ChunkZ`.
+  /// `ChunkX * chunksZ + ChunkZ`.
   std::uint32_t Chunk;
   /// The column within the chunk, then the offset, which fits 16 bits as the
   /// height does.
@@ -88,7 +88,7 @@ Column::with(std::span<const ColumnEdit> Edits) const {
 Area::Area(Geometry Geo, std::uint64_t ControllerRun, std::uint32_t RegionId,
            std::uint64_t Sequence)
     : Geo(Geo), ControllerRun(ControllerRun), RegionId(RegionId),
-      Sequence(Sequence), Rows(static_cast<std::size_t>(Geo.chunksPerSide())),
+      Sequence(Sequence), Rows(static_cast<std::size_t>(Geo.chunksX())),
       AirColumn(std::make_shared<const Column>(
           std::vector<Run>{Run{static_cast<std::uint16_t>(Geo.Height), Air}})) {
 }
@@ -108,7 +108,7 @@ Cell Area::at(int X, int Y, int Z) const {
 }
 
 const Column *Area::column(int X, int Z) const {
-  if (X < 0 || X >= Geo.Size || Z < 0 || Z >= Geo.Size)
+  if (X < 0 || X >= Geo.SizeX || Z < 0 || Z >= Geo.SizeZ)
     return nullptr;
   const ChunkPtr *Content = chunkAt(X, Z);
   return Content && *Content ? (**Content)[columnIndex(X, Z)].get() : nullptr;
@@ -118,14 +118,14 @@ std::shared_ptr<Area::ChunkRow> Area::copyRow(int ChunkX) const {
   const RowPtr &Old = Rows[ChunkX];
   return Old ? std::make_shared<ChunkRow>(*Old)
              : std::make_shared<ChunkRow>(
-                   static_cast<std::size_t>(Geo.chunksPerSide()));
+                   static_cast<std::size_t>(Geo.chunksZ()));
 }
 
 std::shared_ptr<const Area> Area::withChunk(int ChunkX, int ChunkZ,
                                             ChunkPtr Content,
                                             std::uint64_t Sequence) const {
-  assert(ChunkX >= 0 && ChunkX < Geo.chunksPerSide() && ChunkZ >= 0 &&
-         ChunkZ < Geo.chunksPerSide() && "chunk outside the area");
+  assert(ChunkX >= 0 && ChunkX < Geo.chunksX() && ChunkZ >= 0 &&
+         ChunkZ < Geo.chunksZ() && "chunk outside the area");
   auto Next = std::make_shared<Area>(*this);
   Next->Sequence = Sequence;
   auto Row = copyRow(ChunkX);
@@ -138,7 +138,7 @@ std::shared_ptr<const Area> Area::withCells(std::span<const CellEdit> Edits,
                                             std::uint64_t Sequence) const {
   auto Next = std::make_shared<Area>(*this);
   Next->Sequence = Sequence;
-  const int PerSide = Geo.chunksPerSide();
+  const int ChunksZ = Geo.chunksZ();
 
   std::vector<EditKey> Keys;
   Keys.reserve(Edits.size());
@@ -147,7 +147,7 @@ std::shared_ptr<const Area> Area::withCells(std::span<const CellEdit> Edits,
     assert(Geo.contains(Edit.X, Edit.Y, Edit.Z) && "edit outside the area");
     const auto Column = static_cast<std::uint32_t>(columnIndex(Edit.X, Edit.Z));
     const auto Offset = static_cast<std::uint32_t>(Edit.Y - Geo.MinY);
-    Keys.push_back({static_cast<std::uint32_t>(Edit.X / ChunkSize * PerSide +
+    Keys.push_back({static_cast<std::uint32_t>(Edit.X / ChunkSize * ChunksZ +
                                                Edit.Z / ChunkSize),
                     Column << 16 | Offset, static_cast<std::uint32_t>(I)});
   }
@@ -159,8 +159,8 @@ std::shared_ptr<const Area> Area::withCells(std::span<const CellEdit> Edits,
   std::vector<ColumnEdit> ColumnEdits;
   for (std::size_t Begin = 0; Begin < Keys.size();) {
     const std::uint32_t ChunkIndex = Keys[Begin].Chunk;
-    const int ChunkX = static_cast<int>(ChunkIndex) / PerSide;
-    const int ChunkZ = static_cast<int>(ChunkIndex) % PerSide;
+    const int ChunkX = static_cast<int>(ChunkIndex) / ChunksZ;
+    const int ChunkZ = static_cast<int>(ChunkIndex) % ChunksZ;
     // Null for a chunk with no state, which reads as air, so an edit to it
     // still applies.
     const Chunk *Old = Rows[ChunkX] ? (*Rows[ChunkX])[ChunkZ].get() : nullptr;
@@ -202,6 +202,21 @@ std::shared_ptr<const Area> Area::withCells(std::span<const CellEdit> Edits,
     }
     (*Row)[ChunkZ] = std::move(Content);
   }
+  return Next;
+}
+
+std::shared_ptr<const Area> Area::cropped(Geometry To,
+                                          std::uint32_t RegionId) const {
+  assert(Geo.holds(To) && "a crop past the area");
+  auto Next = std::make_shared<Area>(*this);
+  Next->Geo = To;
+  Next->RegionId = RegionId;
+  Next->Rows.resize(static_cast<std::size_t>(To.chunksX()));
+  if (To.chunksZ() < Geo.chunksZ())
+    for (RowPtr &Row : Next->Rows)
+      if (Row)
+        Row = std::make_shared<const ChunkRow>(Row->begin(),
+                                               Row->begin() + To.chunksZ());
   return Next;
 }
 

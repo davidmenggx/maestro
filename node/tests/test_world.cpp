@@ -19,15 +19,16 @@ Frame finish(flatbuffers::FlatBufferBuilder &Builder) {
 
 } // namespace
 
-DenseWorld::DenseWorld(int Size, int MinY, int Height)
-    : Geo{Size, MinY, Height},
-      Cells(static_cast<std::size_t>(Size) * Size * Height, world::Air) {
-  assert(Size % world::ChunkSize == 0 && "the area must tile into chunks");
+DenseWorld::DenseWorld(int SizeX, int SizeZ, int MinY, int Height)
+    : Geo{SizeX, SizeZ, MinY, Height},
+      Cells(static_cast<std::size_t>(SizeX) * SizeZ * Height, world::Air) {
+  assert(SizeX % world::ChunkSize == 0 && SizeZ % world::ChunkSize == 0 &&
+         "the area must tile into chunks");
 }
 
 std::size_t DenseWorld::index(int X, int Y, int Z) const {
   assert(Geo.contains(X, Y, Z) && "position outside the test world");
-  return (static_cast<std::size_t>(X) * Geo.Size + Z) * Geo.Height +
+  return (static_cast<std::size_t>(X) * Geo.SizeZ + Z) * Geo.Height +
          (Y - Geo.MinY);
 }
 
@@ -47,16 +48,30 @@ void DenseWorld::fill(int X0, int Y0, int Z0, int X1, int Y1, int Z1,
         set(X, Y, Z, Value);
 }
 
+Frame assignmentFrame(const world::Geometry &Geo, std::uint64_t Run,
+                      std::uint32_t RegionId, bool Resume,
+                      std::uint64_t Sequence, std::uint32_t FromRegionId) {
+  flatbuffers::FlatBufferBuilder Builder;
+  fbs::RegionAssignmentBuilder Body(Builder);
+  Body.add_run(Run);
+  Body.add_region_id(RegionId);
+  Body.add_size_x(static_cast<std::uint16_t>(Geo.SizeX));
+  Body.add_size_z(static_cast<std::uint16_t>(Geo.SizeZ));
+  Body.add_min_y(Geo.MinY);
+  Body.add_height(static_cast<std::uint16_t>(Geo.Height));
+  Body.add_resume(Resume);
+  Body.add_sequence(Sequence);
+  Body.add_from_region_id(FromRegionId);
+  const auto Done = Body.Finish();
+  Builder.Finish(fbs::CreateWorldFrame(Builder, fbs::WorldMsg::RegionAssignment,
+                                       Done.Union()));
+  return finish(Builder);
+}
+
 Frame DenseWorld::assignment(bool Resume, std::uint64_t Run,
                              std::uint32_t RegionId,
                              std::uint64_t Sequence) const {
-  flatbuffers::FlatBufferBuilder Builder;
-  const auto Body = fbs::CreateRegionAssignment(
-      Builder, Run, RegionId, static_cast<std::uint16_t>(Geo.Size), Geo.MinY,
-      static_cast<std::uint16_t>(Geo.Height), Resume, Sequence);
-  Builder.Finish(fbs::CreateWorldFrame(Builder, fbs::WorldMsg::RegionAssignment,
-                                       Body.Union()));
-  return finish(Builder);
+  return assignmentFrame(Geo, Run, RegionId, Resume, Sequence);
 }
 
 Frame DenseWorld::chunk(std::uint64_t Sequence, int ChunkX, int ChunkZ) const {
@@ -104,8 +119,8 @@ std::shared_ptr<const world::Area> DenseWorld::load() const {
   world::WorldStore Store;
   EXPECT_EQ(applyBytes(Store, assignment()), world::ApplyStatus::Applied);
   std::uint64_t Sequence = 1;
-  for (int ChunkX = 0; ChunkX < Geo.chunksPerSide(); ++ChunkX)
-    for (int ChunkZ = 0; ChunkZ < Geo.chunksPerSide(); ++ChunkZ)
+  for (int ChunkX = 0; ChunkX < Geo.chunksX(); ++ChunkX)
+    for (int ChunkZ = 0; ChunkZ < Geo.chunksZ(); ++ChunkZ)
       EXPECT_EQ(applyBytes(Store, chunk(Sequence++, ChunkX, ChunkZ)),
                 world::ApplyStatus::Applied);
   return Store.pin();

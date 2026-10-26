@@ -1,5 +1,7 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
+import io.github.davidmenggx.maestro.controller.core.Dispatch;
+import io.github.davidmenggx.maestro.controller.core.Placement;
 import io.github.davidmenggx.maestro.controller.env.Rng;
 import java.util.Collections;
 import java.util.EnumMap;
@@ -25,13 +27,21 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     COST_SPREAD_PERCENT(0, 50),
     SLOW_NODES(0, 2),
     /** The capacity the controller assumes, as a percentage of a normal node's. */
-    CAPACITY_ESTIMATE_PERCENT(75, 200),
+    CAPACITY_ESTIMATE_PERCENT(50, 200),
     MOBS(0, 48),
     MOB_CLASSES(1, 4),
     BLOCK_CHANGES_PER_TICK(0, 6),
     PLAYERS(0, 3),
     /** How much of a tick the server works, as a percentage. It idles for the rest. */
-    SERVER_BUSY_PERCENT(20, 100);
+    SERVER_BUSY_PERCENT(20, 100),
+    /** Ticks a holder may be down before a spare takes its region. */
+    GRACE_TICKS(10, 100),
+    /** Windows of shedding before a region takes a spare. */
+    HOT_WINDOWS(1, 10),
+    /** Windows of low load before a replica returns to the spares. */
+    COLD_WINDOWS(1, 30),
+    /** 1 to send each request as soon as it is encoded, 0 to batch a tick's requests. */
+    STREAM(0, 1);
 
     private final int floor;
     private final int ceiling;
@@ -61,7 +71,9 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     /** A mob that asks again in the same tick, as when a goal changes mid-tick. */
     REPEAT_REQUEST(0.1),
     /** A tick whose work runs past its time, so the server falls behind and catches up. */
-    SLOW_TICK(0.2);
+    SLOW_TICK(0.2),
+    /** A request whose mob has a target, which sheds it last. */
+    HUNTING(1.0);
 
     private final double ceiling;
 
@@ -95,27 +107,35 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
   /** A fleet with spare capacity and a world whose chunks stay loaded. */
   public static final Scenario DEFAULT =
       new Scenario(
-          Map.of(
-              Count.WORKER_CAPACITY, 4,
-              Count.WORKERS, 2,
-              Count.COST_SPREAD_PERCENT, 50,
-              Count.SLOW_NODES, 0,
-              Count.CAPACITY_ESTIMATE_PERCENT, 100,
-              Count.MOBS, 12,
-              Count.MOB_CLASSES, 2,
-              Count.BLOCK_CHANGES_PER_TICK, 3,
-              Count.PLAYERS, 1,
-              Count.SERVER_BUSY_PERCENT, 50),
-          Map.of(
+          Map.ofEntries(
+              Map.entry(Count.WORKER_CAPACITY, 4),
+              Map.entry(Count.WORKERS, 2),
+              Map.entry(Count.COST_SPREAD_PERCENT, 50),
+              Map.entry(Count.SLOW_NODES, 0),
+              Map.entry(Count.CAPACITY_ESTIMATE_PERCENT, 100),
+              Map.entry(Count.MOBS, 12),
+              Map.entry(Count.MOB_CLASSES, 2),
+              Map.entry(Count.BLOCK_CHANGES_PER_TICK, 3),
+              Map.entry(Count.PLAYERS, 1),
+              Map.entry(Count.SERVER_BUSY_PERCENT, 50),
+              Map.entry(Count.GRACE_TICKS, Placement.Policy.DEFAULT.graceTicks()),
+              Map.entry(
+                  Count.HOT_WINDOWS, Placement.Policy.DEFAULT.hotTicks() / Placement.WINDOW_TICKS),
+              Map.entry(
+                  Count.COLD_WINDOWS,
+                  Placement.Policy.DEFAULT.coldTicks() / Placement.WINDOW_TICKS),
+              Map.entry(Count.STREAM, 0)),
+          Map.ofEntries(
               // A mob repaths about every 15 ticks, roughly as in vanilla.
-              Chance.REQUEST, 0.07,
-              Chance.CANCEL, 0.02,
-              Chance.MOB_CHURN, 0.05,
-              Chance.CHUNK_CHURN, 0.0,
-              Chance.PLAYER_CHURN, 0.01,
-              Chance.STRAY_REQUEST, 0.0,
-              Chance.REPEAT_REQUEST, 0.0,
-              Chance.SLOW_TICK, 0.0));
+              Map.entry(Chance.REQUEST, 0.07),
+              Map.entry(Chance.CANCEL, 0.02),
+              Map.entry(Chance.MOB_CHURN, 0.05),
+              Map.entry(Chance.CHUNK_CHURN, 0.0),
+              Map.entry(Chance.PLAYER_CHURN, 0.01),
+              Map.entry(Chance.STRAY_REQUEST, 0.0),
+              Map.entry(Chance.REPEAT_REQUEST, 0.0),
+              Map.entry(Chance.SLOW_TICK, 0.0),
+              Map.entry(Chance.HUNTING, 0.5)));
 
   /** Far more demand than the fleet can serve, so pre-send rejection must limit the load. */
   public static final Scenario SATURATED =
@@ -131,11 +151,24 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
   /** Share of sampled runs whose server falls behind. The rest can be held to the latency SLO. */
   static final double SLOW_SERVER_SHARE = 0.3;
 
+  /**
+   * Share of sampled runs whose controller assumes no more than a normal node serves at worst cost,
+   * so that admission alone can be held to the SLO under overload.
+   */
+  static final double MODEST_ESTIMATE_SHARE = 0.3;
+
   /** One draw from the full range of every setting. Few draws have slow ticks. */
   public static Scenario sample(Rng rng) {
     Map<Count, Integer> counts = new EnumMap<>(Count.class);
     for (Count setting : Count.values()) {
       counts.put(setting, setting.floor() + rng.nextInt(setting.ceiling() - setting.floor() + 1));
+    }
+    if (rng.nextDouble() < MODEST_ESTIMATE_SHARE) {
+      int floor = Count.CAPACITY_ESTIMATE_PERCENT.floor();
+      int worstCase = 100 * 100 / (100 + counts.get(Count.COST_SPREAD_PERCENT));
+      counts.put(
+          Count.CAPACITY_ESTIMATE_PERCENT,
+          floor + rng.nextInt(Math.max(floor, worstCase) - floor + 1));
     }
     Map<Chance, Double> chances = new EnumMap<>(Chance.class);
     for (Chance setting : Chance.values()) {
@@ -190,6 +223,18 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
   public int serverBusySteps() {
     int steps = Simulation.STEPS_PER_TICK * counts.get(Count.SERVER_BUSY_PERCENT) / 100;
     return Math.max(1, Math.min(Simulation.MAX_BUSY_STEPS, steps));
+  }
+
+  /** How long the controller waits before moving regions between nodes. */
+  public Placement.Policy policy() {
+    return new Placement.Policy(
+        counts.get(Count.GRACE_TICKS),
+        counts.get(Count.HOT_WINDOWS) * Placement.WINDOW_TICKS,
+        counts.get(Count.COLD_WINDOWS) * Placement.WINDOW_TICKS);
+  }
+
+  public Dispatch dispatch() {
+    return counts.get(Count.STREAM) == 1 ? Dispatch.STREAM : Dispatch.BATCH;
   }
 
   /** The capacity the controller assumes every node has, which differs from the truth. */

@@ -25,6 +25,7 @@ import maestro.fbs.Hello;
 import maestro.fbs.Join;
 import maestro.fbs.PathCancel;
 import maestro.fbs.PathNode;
+import maestro.fbs.PathProbe;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
 import maestro.fbs.PathResponse;
@@ -383,14 +384,64 @@ public final class Frames {
   }
 
   /**
-   * {@code size} is the side of the square area, a multiple of {@link Chunks#SIZE}; every position
-   * in it must fit the wire's 16 bits. {@code sequence} is where the region's stream stands, so the
-   * next frame is {@code sequence + 1}.
+   * A probe of whether the node serves requests, under a request id. It names region 0, so the node
+   * answers it with no path at sequence 0.
+   */
+  public static byte[] probe(long run, long requestId) {
+    FlatBufferBuilder builder = builder();
+    int probe = PathProbe.createPathProbe(builder, requestId);
+    builder.finish(RequestFrame.createRequestFrame(builder, RequestMsg.PathProbe, probe, run, 0));
+    return builder.sizedByteArray();
+  }
+
+  /**
+   * {@code sizeX} and {@code sizeZ} are the sides of the area, multiples of {@link Chunks#SIZE};
+   * every position in it must fit the wire's 16 bits. {@code sequence} is where the region's stream
+   * stands, so the next frame is {@code sequence + 1}.
    */
   public static byte[] assignment(
-      long run, int regionId, int size, long sequence, boolean resume, WorldSource world) {
-    if (size <= 0 || size % Chunks.SIZE != 0 || size > Short.MAX_VALUE) {
-      throw new IllegalArgumentException("an area is whole chunks a short can index: " + size);
+      long run,
+      int regionId,
+      int sizeX,
+      int sizeZ,
+      long sequence,
+      boolean resume,
+      WorldSource world) {
+    return assignment(run, regionId, sizeX, sizeZ, sequence, resume, 0, world);
+  }
+
+  /**
+   * An assignment that keeps the node's state: it holds region {@code fromRegionId} at {@code
+   * sequence}, in an area with the same corner that contains this one, and keeps what lies inside
+   * as {@code regionId}.
+   */
+  public static byte[] keptAssignment(
+      long run,
+      int regionId,
+      int fromRegionId,
+      int sizeX,
+      int sizeZ,
+      long sequence,
+      WorldSource world) {
+    if (fromRegionId < 1) {
+      throw new IllegalArgumentException("a kept area comes from a region: " + fromRegionId);
+    }
+    return assignment(run, regionId, sizeX, sizeZ, sequence, false, fromRegionId, world);
+  }
+
+  private static byte[] assignment(
+      long run,
+      int regionId,
+      int sizeX,
+      int sizeZ,
+      long sequence,
+      boolean resume,
+      int fromRegionId,
+      WorldSource world) {
+    for (int size : new int[] {sizeX, sizeZ}) {
+      if (size <= 0 || size % Chunks.SIZE != 0 || size > Short.MAX_VALUE) {
+        throw new IllegalArgumentException("an area is whole chunks a short can index: " + size);
+      }
     }
     int minY = world.minY();
     int height = world.height();
@@ -405,10 +456,12 @@ public final class Frames {
     RegionAssignment.addRun(builder, run);
     RegionAssignment.addSequence(builder, sequence);
     RegionAssignment.addRegionId(builder, regionId);
-    RegionAssignment.addSize(builder, size);
+    RegionAssignment.addSizeX(builder, sizeX);
+    RegionAssignment.addSizeZ(builder, sizeZ);
     RegionAssignment.addMinY(builder, minY);
     RegionAssignment.addHeight(builder, uint16(height));
     RegionAssignment.addResume(builder, resume);
+    RegionAssignment.addFromRegionId(builder, fromRegionId);
     int assignment = RegionAssignment.endRegionAssignment(builder);
     builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.RegionAssignment, assignment));
     return builder.sizedByteArray();
@@ -519,7 +572,11 @@ public final class Frames {
       }
       case ControlReplyMsg.Heartbeat -> {
         Heartbeat heartbeat = (Heartbeat) reply.body(new Heartbeat());
-        return new Reply.Depth(heartbeat.queueDepth());
+        return new Reply.Beat(
+            heartbeat.queueDepth(),
+            heartbeat.searches(),
+            heartbeat.searchMicros(),
+            heartbeat.workers());
       }
       default -> {
         return null;

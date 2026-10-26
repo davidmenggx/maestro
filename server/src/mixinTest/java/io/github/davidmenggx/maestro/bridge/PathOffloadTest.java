@@ -10,7 +10,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.github.davidmenggx.maestro.config.MaestroConfig.Offload;
 import io.github.davidmenggx.maestro.controller.env.Clock;
 import io.github.davidmenggx.maestro.controller.env.Metrics;
-import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.region.RegionLayout;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.PathTypes;
@@ -65,6 +64,9 @@ class PathOffloadTest {
   private final List<Vec3> players = new ArrayList<>();
   private long nanos;
 
+  /** Whether the mob of the next call has a target. */
+  private boolean hunting = true;
+
   private PathOffload offload;
 
   @BeforeAll
@@ -117,7 +119,7 @@ class PathOffloadTest {
 
   @Test
   void aRefusedRequestIsSearchedByVanillaInTheSameCall() {
-    controller.refuseWith = DropReason.QUEUE_DEPTH;
+    controller.refuseWith = DropReason.NO_NODE;
 
     Path path = search(START, TARGET);
 
@@ -127,6 +129,56 @@ class PathOffloadTest {
     // Nothing waits, so there is nothing to cancel.
     offload.tickEnding();
     assertEquals(0, controller.cancels());
+  }
+
+  @Test
+  void aShedMobKeepsTheLivePathItFollows() {
+    Path live = path(line(-4, 0));
+    navigator.follow(live, START);
+    controller.refuseWith = DropReason.SHED;
+
+    assertSame(live, search(START, TARGET));
+
+    assertEquals(List.of(), vanillaCalls);
+    assertEquals(1, offload.outcomes("SHED"));
+    offload.tickEnding();
+    assertEquals(0, controller.cancels());
+  }
+
+  @Test
+  void aShedMobWithNoPathIdles() {
+    controller.refuseWith = DropReason.SHED;
+
+    assertNull(search(START, TARGET));
+
+    assertEquals(List.of(), vanillaCalls);
+    assertEquals(1, offload.outcomes("SHED"));
+  }
+
+  @Test
+  void aShedRepeatEndsTheHoldOfTheRequestItReplacedAndIdles() {
+    Path held = search(START, TARGET);
+    navigator.follow(held, TARGET);
+    controller.refuseWith = DropReason.SHED;
+
+    assertNull(search(START, new BlockPos(0, 64, 9)));
+
+    assertFalse(HeldPaths.isHeld(held));
+    assertEquals(List.of(), vanillaCalls);
+  }
+
+  @Test
+  void aRequestSaysWhetherItsMobIsHunting() {
+    search(START, TARGET);
+    hunting = false;
+    search(START, START.east());
+
+    List<Boolean> sent =
+        controller.events.stream()
+            .filter(WorldEvent.PathRequested.class::isInstance)
+            .map(event -> ((WorldEvent.PathRequested) event).hunting())
+            .toList();
+    assertEquals(List.of(true, false), sent);
   }
 
   @Test
@@ -309,7 +361,7 @@ class PathOffloadTest {
   }
 
   @Test
-  void anAnswerAfterTheMobMovedOnServesOneLaterCallForTheSameSearch() {
+  void anAnswerAfterTheMobMovedOnIsDroppedAndALaterCallAsksAgain() {
     Path held = search(START, TARGET);
     navigator.follow(held, TARGET);
     Path other = path(line(0, -3));
@@ -319,32 +371,8 @@ class PathOffloadTest {
 
     assertSame(other, navigator.path);
     assertEquals(1, offload.outcomes("MOVED_ON"));
-    clock.tick += PathOffload.FRESH_TICKS;
-    Path reused = search(START, TARGET);
-    assertEquals(7, reused.getNodeCount());
-    assertEquals(1, offload.outcomes("REUSED"));
-    assertEquals(1, controller.requests());
-    // Once only.
     search(START, TARGET);
     assertEquals(2, controller.requests());
-  }
-
-  @Test
-  void aKeptAnswerServesNeitherAnotherSearchNorALateOne() {
-    navigator.follow(search(START, TARGET), TARGET);
-    navigator.follow(path(line(0, -3)), START);
-    offload.pathComputed(answer(START, TARGET, line(0, 6)));
-
-    search(START.west(), TARGET);
-    assertEquals(0, offload.outcomes("REUSED"));
-
-    // It moves on again, and asks once its answer is stale.
-    navigator.follow(path(line(0, -5)), START);
-    offload.pathComputed(answer(START.west(), TARGET, line(-1, 6)));
-    assertEquals(2, offload.outcomes("MOVED_ON"));
-    clock.tick += PathOffload.FRESH_TICKS + 1;
-    search(START.west(), TARGET);
-    assertEquals(0, offload.outcomes("REUSED"));
   }
 
   @Test
@@ -530,7 +558,20 @@ class PathOffloadTest {
     navigator.follow(search(START, TARGET), TARGET);
     assertTrue(offload.failover().waits(MOB));
 
-    controller.refuseWith = DropReason.QUEUE_DEPTH;
+    controller.refuseWith = DropReason.NO_NODE;
+    search(START, TARGET);
+
+    assertFalse(offload.failover().waits(MOB));
+  }
+
+  @Test
+  void aShedMobNoLongerWaitsForAFullSearch() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    spendTheBudget();
+    navigator.follow(search(START, TARGET), TARGET);
+    assertTrue(offload.failover().waits(MOB));
+
+    controller.refuseWith = DropReason.SHED;
     search(START, TARGET);
 
     assertFalse(offload.failover().waits(MOB));
@@ -540,7 +581,7 @@ class PathOffloadTest {
   void otherRefusalsAreSearchedByVanillaWithoutTheFailover() {
     controller.refuseWith = DropReason.UNAVAILABLE;
     spendTheBudget();
-    controller.refuseWith = DropReason.QUEUE_DEPTH;
+    controller.refuseWith = DropReason.NO_NODE;
 
     search(START, TARGET);
 
@@ -587,7 +628,7 @@ class PathOffloadTest {
     PathOffload built =
         new PathOffload(
             null,
-            RegionLayout.spiral(List.of(NodeId.of(0))),
+            new RegionLayout(1),
             navigators::get,
             clock,
             () -> nanos,
@@ -628,7 +669,8 @@ class PathOffloadTest {
    * costs {@link #SEARCH_NANOS} in full.
    */
   private Path search(int mob, FakeNavigator from, BlockPos start, BlockPos target) {
-    SearchCall call = new SearchCall(PROFILE, start, target, new WorldEvent.Search(1, 16f, 256, 3));
+    SearchCall call =
+        new SearchCall(PROFILE, start, target, new WorldEvent.Search(1, 16f, 256, 3), hunting);
     return offload.search(
         mob,
         from,

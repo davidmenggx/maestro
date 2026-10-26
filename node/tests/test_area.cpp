@@ -15,7 +15,7 @@ using namespace maestro::world;
 
 namespace {
 
-constexpr Geometry SmallArea{32, -16, 48};
+constexpr Geometry SmallArea{32, 32, -16, 48};
 
 Column column(std::vector<Run> Runs) { return Column(std::move(Runs)); }
 
@@ -186,6 +186,58 @@ TEST(Area, OneDeltaCanEditSeveralChunksAndRows) {
   EXPECT_EQ(After->at(20, 0, 1), Stone);
   EXPECT_EQ(After->at(20, 0, 20), Water);
   EXPECT_EQ(Empty->at(20, 0, 20), Air);
+}
+
+TEST(Area, ARectangularAreaKeepsEachChunkApart) {
+  for (const Geometry Geo : {Geometry{48, 16, 0, 8}, Geometry{16, 48, 0, 8}}) {
+    const auto Empty = std::make_shared<const Area>(Geo, 1, 0);
+    std::vector<CellEdit> Edits;
+    for (int X = 0; X < Geo.SizeX; X += 16)
+      for (int Z = 0; Z < Geo.SizeZ; Z += 16)
+        Edits.push_back({X + 3, 2, Z + 5, Cell{PathType::FENCE, 24}});
+    const auto After = Empty->withCells(Edits, 1);
+    for (int X = 0; X < Geo.SizeX; X += 16)
+      for (int Z = 0; Z < Geo.SizeZ; Z += 16) {
+        EXPECT_EQ(After->at(X + 3, 2, Z + 5), (Cell{PathType::FENCE, 24}));
+        EXPECT_EQ(After->at(X + 5, 2, Z + 3), Air);
+      }
+    EXPECT_EQ(After->at(Geo.SizeX, 2, 0), Air);
+    EXPECT_EQ(After->at(0, 2, Geo.SizeZ), Air);
+
+    const auto Cleared =
+        After->withChunk(Geo.chunksX() - 1, Geo.chunksZ() - 1, nullptr, 2);
+    EXPECT_EQ(Cleared->at(Geo.SizeX - 13, 2, Geo.SizeZ - 11), Air);
+    EXPECT_EQ(Cleared->at(3, 2, 5), (Cell{PathType::FENCE, 24}));
+  }
+}
+
+TEST(Area, ACropKeepsTheChunksInsideWhereTheyWereAndSharesThem) {
+  const Geometry Whole{48, 48, 0, 8};
+  const auto Empty = std::make_shared<const Area>(Whole, 1, 3);
+  std::vector<CellEdit> Edits;
+  for (int X = 0; X < Whole.SizeX; X += 16)
+    for (int Z = 0; Z < Whole.SizeZ; Z += 16)
+      Edits.push_back({X + 3, 2, Z + 5, Cell{PathType::FENCE, 24}});
+  const auto Before = Empty->withCells(Edits, 6);
+
+  for (const Geometry To : {Geometry{48, 16, 0, 8}, Geometry{16, 48, 0, 8},
+                            Geometry{32, 32, 0, 8}}) {
+    const auto After = Before->cropped(To, 9);
+    EXPECT_EQ(After->geometry(), To);
+    EXPECT_EQ(After->run(), 1u);
+    EXPECT_EQ(After->regionId(), 9u);
+    EXPECT_EQ(After->sequence(), 6u);
+    for (int X = 0; X < Whole.SizeX; X += 16)
+      for (int Z = 0; Z < Whole.SizeZ; Z += 16) {
+        const bool Inside = X < To.SizeX && Z < To.SizeZ;
+        const Cell Expected = Inside ? Cell{PathType::FENCE, 24} : Air;
+        EXPECT_EQ(After->at(X + 3, 2, Z + 5), Expected);
+        if (Inside)
+          EXPECT_EQ(After->column(X + 3, Z + 5), Before->column(X + 3, Z + 5));
+      }
+    // The version cropped from is unchanged, as a search may still hold it.
+    EXPECT_EQ(Before->at(35, 2, 37), (Cell{PathType::FENCE, 24}));
+  }
 }
 
 TEST(Area, ClearingAChunkLeavesTheOthers) {

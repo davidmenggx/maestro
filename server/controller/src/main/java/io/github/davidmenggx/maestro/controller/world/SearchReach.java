@@ -27,18 +27,18 @@ public final class SearchReach {
   }
 
   /**
-   * Whether the square area with corner {@code (minX, minZ)} and side {@code size} contains every
-   * block a search from {@code start} can read.
+   * Whether the area with corner {@code (minX, minZ)} and sides {@code sizeX} and {@code sizeZ}
+   * contains every block a search from {@code start} can read.
    */
   public static boolean fits(
-      int minX, int minZ, int size, Pos start, float maxPathLength, float width) {
-    if (size <= 0) {
-      throw new IllegalArgumentException("an area has a positive size: " + size);
+      int minX, int minZ, int sizeX, int sizeZ, Pos start, float maxPathLength, float width) {
+    if (sizeX <= 0 || sizeZ <= 0) {
+      throw new IllegalArgumentException("an area has positive sides: " + sizeX + "x" + sizeZ);
     }
     long reach = blocks(maxPathLength, width);
     return start.x() - reach >= minX
-        && start.x() + reach < (long) minX + size
+        && start.x() + reach < (long) minX + sizeX
         && start.z() - reach >= minZ
-        && start.z() + reach < (long) minZ + size;
+        && start.z() + reach < (long) minZ + sizeZ;
   }
 }

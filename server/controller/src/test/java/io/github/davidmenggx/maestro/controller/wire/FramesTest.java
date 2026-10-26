@@ -306,27 +306,35 @@ class FramesTest {
   @Test
   void anAreaIsWholeChunks() {
     WorldSource world = flat();
-    ByteBuffer frame = ByteBuffer.wrap(Frames.assignment(3, 4, 96, 17, false, world));
+    ByteBuffer frame = ByteBuffer.wrap(Frames.assignment(3, 4, 96, 384, 17, false, world));
     RegionAssignment decoded =
         (RegionAssignment) WorldFrame.getRootAsWorldFrame(frame).body(new RegionAssignment());
     assertEquals(3, decoded.run());
     assertEquals(4, decoded.regionId());
-    assertEquals(96, decoded.size());
+    assertEquals(96, decoded.sizeX());
+    assertEquals(384, decoded.sizeZ());
     assertEquals(17, decoded.sequence());
     assertEquals(world.minY(), decoded.minY());
     assertEquals(world.height(), decoded.height());
 
     assertThrows(
-        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 40, 0, false, world));
-    assertThrows(IllegalArgumentException.class, () -> Frames.assignment(3, 4, 0, 0, false, world));
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 40, 96, 0, false, world));
+    assertThrows(
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 96, 40, 0, false, world));
+    assertThrows(
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 0, 96, 0, false, world));
+    assertThrows(
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 96, 0, 0, false, world));
     // The node indexes the area with shorts.
     assertThrows(
-        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 32768, 0, false, world));
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 32768, 96, 0, false, world));
+    assertThrows(
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 96, 32768, 0, false, world));
     WorldSource tooHigh = source(32000, 1024, (x, y, z) -> 0);
     assertThrows(
-        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 96, 0, false, tooHigh));
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 96, 96, 0, false, tooHigh));
     assertThrows(
-        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 96, -1, false, world));
+        IllegalArgumentException.class, () -> Frames.assignment(3, 4, 96, 96, -1, false, world));
   }
 
   @Test

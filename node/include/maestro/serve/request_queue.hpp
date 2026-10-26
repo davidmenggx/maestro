@@ -24,9 +24,10 @@ using Clock = std::chrono::steady_clock;
 /// An encoded `ResponseFrame`, shared by the retry cache and the send.
 using Answer = std::shared_ptr<const std::vector<std::uint8_t>>;
 
-/// One admitted request: what the search needs, and where to answer.
+/// One admitted request or probe: what the search needs, and where to answer.
 struct Job {
   std::uint64_t RequestId = 0;
+  /// Null for a probe, which runs no search.
   std::shared_ptr<const search::Profile> Mob;
   search::Request Call;
   asio::ip::udp::endpoint ReplyTo;

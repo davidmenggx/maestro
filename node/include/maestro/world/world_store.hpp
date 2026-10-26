@@ -25,6 +25,9 @@ enum class ApplyStatus {
   OutOfSequence,
   /// Asked to resume a stream this node does not hold.
   CannotResume,
+  /// Asked to keep an area of a stream this node does not hold, or a larger
+  /// one.
+  CannotKeep,
   /// A fresh assignment of the stream held, behind the last frame applied.
   Behind,
 };

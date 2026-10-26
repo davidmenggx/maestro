@@ -43,12 +43,14 @@ class FailOpenCheckTest {
     unanswered(START + 2);
     unanswered(START + 3);
     long at = FailOpenCheck.noticed(missed(START + 2, START + 3)) + 1;
-    send(at);
+    probe(at);
     long backoff = NodeHealth.FIRST_BACKOFF_TICKS;
     for (int probe = 0; probe < 5; probe++) {
       backoff = Math.min(2 * backoff, NodeHealth.MAX_BACKOFF_TICKS);
       at += NodeHealth.PROBE_TICKS + 1 + backoff;
-      send(at);
+      probe(at);
+      // A copy of a probe is no new one.
+      check.probeSent(NODE, RUN, nextRequest - 1, at + 2);
     }
     check.unresponsive(NODE, RUN, at + 1, false);
     assertEquals(List.of(), check.violations(at + 1));
@@ -62,10 +64,38 @@ class FailOpenCheckTest {
     unanswered(START + 3);
     long at = FailOpenCheck.noticed(missed(START + 2, START + 3)) + 1;
     for (int probe = 0; probe < 8; probe++) {
-      send(at);
+      probe(at);
       at += NodeHealth.PROBE_TICKS + 1 + NodeHealth.FIRST_BACKOFF_TICKS;
     }
     assertEquals(1, check.violations(at).size());
+  }
+
+  @Test
+  void noRequestIsAllowedOnceTheControllerNoticed() {
+    check.unresponsive(NODE, RUN, START, true);
+    unanswered(START + 2);
+    unanswered(START + 3);
+    long noticed = FailOpenCheck.noticed(missed(START + 2, START + 3));
+    send(noticed);
+    assertEquals(List.of(), check.violations(noticed + 1));
+    send(noticed + 1);
+    assertEquals(1, check.violations(noticed + 2).size());
+  }
+
+  @Test
+  void eachNewLinkMayBeProbedAtOnce() {
+    check.unresponsive(NODE, RUN, START, true);
+    unanswered(START + 2);
+    unanswered(START + 3);
+    long noticed = FailOpenCheck.noticed(missed(START + 2, START + 3));
+    probe(noticed + 1);
+    for (long lost = noticed + 5; lost < noticed + 50; lost += 5) {
+      check.linkLost(NODE, RUN, lost);
+      probe(lost + 1);
+    }
+    assertEquals(List.of(), check.violations(noticed + 60));
+    probe(noticed + 52);
+    assertEquals(1, check.violations(noticed + 60).size());
   }
 
   @Test
@@ -104,12 +134,12 @@ class FailOpenCheckTest {
     unanswered(reconnected);
     unanswered(reconnected + 1);
     long noticed = FailOpenCheck.noticed(missed(reconnected, reconnected + 1));
-    // Requests until it notices on the new link are allowed, and one after it is a probe.
-    for (long tick = reconnected + 2; tick <= noticed + 1; tick++) {
+    // Requests until it notices on the new link are allowed, and none after it.
+    for (long tick = reconnected + 2; tick <= noticed; tick++) {
       send(tick);
     }
     assertEquals(List.of(), check.violations(noticed + 2));
-    send(noticed + 2);
+    send(noticed + 1);
     assertEquals(1, check.violations(noticed + 3).size());
   }
 
@@ -173,6 +203,11 @@ class FailOpenCheckTest {
     long id = nextRequest++;
     check.requestSent(NODE, RUN, id, tick);
     return id;
+  }
+
+  /** Sends a new probe at {@code tick}. */
+  private void probe(long tick) {
+    check.probeSent(NODE, RUN, nextRequest++, tick);
   }
 
   /** Sends a copy of request {@code id} again at {@code tick}. */

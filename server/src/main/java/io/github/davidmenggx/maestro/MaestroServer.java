@@ -28,10 +28,8 @@ public final class MaestroServer implements DedicatedServerModInitializer {
         loader.getModContainer(MOD_ID).orElseThrow().getMetadata().getVersion().getFriendlyString();
     MaestroConfig config =
         MaestroConfig.load(loader.getConfigDir().resolve(MaestroConfig.FILE_NAME));
-    if (config.mode() != MaestroConfig.Mode.STATEFUL
-        || config.subMode() != MaestroConfig.SubMode.BATCH) {
-      throw new IllegalStateException(
-          "Maestro supports only mode \"stateful\" with subMode \"batch\" so far");
+    if (config.mode() != MaestroConfig.Mode.STATEFUL) {
+      throw new IllegalStateException("Maestro supports only mode \"stateful\" so far");
     }
     Telemetry.init(config, version);
 

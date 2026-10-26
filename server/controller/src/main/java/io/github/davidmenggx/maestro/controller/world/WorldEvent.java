@@ -123,10 +123,12 @@ public sealed interface WorldEvent {
 
   /**
    * One A* request. {@code start} is the start node the evaluator resolved, not the mob's position.
-   * {@code classId} names the mob's current profile. A repeat request for the same mob replaces the
+   * {@code classId} names the mob's current profile. {@code hunting} is whether the mob has a
+   * target, which keeps it among the last shed. A repeat request for the same mob replaces the
    * outstanding one, even if the repeat is refused.
    */
-  record PathRequested(long tick, int mobId, short classId, Pos start, Pos target, Search search)
+  record PathRequested(
+      long tick, int mobId, short classId, Pos start, Pos target, Search search, boolean hunting)
       implements WorldEvent {
     public PathRequested {
       requireTick(tick);
@@ -149,7 +151,9 @@ public sealed interface WorldEvent {
     }
   }
 
-  /** Used for shedding and failover priorities, which both order mobs by distance to a player. */
+  /**
+   * Where a player stands, reported about once a second. Shedding orders mobs by distance to one.
+   */
   record PlayerMoved(long tick, int playerId, Pos pos) implements WorldEvent {
     public PlayerMoved {
       requireTick(tick);

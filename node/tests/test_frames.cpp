@@ -81,6 +81,14 @@ Bytes cancelFrame(const std::vector<std::uint64_t> &Ids, std::uint64_t Run,
   return finish(Builder);
 }
 
+Bytes probeFrame(std::uint64_t Id, std::uint64_t Run) {
+  flatbuffers::FlatBufferBuilder Builder;
+  const auto Body = fbs::CreatePathProbe(Builder, Id);
+  Builder.Finish(fbs::CreateRequestFrame(Builder, fbs::RequestMsg::PathProbe,
+                                         Body.Union(), Run, 0));
+  return finish(Builder);
+}
+
 std::size_t serveWaiting(serve::NodeCore &Core, serve::Scratch &With,
                          std::size_t Count) {
   std::size_t Ran = 0;

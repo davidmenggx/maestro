@@ -3,6 +3,7 @@ package io.github.davidmenggx.maestro.controller.sim;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.core.Dispatch;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
@@ -141,8 +142,18 @@ class FuzzTest {
   @Tag(COVERAGE)
   void theSweepReachesEveryOutcomeItClaimsTo() {
     Set<DropReason> drops = EnumSet.noneOf(DropReason.class);
-    Set<Integer> replicated = new LinkedHashSet<>();
+    Set<Integer> spares = new LinkedHashSet<>();
     Set<Integer> gridWidths = new LinkedHashSet<>();
+    long multiCellStarts = 0;
+    long splits = 0;
+    long replicasAdded = 0;
+    long replicasReturned = 0;
+    long reassigned = 0;
+    long reclaimed = 0;
+    long keptHalves = 0;
+    long streamedRuns = 0;
+    long streamedAnswered = 0;
+    long shedNearAPlayer = 0;
     long resumes = 0;
     long resnapshots = 0;
     long duplicates = 0;
@@ -170,6 +181,13 @@ class FuzzTest {
     long suspicions = 0;
     long quietPaths = 0;
     long probesAnswered = 0;
+    long checksFailed = 0;
+    long chunksSkipped = 0;
+    long sharedRequests = 0;
+    long multiCellReplicas = 0;
+    long heldWithoutShedding = 0;
+    long heldOverloaded = 0;
+    long measuredSlower = 0;
     long refusedUnavailable = 0;
     long failOpenJudged = 0;
     long checkpoints = 0;
@@ -183,7 +201,7 @@ class FuzzTest {
 
       drops.addAll(run.out.drops().keySet());
       boolean held = run.heldToTheSlo() && run.out.answered() > 0;
-      boolean judgedHealthy = run.fitsCapacity() && run.out.answered() > 0;
+      boolean judgedHealthy = run.judgedHealthy() && run.out.answered() > 0;
       heldToTheSlo += held ? 1 : 0;
       heldAtTheEdge +=
           held
@@ -201,8 +219,24 @@ class FuzzTest {
           judgedHealthy && run.scenario.chances().get(Chance.SLOW_TICK) > 0 ? 1 : 0;
       abandonedAnswers += run.sim.metrics().total("path.response.abandoned");
       answersBehindTheirChunk += run.sim.metrics().total("path.response.behind");
-      replicated.add(run.topology.replicated());
-      gridWidths.add(run.topology.regionsPerSide());
+      spares.add(run.topology.spares());
+      gridWidths.add(run.topology.cells());
+      multiCellStarts +=
+          run.topology.regionCount() < run.topology.cells() * run.topology.cells() ? 1 : 0;
+      splits += run.sim.metrics().total("region.split");
+      replicasAdded += run.sim.metrics().total("region.replica.added");
+      replicasReturned += run.sim.metrics().total("region.replica.returned");
+      reassigned += run.sim.metrics().total("region.reassigned");
+      reclaimed += run.sim.metrics().total("region.replica.reclaimed");
+      keptHalves += run.sim.metrics().total("world.kept");
+      if (run.scenario.dispatch() == Dispatch.STREAM) {
+        streamedRuns++;
+        streamedAnswered += run.out.answered();
+      }
+      shedNearAPlayer +=
+          run.out.dropped(DropReason.SHED) > 0 && run.scenario.counts().get(Count.PLAYERS) > 0
+              ? 1
+              : 0;
       deepWorlds += run.topology.minY() < 0 ? 1 : 0;
       slowFleets += run.scenario.counts().get(Count.SLOW_NODES) > 0 ? 1 : 0;
       emptyServers += run.scenario.counts().get(Count.PLAYERS) == 0 ? 1 : 0;
@@ -226,6 +260,21 @@ class FuzzTest {
       suspicions += run.sim.metrics().total("node.suspected");
       quietPaths += run.sim.metrics().total("node.quiet");
       probesAnswered += run.sim.metrics().total("node.circuit", "state", "closed");
+      checksFailed += run.sim.metrics().total("node.check.failed");
+      chunksSkipped += run.sim.metrics().total("world.chunks.skipped");
+      sharedRequests += run.sim.metrics().total("path.shared");
+      multiCellReplicas +=
+          run.sim.metrics().total("region.replica.added")
+              - run.sim.metrics().total("region.replica.added", "cells", "1");
+      heldWithoutShedding += run.heldWithoutShedding() && run.out.answered() > 0 ? 1 : 0;
+      heldOverloaded += held && !run.fitsCapacity() && run.out.dropped(DropReason.SHED) > 0 ? 1 : 0;
+      for (ModeledNode node : run.sim.nodes()) {
+        double rate = run.sim.metrics().gauge("node.capacity", "node", node.id().toString());
+        if (rate > 0 && rate < run.scenario.assumedCapacity()) {
+          measuredSlower++;
+          break;
+        }
+      }
       refusedUnavailable += run.sim.metrics().counter("path.rejected", "reason", "unavailable");
       failOpenJudged += run.sim.failOpenJudged();
       checkpoints += run.sim.checkpointsCompared();
@@ -237,8 +286,16 @@ class FuzzTest {
     }
 
     assertEquals(EnumSet.allOf(DropReason.class), drops, "a drop reason the sweep never reaches");
-    assertTrue(replicated.size() > 1, "no run varied how many regions have two holders");
-    assertTrue(gridWidths.size() > 1, "the region grid never changed shape");
+    assertTrue(spares.size() > 1, "no run varied how many nodes start as spares");
+    assertTrue(gridWidths.size() > 1, "the covered square never changed size");
+    assertTrue(multiCellStarts > 0, "no run started with a region of several cells");
+    assertTrue(splits > 0, "no hot region was ever cut");
+    assertTrue(replicasAdded > 0, "no hot region ever took a replica");
+    assertTrue(replicasReturned > 0, "no cold replica ever returned to the spares");
+    assertTrue(reassigned > 0, "no down holder's region ever went to a spare");
+    assertTrue(keptHalves > 0, "no holder of a cut region ever kept its lower side");
+    assertTrue(streamedRuns > 0 && streamedAnswered > 0, "no streamed request was ever answered");
+    assertTrue(shedNearAPlayer > 0, "no run shed requests with a player online");
     assertTrue(deepWorlds > 0, "no run put the world floor below zero");
     assertTrue(slowFleets > 0, "no run gave the fleet a node slower than the rest");
     assertTrue(emptyServers > 0, "no run ran without a player online");
@@ -267,6 +324,14 @@ class FuzzTest {
     assertTrue(suspicions > 0, "no node's heartbeats were ever overdue enough to suspect it");
     assertTrue(quietPaths > 0, "no node's request path ever went quiet");
     assertTrue(probesAnswered > 0, "no probe ever brought a node back into service");
+    assertTrue(checksFailed > 0, "no unanswered check ever quieted a node's request path");
+    assertTrue(chunksSkipped > 0, "no holder was ever spared a chunk another holder lacked");
+    assertTrue(sharedRequests > 0, "no replica ever took a request its region's other would shed");
+    assertTrue(heldWithoutShedding > 0, "no run was held to the SLO with sheds counted late");
+    assertTrue(
+        heldOverloaded > 0, "no run that shed past the fleet's capacity was held to the SLO");
+    assertTrue(
+        measuredSlower > 0, "no node's searches ever measured it below the assumed capacity");
     assertTrue(refusedUnavailable > 0, "no request was ever refused for a node out of service");
     assertTrue(failOpenJudged > 0, "no node that could not answer was sent enough to judge");
     assertTrue(checkpoints > 0, "no node ever reached a mid-run checkpoint");
@@ -280,6 +345,18 @@ class FuzzTest {
             + heldAtTheEdge
             + " at the edge, "
             + checkpoints
-            + " checkpoints compared");
+            + " checkpoints compared, "
+            + keptHalves
+            + " halves kept, "
+            + reclaimed
+            + " replicas reclaimed, "
+            + multiCellReplicas
+            + " replicas of several cells, "
+            + heldWithoutShedding
+            + " held with sheds counted late, "
+            + heldOverloaded
+            + " held while overloaded, "
+            + measuredSlower
+            + " with a node measured slower than assumed");
   }
 }

@@ -278,9 +278,15 @@ TEST(Schema, HeartbeatCarriesQueueDepth) {
 
 TEST(Schema, WorldFrameCarriesRegionAssignment) {
   flatbuffers::FlatBufferBuilder Fbb;
-  const auto Assignment = fbs::CreateRegionAssignment(
-      Fbb, /*run=*/11, /*region_id=*/4, /*size=*/256, /*min_y=*/-64,
-      /*height=*/384, /*resume=*/true);
+  fbs::RegionAssignmentBuilder Body(Fbb);
+  Body.add_run(11);
+  Body.add_region_id(4);
+  Body.add_size_x(384);
+  Body.add_size_z(640);
+  Body.add_min_y(-64);
+  Body.add_height(384);
+  Body.add_resume(true);
+  const auto Assignment = Body.Finish();
   Fbb.Finish(fbs::CreateWorldFrame(Fbb, fbs::WorldMsg::RegionAssignment,
                                    Assignment.Union()));
 
@@ -289,7 +295,8 @@ TEST(Schema, WorldFrameCarriesRegionAssignment) {
   ASSERT_NE(Decoded, nullptr);
   EXPECT_EQ(Decoded->run(), 11u);
   EXPECT_EQ(Decoded->region_id(), 4u);
-  EXPECT_EQ(Decoded->size(), 256u);
+  EXPECT_EQ(Decoded->size_x(), 384u);
+  EXPECT_EQ(Decoded->size_z(), 640u);
   EXPECT_EQ(Decoded->min_y(), -64);
   EXPECT_EQ(Decoded->height(), 384u);
   EXPECT_TRUE(Decoded->resume());

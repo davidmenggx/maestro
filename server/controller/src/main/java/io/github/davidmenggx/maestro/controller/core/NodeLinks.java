@@ -13,7 +13,8 @@ import java.util.Set;
 
 /**
  * Each node's link: dialing it, the {@code Join} and {@code Hello} handshake, and the profiles sent
- * on it. Every frame to a node leaves through {@link #send}.
+ * on it. Every frame to a node leaves through {@link #send}, except a streamed request, which its
+ * encode worker sends.
  */
 public final class NodeLinks {
 
@@ -122,8 +123,13 @@ public final class NodeLinks {
   }
 
   void send(NodeId node, Channel channel, byte[] frame) {
-    env.metrics().record("frame.bytes", frame.length, "channel", channel.name());
+    sentElsewhere(channel, frame);
     env.transport().send(node, channel, ByteBuffer.wrap(frame));
+  }
+
+  /** Counts a frame another thread sent straight through the transport. */
+  void sentElsewhere(Channel channel, byte[] frame) {
+    env.metrics().record("frame.bytes", frame.length, "channel", channel.name());
   }
 
   /** Links that contradict themselves, and a fleet that runs more than one search. */

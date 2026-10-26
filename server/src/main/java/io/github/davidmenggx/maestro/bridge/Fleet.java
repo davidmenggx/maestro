@@ -2,24 +2,29 @@ package io.github.davidmenggx.maestro.bridge;
 
 import io.github.davidmenggx.maestro.config.MaestroConfig;
 import io.github.davidmenggx.maestro.controller.core.Controller;
+import io.github.davidmenggx.maestro.controller.core.Dispatch;
+import io.github.davidmenggx.maestro.controller.core.Placement;
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionLayout;
-import io.github.davidmenggx.maestro.controller.region.RegionMap;
+import io.github.davidmenggx.maestro.controller.region.Regions;
 import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.ProfileTable;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.obs.OtelMetrics;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -30,7 +35,8 @@ import org.slf4j.LoggerFactory;
  * This server's link to its compute fleet: the controller and everything it runs on, fed by the
  * game's events. At most one is active, for the overworld. Used on the server thread only.
  *
- * <p>The fleet is static: each configured node holds one region, laid out by {@link RegionLayout}.
+ * <p>The fleet is static: the configured nodes, which the controller places on the square of {@link
+ * RegionLayout} cells the config names, keeping some as spares.
  */
 public final class Fleet implements AutoCloseable {
 
@@ -43,12 +49,16 @@ public final class Fleet implements AutoCloseable {
   /** Distinct self-check findings logged at most, so a recurring one cannot flood the log. */
   private static final int MAX_LOGGED_FINDINGS = 256;
 
+  /** Ticks between reports of where the players stand. */
+  private static final int PLAYER_TICKS = 20;
+
   private static final Logger LOG = LoggerFactory.getLogger("maestro");
 
   private static Fleet active;
 
   private final ServerLevel level;
-  private final RegionMap regions;
+  private final RegionLayout layout;
+  private final List<MaestroConfig.NodeAddress> addresses;
   private final ServerClock clock;
   private final Thread serverThread;
   private final NettyTransport transport;
@@ -60,23 +70,32 @@ public final class Fleet implements AutoCloseable {
   /** Each node's state as last logged. */
   private final Map<NodeId, String> states = new LinkedHashMap<>();
 
+  /** The players last reported to the controller, by entity id. */
+  private Set<Integer> players = new LinkedHashSet<>();
+
+  /** {@link Controller#regionsVersion} when the regions were last logged. */
+  private int loggedRegions = -1;
+
   private Fleet(
       ServerLevel level,
-      RegionMap regions,
+      RegionLayout layout,
+      List<MaestroConfig.NodeAddress> addresses,
+      List<NodeId> fleet,
       ServerClock clock,
       NettyTransport transport,
       PoolOffload offload,
       PathOffload paths,
       Controller controller) {
     this.level = level;
-    this.regions = regions;
+    this.layout = layout;
+    this.addresses = List.copyOf(addresses);
     this.clock = clock;
     this.serverThread = Thread.currentThread();
     this.transport = transport;
     this.offload = offload;
     this.paths = paths;
     this.controller = controller;
-    for (NodeId node : regions.nodes()) {
+    for (NodeId node : fleet) {
       states.put(node, state(node));
     }
   }
@@ -98,7 +117,8 @@ public final class Fleet implements AutoCloseable {
     for (int i = 0; i < config.nodes().size(); i++) {
       nodes.put(NodeId.of(i), config.nodes().get(i));
     }
-    RegionMap regions = RegionLayout.spiral(nodes.keySet().stream().toList());
+    List<NodeId> fleet = List.copyOf(nodes.keySet());
+    RegionLayout layout = new RegionLayout(config.areaCells());
 
     SecureRandom entropy = new SecureRandom();
     long run = 0;
@@ -114,38 +134,90 @@ public final class Fleet implements AutoCloseable {
             clock, SeededRng.of(entropy.nextLong()), offload, transport, metrics, run);
     ProfileTable profiles = new ProfileTable();
     PathOffload paths =
-        new PathOffload(overworld, regions, clock, metrics, profiles, config.offload());
+        new PathOffload(overworld, layout, clock, metrics, profiles, config.offload());
     Controller controller =
         new Controller(
-            env, new LevelWorldSource(overworld, profiles), paths, regions, config.nodeCapacity());
+            env,
+            new LevelWorldSource(overworld, profiles),
+            paths,
+            fleet,
+            new Controller.Settings(
+                layout,
+                config.spares(),
+                config.nodeCapacity(),
+                config.subMode() == MaestroConfig.SubMode.STREAM ? Dispatch.STREAM : Dispatch.BATCH,
+                Placement.Policy.DEFAULT));
     paths.bind(controller);
     HeldPaths.clock(clock);
     Searches.intercept(paths);
 
-    active = new Fleet(overworld, regions, clock, transport, offload, paths, controller);
-    for (Region region : regions.regions()) {
-      LOG.info(
-          "Maestro: region {} at x {}..{}, z {}..{} is held by {} at {}",
-          region.id(),
-          region.minX(),
-          region.minX() + region.size() - 1,
-          region.minZ(),
-          region.minZ() + region.size() - 1,
-          regions.holders(region.id()),
-          config.nodes().get(regions.holders(region.id()).get(0).id()).host());
-    }
+    active =
+        new Fleet(
+            overworld, layout, config.nodes(), fleet, clock, transport, offload, paths, controller);
+    active.logRegions();
     LOG.info(
-        "Maestro: offloading to {} nodes, offload={}, run {}",
+        "Maestro: offloading to {} nodes, offload={}, subMode={}, run {}",
         nodes.size(),
         config.offload(),
+        config.subMode(),
         Long.toHexString(run));
     return active;
   }
 
-  /** A server tick starts: what arrived meanwhile is handed over, then the tick opens. */
+  /**
+   * A server tick starts: what arrived meanwhile is handed over, then the tick opens. Where the
+   * players stand is reported every {@link #PLAYER_TICKS}.
+   */
   public void tickStarted() {
     handOver();
     controller.accept(new WorldEvent.TickBegan(clock.tick()));
+    if (controller.regionsVersion() != loggedRegions) {
+      logRegions();
+    }
+    if (clock.tick() % PLAYER_TICKS == 0) {
+      reportPlayers();
+    }
+  }
+
+  /** Each player's position, and each player gone since the last report. */
+  private void reportPlayers() {
+    Set<Integer> seen = new LinkedHashSet<>();
+    for (ServerPlayer player : level.players()) {
+      if (!player.isSpectator()) {
+        seen.add(player.getId());
+        controller.accept(
+            new WorldEvent.PlayerMoved(clock.tick(), player.getId(), pos(player.blockPosition())));
+      }
+    }
+    for (int gone : players) {
+      if (!seen.contains(gone)) {
+        controller.accept(new WorldEvent.PlayerLeft(clock.tick(), gone));
+      }
+    }
+    players = seen;
+  }
+
+  /** Logs every region with its holders, and the spares with what became of the requests so far. */
+  private void logRegions() {
+    loggedRegions = controller.regionsVersion();
+    Regions regions = controller.regions();
+    List<NodeId> spares = new ArrayList<>(states.keySet());
+    for (Region region : regions.regions()) {
+      List<String> holders = new ArrayList<>();
+      for (NodeId node : regions.holders(region.id())) {
+        holders.add(node + " at " + addresses.get(node.id()).host());
+        spares.remove(node);
+      }
+      LOG.info(
+          "Maestro: region {} at x {}..{}, z {}..{} is held by {}",
+          region.id(),
+          region.minX(),
+          region.minX() + region.sizeX() - 1,
+          region.minZ(),
+          region.minZ() + region.sizeZ() - 1,
+          holders);
+    }
+    LOG.info("Maestro: spare nodes {}; so far {}", spares, paths.summary());
   }
 
   /**
@@ -223,13 +295,13 @@ public final class Fleet implements AutoCloseable {
   }
 
   /**
-   * Whether a block change in the chunk, made now, is reported: the chunk is in a region, which
-   * holds whole chunks, and the change is made on the server thread.
+   * Whether a block change in the chunk, made now, is reported: the chunk is in a region's area,
+   * which holds whole chunks, and the change is made on the server thread.
    */
   public boolean watches(LevelChunk chunk) {
     return chunk.getLevel() == level
         && Thread.currentThread() == serverThread
-        && regions.regionAt(chunk.getPos().getMinBlockX(), chunk.getPos().getMinBlockZ()) != null;
+        && layout.reaches(chunk.getPos().getMinBlockX(), chunk.getPos().getMinBlockZ());
   }
 
   /** The block's cell as the node holds it. */

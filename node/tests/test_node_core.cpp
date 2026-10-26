@@ -73,7 +73,14 @@ const fbs::ResponseFrame *responseIn(const Event &Sent) {
 /// A node with no workers, driven by hand at times the test sets.
 class NodeCoreTest : public testing::Test {
 protected:
-  NodeCoreTest() : Core(serve::NodeOptions{}, [this] { return Time; }, Out) {}
+  NodeCoreTest()
+      : Core(
+            serve::NodeOptions{},
+            [this] {
+              Time += Step;
+              return Time;
+            },
+            Out) {}
 
   /// Opens `Id` on `On` with `First` as its first frame, and returns what the
   /// node did.
@@ -140,6 +147,8 @@ protected:
   static constexpr ConnectionId ControlId = 2;
 
   serve::Clock::time_point Time{};
+  /// How far `Time` moves each time the node reads it.
+  serve::Clock::duration Step{};
   Recorder Out;
   serve::NodeCore Core;
   serve::Scratch With{fbs::Pathfinder::VANILLA};
@@ -341,6 +350,48 @@ TEST_F(NodeCoreTest, HeartbeatsNeedALiveLinkWithItsControlConnection) {
   EXPECT_TRUE(heartbeat().empty());
 }
 
+TEST_F(NodeCoreTest, AHeartbeatReportsTheSearchesFinishedSinceTheLastOne) {
+  startLink();
+  ASSERT_EQ(heartbeat().size(), 1u);
+  // Each read of the clock moves it, so a search takes one millisecond from
+  // being taken to being settled.
+  Step = milliseconds(1);
+  ASSERT_TRUE(datagram(requestFrame({1, 2})).empty());
+  // Neither a probe nor a request for another region runs a search.
+  ASSERT_TRUE(datagram(probeFrame(3)).empty());
+  ASSERT_TRUE(
+      datagram(requestFrame({4}, TestClass, TestRun, TestRegion + 1)).empty());
+  ASSERT_EQ(serve().size(), 4u);
+
+  const auto Beat = heartbeat();
+  ASSERT_EQ(Beat.size(), 1u);
+  const auto *Body = heartbeatIn(Beat[0]);
+  ASSERT_NE(Body, nullptr);
+  EXPECT_EQ(Body->searches(), 2u);
+  EXPECT_EQ(Body->search_micros(), 2000u);
+  EXPECT_EQ(Body->workers(), serve::NodeOptions{}.Workers);
+
+  const auto Next = heartbeat();
+  ASSERT_EQ(Next.size(), 1u);
+  EXPECT_EQ(heartbeatIn(Next[0])->searches(), 0u);
+  EXPECT_EQ(heartbeatIn(Next[0])->search_micros(), 0u);
+}
+
+TEST_F(NodeCoreTest, ABeatWithNoLinkStillEndsItsInterval) {
+  startLink();
+  ASSERT_TRUE(datagram(requestFrame({1})).empty());
+  ASSERT_EQ(serve().size(), 1u);
+  Core.disconnected(ControlId);
+  Out.take();
+  EXPECT_TRUE(heartbeat().empty());
+
+  ASSERT_TRUE(join(Port::World, 3, /*Link=*/2).empty());
+  ASSERT_EQ(join(Port::Control, 4, /*Link=*/2).size(), 1u);
+  const auto Beat = heartbeat();
+  ASSERT_EQ(Beat.size(), 1u);
+  EXPECT_EQ(heartbeatIn(Beat[0])->searches(), 0u);
+}
+
 TEST_F(NodeCoreTest, ADatagramNeedsALiveLinkOfItsRun) {
   // No link, so not even an unknown profile is reported.
   EXPECT_TRUE(datagram(requestFrame({1})).empty());
@@ -391,6 +442,43 @@ TEST_F(NodeCoreTest, ARequestForAnotherAreaIsAnsweredAsIfNoneWereHeld) {
   ASSERT_NE(Answer, nullptr);
   EXPECT_EQ(Answer->world_sequence(), 0u);
   EXPECT_EQ(Answer->nodes()->size(), 0u);
+}
+
+TEST_F(NodeCoreTest, AProbeWaitsItsTurnAndIsAnsweredWithNoPath) {
+  startLink();
+  ASSERT_TRUE(datagram(requestFrame({1})).empty());
+  ASSERT_TRUE(datagram(probeFrame(2)).empty());
+  EXPECT_EQ(Core.queue().depth(), 2u);
+  const auto Done = serve();
+  ASSERT_EQ(Done.size(), 2u);
+  EXPECT_EQ(responseIn(Done[0])->body_as_PathResponse()->request_id(), 1u);
+  const auto *Probed = responseIn(Done[1]);
+  ASSERT_NE(Probed, nullptr);
+  EXPECT_EQ(Probed->run(), TestRun);
+  const auto *Answer = Probed->body_as_PathResponse();
+  ASSERT_NE(Answer, nullptr);
+  EXPECT_EQ(Answer->request_id(), 2u);
+  EXPECT_EQ(Answer->world_sequence(), 0u);
+  EXPECT_EQ(Answer->nodes()->size(), 0u);
+  EXPECT_FALSE(Answer->reached());
+
+  // A copy gets the same bytes.
+  const auto Copy = datagram(probeFrame(2));
+  ASSERT_EQ(Copy.size(), 1u);
+  EXPECT_EQ(Copy[0].Frame, Done[1].Frame);
+  // Only the request was searched.
+  EXPECT_EQ(Core.searches(), 1u);
+}
+
+TEST_F(NodeCoreTest, AProbeNeedsNoProfileOrAreaButALiveLinkOfItsRun) {
+  EXPECT_TRUE(datagram(probeFrame(1)).empty());
+  ASSERT_EQ(join(Port::Control, ControlId).size(), 1u);
+  EXPECT_TRUE(datagram(probeFrame(2, TestRun + 1)).empty());
+  EXPECT_EQ(Core.queue().depth(), 0u);
+  const fbs::PathResponse *Answer = answer(probeFrame(3));
+  ASSERT_NE(Answer, nullptr);
+  EXPECT_EQ(Answer->request_id(), 3u);
+  EXPECT_EQ(Answer->world_sequence(), 0u);
 }
 
 TEST_F(NodeCoreTest, AJoinAfterTheFirstFrameIsIgnored) {

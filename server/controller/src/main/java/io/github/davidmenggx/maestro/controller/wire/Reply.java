@@ -17,8 +17,11 @@ public sealed interface Reply {
   /** A {@code Hello}. */
   record Greeting(long run, long regionId, long lastSequence, int pathfinder) implements Reply {}
 
-  /** A {@code Heartbeat}. */
-  record Depth(long queueDepth) implements Reply {}
+  /**
+   * A {@code Heartbeat}: the requests waiting or running, and the searches {@code workers} threads
+   * finished since the last one, which took {@code searchMicros} of worker time.
+   */
+  record Beat(long queueDepth, long searches, long searchMicros, int workers) implements Reply {}
 
   /** A response meant for another controller run. */
   record Foreign() implements Reply {}

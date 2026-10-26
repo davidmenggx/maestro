@@ -109,8 +109,9 @@ public:
     return readReply<fbs::Hello>(fbs::ControlReplyMsg::Hello);
   }
 
-  /// Reads heartbeats until one reports `Depth`.
-  bool awaitDepth(std::uint32_t Depth, milliseconds Timeout = Patience) {
+  /// Reads heartbeats until one satisfies `Wanted`.
+  template <typename Predicate>
+  bool awaitBeat(Predicate Wanted, milliseconds Timeout = Patience) {
     const auto Deadline = std::chrono::steady_clock::now() + Timeout;
     while (std::chrono::steady_clock::now() < Deadline) {
       std::optional<Bytes> Frame = readReply<fbs::Heartbeat>(
@@ -119,12 +120,19 @@ public:
               Deadline - std::chrono::steady_clock::now()));
       if (!Frame)
         return false;
-      if (root<fbs::ControlReplyFrame>(*Frame)
-              ->body_as_Heartbeat()
-              ->queue_depth() == Depth)
+      if (Wanted(*root<fbs::ControlReplyFrame>(*Frame)->body_as_Heartbeat()))
         return true;
     }
     return false;
+  }
+
+  /// Reads heartbeats until one reports `Depth`.
+  bool awaitDepth(std::uint32_t Depth, milliseconds Timeout = Patience) {
+    return awaitBeat(
+        [Depth](const fbs::Heartbeat &Beat) {
+          return Beat.queue_depth() == Depth;
+        },
+        Timeout);
   }
 
   /// Whether the node closes the connection within `Timeout`, reading past
@@ -201,7 +209,7 @@ net::ServerOptions testOptions(unsigned Workers = 2) {
   Opts.WorldPort = 0;
   Opts.ControlPort = 0;
   Opts.RequestPort = 0;
-  Opts.Workers = Workers;
+  Opts.Node.Workers = Workers;
   Opts.HeartbeatInterval = milliseconds(20);
   return Opts;
 }
@@ -540,6 +548,29 @@ TEST_F(ServerTest, TheHeartbeatCountsWaitingRequestsAndACancelDropsOne) {
   Requests.send(cancelFrame({3}));
   ASSERT_TRUE(Control.awaitDepth(1));
   EXPECT_FALSE(Requests.receive(Quiet));
+}
+
+TEST_F(ServerTest, TheHeartbeatReportsItsWorkersAndTheSearchesTheyRan) {
+  start(testOptions(/*Workers=*/2));
+  Connection Control = control();
+  Connection World = world();
+  ASSERT_TRUE(Control.readHello());
+  Control.send(mobClassFrame());
+  loadFlat(World);
+  Datagrams Requests = requests();
+  // A request that beats the profile or the world is answered with no search,
+  // so new ones are asked until a beat shows a search.
+  std::uint16_t Workers = 0;
+  std::uint64_t Id = 1;
+  const bool Searched = Control.awaitBeat([&](const fbs::Heartbeat &Beat) {
+    Workers = Beat.workers();
+    if (Beat.searches() > 0)
+      return true;
+    Requests.send(requestFrame({Id++}));
+    return false;
+  });
+  EXPECT_TRUE(Searched);
+  EXPECT_EQ(Workers, 2u);
 }
 
 TEST_F(ServerTest, ALaterLinkReplacesTheLink) {

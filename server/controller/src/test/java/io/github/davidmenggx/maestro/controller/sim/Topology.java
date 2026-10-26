@@ -1,33 +1,31 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
-import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Rng;
 import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionLayout;
-import io.github.davidmenggx.maestro.controller.region.RegionMap;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import java.util.List;
 
 /**
- * The coordinate space of a run and how it is divided among nodes: a square grid of {@link
- * #REGION_SIZE}-block regions cut from the production lattice ({@link RegionLayout}), centered on
- * the origin. Each region has one node, and the first {@code replicated} have a second.
+ * The coordinate space of a run and its fleet: the production layout's square of {@code cells} by
+ * {@code cells} cells around the origin, and a world reaching one halo past it, so the outer
+ * regions' areas hold real chunks too. The controller cuts the square into a region for each of the
+ * first {@code nodes - spares} nodes ({@link RegionLayout#initial}); the rest start as spares.
  *
  * <p>The {@code with} methods change one dimension of {@link #DEFAULT} in a focused test.
  */
-public record Topology(int regionsPerSide, int replicated, int minY, int height, int relief) {
-
-  public static final int REGION_SIZE = RegionLayout.SIZE;
+public record Topology(int cells, int nodes, int spares, int minY, int height, int relief) {
 
   static final int MIN_HEIGHT = 32;
   static final int MAX_HEIGHT = 96;
-  static final int MAX_REGIONS_PER_SIDE = 3;
-  static final int MAX_REPLICATED = 2;
+  static final int MAX_CELLS = 3;
+  static final int MAX_SPARES = 2;
 
   /** Capped by the shortest column the sampler can draw, so every draw passes the check. */
   static final int MAX_RELIEF = MIN_HEIGHT / 4;
 
-  public static final Topology DEFAULT = new Topology(2, 1, 0, 64, 2);
+  /** Four single-cell regions and a spare. */
+  public static final Topology DEFAULT = new Topology(2, 5, 1, 0, 64, 2);
 
   /** Floors a sampled world may use. The overworld's is negative. */
   static List<Integer> floors() {
@@ -36,15 +34,15 @@ public record Topology(int regionsPerSide, int replicated, int minY, int height,
 
   /** Number of nodes in the largest fleet {@link #sample} can draw. */
   static int maxNodeCount() {
-    return MAX_REGIONS_PER_SIDE * MAX_REGIONS_PER_SIDE + MAX_REPLICATED;
+    return MAX_CELLS * MAX_CELLS + MAX_SPARES;
   }
 
   public Topology {
-    if (regionsPerSide < 1) {
-      throw new IllegalArgumentException("a grid holds at least one region: " + regionsPerSide);
+    if (cells < 1 || cells > RegionLayout.MAX_CELLS) {
+      throw new IllegalArgumentException("a square of 1 to " + RegionLayout.MAX_CELLS + " cells");
     }
-    if (replicated < 0 || replicated > regionsPerSide * regionsPerSide) {
-      throw new IllegalArgumentException("cannot replicate " + replicated + " regions");
+    if (nodes < 1 || spares < 0) {
+      throw new IllegalArgumentException("a fleet of " + nodes + " with " + spares + " spares");
     }
     if (height < MIN_HEIGHT) {
       throw new IllegalArgumentException("a column is at least " + MIN_HEIGHT + " blocks");
@@ -54,73 +52,67 @@ public record Topology(int regionsPerSide, int replicated, int minY, int height,
     }
   }
 
-  /**
-   * The regions, in grid order, each held by the next node of {@code fleet}, then the replicated
-   * ones held again by the nodes after those. {@code fleet} has {@link #nodeCount} nodes.
-   */
-  public RegionMap regions(List<NodeId> fleet) {
-    if (fleet.size() != nodeCount()) {
-      throw new IllegalArgumentException(fleet.size() + " nodes for " + nodeCount());
-    }
-    RegionMap map = new RegionMap();
-    int next = 0;
-    for (int rx = 0; rx < regionsPerSide; rx++) {
-      for (int rz = 0; rz < regionsPerSide; rz++) {
-        Region region = map.add(min() + rx * REGION_SIZE, min() + rz * REGION_SIZE, REGION_SIZE);
-        map.assign(region.id(), fleet.get(next++));
-      }
-    }
-    List<Region> all = List.copyOf(map.regions());
-    for (int i = 0; i < replicated; i++) {
-      map.assign(all.get(i).id(), fleet.get(next++));
-    }
-    return map;
+  public RegionLayout layout() {
+    return new RegionLayout(cells);
   }
 
-  /** Lowest x and z of the grid, so the origin's cell is the middle one (the lower of two). */
+  /** Regions the run starts with. */
+  public int regionCount() {
+    return layout().regionCount(nodes, spares);
+  }
+
+  /** Lowest x and z of the world: one halo below the square. */
   public int min() {
-    return RegionLayout.cellMin(-((regionsPerSide - 1) / 2));
+    return layout().min() - Region.HALO;
   }
 
-  /** Size of the whole grid along one axis, in blocks. */
+  /** Size of the world along one axis, in blocks. */
   public int extent() {
-    return REGION_SIZE * regionsPerSide;
+    return layout().size() + 2 * Region.HALO;
   }
 
   public int nodeCount() {
-    return regionsPerSide * regionsPerSide + replicated;
+    return nodes;
   }
 
   public int chunksPerSide() {
     return extent() / Chunks.SIZE;
   }
 
-  public Topology withRegionsPerSide(int value) {
-    return new Topology(value, Math.min(replicated, value * value), minY, height, relief);
+  public Topology withCells(int value) {
+    return new Topology(value, nodes, spares, minY, height, relief);
   }
 
-  public Topology withReplicated(int value) {
-    return new Topology(regionsPerSide, value, minY, height, relief);
+  public Topology withNodes(int value) {
+    return new Topology(cells, value, spares, minY, height, relief);
+  }
+
+  public Topology withSpares(int value) {
+    return new Topology(cells, nodes, value, minY, height, relief);
   }
 
   public Topology withMinY(int value) {
-    return new Topology(regionsPerSide, replicated, value, height, relief);
+    return new Topology(cells, nodes, spares, value, height, relief);
   }
 
   public Topology withHeight(int value) {
-    return new Topology(regionsPerSide, replicated, minY, value, relief);
+    return new Topology(cells, nodes, spares, minY, value, relief);
   }
 
   public Topology withRelief(int value) {
-    return new Topology(regionsPerSide, replicated, minY, height, value);
+    return new Topology(cells, nodes, spares, minY, height, value);
   }
 
+  /** A square, a region count up to one per cell, and up to {@link #MAX_SPARES} spares. */
   public static Topology sample(Rng rng) {
     List<Integer> floors = floors();
-    int perSide = 1 + rng.nextInt(MAX_REGIONS_PER_SIDE);
+    int cells = 1 + rng.nextInt(MAX_CELLS);
+    int regions = 1 + rng.nextInt(cells * cells);
+    int spares = rng.nextInt(MAX_SPARES + 1);
     return new Topology(
-        perSide,
-        rng.nextInt(Math.min(MAX_REPLICATED, perSide * perSide) + 1),
+        cells,
+        regions + spares,
+        spares,
         floors.get(rng.nextInt(floors.size())),
         MIN_HEIGHT + rng.nextInt(MAX_HEIGHT - MIN_HEIGHT + 1),
         rng.nextInt(MAX_RELIEF + 1));

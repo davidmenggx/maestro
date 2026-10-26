@@ -14,11 +14,12 @@ import net.minecraft.world.level.pathfinder.PathType;
 
 /**
  * What the server reads from one intercepted {@code PathFinder.findPath} call: the interned
- * profile, the resolved start node, the target and the per-call inputs. Read between the
- * evaluator's {@code prepare} and {@code done}, since {@code onPathfindingStart} may change malus.
+ * profile, the resolved start node, the target, the per-call inputs, and whether the mob is hunting
+ * (has a target). Read between the evaluator's {@code prepare} and {@code done}, since {@code
+ * onPathfindingStart} may change malus.
  */
 public record SearchCall(
-    MobClass profile, BlockPos start, BlockPos target, WorldEvent.Search search) {
+    MobClass profile, BlockPos start, BlockPos target, WorldEvent.Search search, boolean hunting) {
 
   private static final PathType[] TYPES = PathType.values();
 
@@ -75,6 +76,7 @@ public record SearchCall(
         profile,
         new BlockPos(start.x, start.y, start.z),
         target.immutable(),
-        new WorldEvent.Search(reachRange, maxPathLength, maxVisitedNodes, maxFallDistance));
+        new WorldEvent.Search(reachRange, maxPathLength, maxVisitedNodes, maxFallDistance),
+        mob.getTarget() != null);
   }
 }

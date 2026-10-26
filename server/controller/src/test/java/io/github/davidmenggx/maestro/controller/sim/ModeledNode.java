@@ -30,6 +30,7 @@ import maestro.fbs.Hello;
 import maestro.fbs.Join;
 import maestro.fbs.PathCancel;
 import maestro.fbs.PathNode;
+import maestro.fbs.PathProbe;
 import maestro.fbs.PathRequest;
 import maestro.fbs.PathRequestBatch;
 import maestro.fbs.PathResponse;
@@ -116,12 +117,16 @@ public final class ModeledNode {
   /** How long a request may wait for a worker: 1 s, then it is dropped unserved. */
   static final int MAX_WAIT_STEPS = 20 * Simulation.STEPS_PER_TICK;
 
+  /** Microseconds of worker time per simulation step, as a heartbeat reports search time. */
+  static final long MICROS_PER_STEP = Simulation.NANOS_PER_STEP / 1000;
+
   private enum State {
     WAITING,
     RUNNING
   }
 
   /** An admitted request. Positions are relative to the area, as received. */
+  /** A queued request, or a probe, which names region 0 and costs a worker almost nothing. */
   private record Job(
       long requestId,
       long run,
@@ -129,7 +134,8 @@ public final class ModeledNode {
       Pos start,
       Pos target,
       long generation,
-      long admitted) {}
+      long admitted,
+      boolean probe) {}
 
   /** One chunk of the area, cells indexed {@code (dx * Chunks.SIZE + dz) * height + dy}. */
   private static final class Chunk {
@@ -195,7 +201,8 @@ public final class ModeledNode {
   private boolean holdsArea;
   private long run;
   private long regionId;
-  private int size;
+  private int sizeX;
+  private int sizeZ;
   private int baseY;
   private int height;
   private final Map<Integer, Chunk> chunks = new TreeMap<>();
@@ -204,7 +211,16 @@ public final class ModeledNode {
   private long duplicateRequests;
   private long canceledRequests;
   private long servedRequests;
+  private long servedProbes;
   private boolean backlogged;
+
+  /**
+   * Searches finished since the heartbeat timer last fired, and the worker time from taking each to
+   * settling it, a pause included.
+   */
+  private long beatSearches;
+
+  private long beatMicros;
 
   ModeledNode(NodeId id, Host host, Service service, Rng rng) {
     this.id = id;
@@ -242,6 +258,11 @@ public final class ModeledNode {
     return canceledRequests;
   }
 
+  /** Probes answered, which {@link #servedRequests} leaves out. */
+  public long servedProbes() {
+    return servedProbes;
+  }
+
   public long servedRequests() {
     return servedRequests;
   }
@@ -271,7 +292,7 @@ public final class ModeledNode {
 
   /** Region state only. Two nodes with the same world have equal state, however they got there. */
   public long stateDigest() {
-    AreaDigest digest = new AreaDigest(regionId, size, baseY, height);
+    AreaDigest digest = new AreaDigest(regionId, sizeX, sizeZ, baseY, height);
     for (Map.Entry<Integer, Chunk> chunk : chunks.entrySet()) {
       digest.chunk(chunk.getKey(), chunk.getValue().hash());
     }
@@ -280,7 +301,7 @@ public final class ModeledNode {
 
   /**
    * The digest of a region's state, fed chunks in increasing index order, chunk {@code (cx, cz)}
-   * having index {@code cx * (size / 16) + cz}. An all-air chunk digests as an absent one.
+   * having index {@code cx * (sizeZ / 16) + cz}. An all-air chunk digests as an absent one.
    */
   static final class AreaDigest {
 
@@ -289,8 +310,8 @@ public final class ModeledNode {
 
     private final Digest digest = new Digest();
 
-    AreaDigest(long regionId, int size, int baseY, int height) {
-      digest.mix(regionId).mix(size).mix(baseY).mix(height);
+    AreaDigest(long regionId, int sizeX, int sizeZ, int baseY, int height) {
+      digest.mix(regionId).mix(sizeX).mix(sizeZ).mix(baseY).mix(height);
     }
 
     /** Cells and floors indexed {@code (dx * Chunks.SIZE + dz) * height + dy}. */
@@ -344,6 +365,8 @@ public final class ModeledNode {
     linkRun = 0;
     linkAttempt = 0;
     running = 0;
+    beatSearches = 0;
+    beatMicros = 0;
   }
 
   /** A new process, holding nothing. */
@@ -423,15 +446,21 @@ public final class ModeledNode {
         return;
       }
       running++;
-      settle(job, answerBuilder(job));
+      settle(job, answerBuilder(job), searches(job), host.now());
     }
   }
 
   /** The heartbeat timer fired. */
   void heartbeatDue() {
+    // Taken even with no link to report to, so a beat covers one interval.
+    long searches = beatSearches;
+    long micros = beatMicros;
+    beatSearches = 0;
+    beatMicros = 0;
     if (live && controlJoined) {
       FlatBufferBuilder builder = new FlatBufferBuilder(64);
-      int heartbeat = Heartbeat.createHeartbeat(builder, depth());
+      int heartbeat =
+          Heartbeat.createHeartbeat(builder, depth(), searches, micros, service.workers());
       builder.finish(
           ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Heartbeat, heartbeat));
       host.send(Channel.CONTROL, builder.sizedByteArray());
@@ -581,6 +610,10 @@ public final class ModeledNode {
             cancel(cancel.requestIds(i));
           }
         }
+        case RequestMsg.PathProbe -> {
+          PathProbe probe = (PathProbe) request.body(new PathProbe());
+          enqueue(probe.requestId(), request.run(), 0, new Pos(0, 0, 0), new Pos(0, 0, 0), true);
+        }
         default -> {}
       }
     } catch (RuntimeException e) {
@@ -599,6 +632,18 @@ public final class ModeledNode {
       return;
     }
     checkReach(request, frameRun, frameRegion);
+    enqueue(
+        requestId,
+        frameRun,
+        frameRegion,
+        new Pos(request.start().x(), request.start().y(), request.start().z()),
+        new Pos(request.target().x(), request.target().y(), request.target().z()),
+        false);
+  }
+
+  /** Queues a request or probe, or answers a copy of one already answered. */
+  private void enqueue(
+      long requestId, long frameRun, long frameRegion, Pos start, Pos target, boolean probe) {
     expire();
     Settled earlier = settled.get(requestId);
     if (earlier != null) {
@@ -616,14 +661,7 @@ public final class ModeledNode {
     open.put(requestId, State.WAITING);
     waitingCount++;
     waiting.add(
-        new Job(
-            requestId,
-            frameRun,
-            frameRegion,
-            new Pos(request.start().x(), request.start().y(), request.start().z()),
-            new Pos(request.target().x(), request.target().y(), request.target().z()),
-            generation,
-            host.now()));
+        new Job(requestId, frameRun, frameRegion, start, target, generation, host.now(), probe));
     startWorkers();
   }
 
@@ -639,7 +677,7 @@ public final class ModeledNode {
     int reach = (int) Math.ceil(request.maxPathLength()) + (int) Math.floor(width + 1.0f) + 1;
     int x = request.start().x();
     int z = request.start().z();
-    if (x - reach < 0 || x + reach >= size || z - reach < 0 || z + reach >= size) {
+    if (x - reach < 0 || x + reach >= sizeX || z - reach < 0 || z + reach >= sizeZ) {
       violations.add(
           id
               + ": request "
@@ -651,7 +689,9 @@ public final class ModeledNode {
               + " reads "
               + reach
               + " blocks around it, past an area of "
-              + size);
+              + sizeX
+              + "x"
+              + sizeZ);
     }
   }
 
@@ -703,33 +743,49 @@ public final class ModeledNode {
       running++;
       // The area is pinned when the job starts, as a worker pins the current version.
       byte[] answer = answerBuilder(job);
+      boolean searched = searches(job);
+      long taken = host.now();
       long process = this.process;
       int cost =
-          service.minCostSteps() + rng.nextInt(service.maxCostSteps() - service.minCostSteps() + 1);
-      host.schedule(cost, "served:" + id, () -> completed(process, job, answer));
+          job.probe()
+              ? 1
+              : service.minCostSteps()
+                  + rng.nextInt(service.maxCostSteps() - service.minCostSteps() + 1);
+      host.schedule(cost, "served:" + id, () -> completed(process, job, answer, searched, taken));
     }
     backlogged |= waitingCount > 0;
   }
 
-  private void completed(long process, Job job, byte[] answer) {
+  private void completed(long process, Job job, byte[] answer, boolean searched, long taken) {
     if (process != this.process) {
       return;
     }
     if (paused) {
-      deferred.add(() -> completed(process, job, answer));
+      deferred.add(() -> completed(process, job, answer, searched, taken));
       return;
     }
-    settle(job, answer);
+    settle(job, answer, searched, taken);
     startWorkers();
   }
 
-  /** Records a finished job's answer and sends it, unless its link has gone since. */
-  private void settle(Job job, byte[] answer) {
+  /**
+   * Records a finished job's answer and sends it, unless its link has gone since. A search counts
+   * toward the next heartbeat either way, from {@code taken} to now.
+   */
+  private void settle(Job job, byte[] answer, boolean searched, long taken) {
     running--;
+    if (searched) {
+      beatSearches++;
+      beatMicros += (host.now() - taken) * MICROS_PER_STEP;
+    }
     if (job.generation() != generation) {
       return;
     }
-    servedRequests++;
+    if (job.probe()) {
+      servedProbes++;
+    } else {
+      servedRequests++;
+    }
     open.remove(job.requestId());
     expire();
     record(job.requestId(), answer);
@@ -755,12 +811,17 @@ public final class ModeledNode {
     }
   }
 
+  /** Whether a job taken now searches: it is a request for the area held. A probe never is. */
+  private boolean searches(Job job) {
+    return holdsArea && run == job.run() && regionId == job.regionId();
+  }
+
   /**
    * The answer to a job against the area held now. With no area, or another run's or region's, it
    * is no path at sequence 0, which the controller reads as a search that ran too early.
    */
   private byte[] answerBuilder(Job job) {
-    boolean matches = holdsArea && run == job.run() && regionId == job.regionId();
+    boolean matches = searches(job);
     List<Pos> path = matches ? straightLine(job.start(), job.target()) : List.of();
     boolean reached = !path.isEmpty() && path.get(path.size() - 1).equals(job.target());
 
@@ -793,8 +854,7 @@ public final class ModeledNode {
     if (!inArea(start.x(), start.y(), start.z())) {
       return true;
     }
-    int perSide = size / Chunks.SIZE;
-    return !chunks.containsKey(Chunks.of(start.x()) * perSide + Chunks.of(start.z()));
+    return !chunks.containsKey(Chunks.of(start.x()) * (sizeZ / Chunks.SIZE) + Chunks.of(start.z()));
   }
 
   private static byte[] unknownProfile(long run, long requestId, int classId) {
@@ -821,18 +881,20 @@ public final class ModeledNode {
   }
 
   private String assign(RegionAssignment assignment) {
-    int newSize = assignment.size();
+    int newSizeX = assignment.sizeX();
+    int newSizeZ = assignment.sizeZ();
     int newBaseY = assignment.minY();
     int newHeight = assignment.height();
     // Wire positions are shorts.
-    if (newSize <= 0
-        || newSize % Chunks.SIZE != 0
-        || newSize > Short.MAX_VALUE
+    if (!side(newSizeX)
+        || !side(newSizeZ)
         || newHeight <= 0
         || newBaseY < Short.MIN_VALUE
         || (long) newBaseY + newHeight - 1 > Short.MAX_VALUE) {
       return "assigned an area the wire cannot address: size "
-          + newSize
+          + newSizeX
+          + "x"
+          + newSizeZ
           + ", y "
           + newBaseY
           + " + "
@@ -842,13 +904,37 @@ public final class ModeledNode {
     if (assignment.run() == 0 || assignment.run() != linkRun) {
       return "assigned an area of run " + assignment.run() + " on a link of run " + linkRun;
     }
+    if (assignment.regionId() == 0) {
+      return "assigned region 0, which is none";
+    }
+    if (assignment.fromRegionId() != 0) {
+      if (assignment.resume()) {
+        return "told to keep an area and resume at once";
+      }
+      // Keeping goes on with the held stream under a new id, in part of its area.
+      if (!holdsArea
+          || assignment.run() != run
+          || assignment.fromRegionId() != regionId
+          || assignment.sequence() != lastSequence
+          || newSizeX > sizeX
+          || newSizeZ > sizeZ
+          || newBaseY != baseY
+          || newHeight != height) {
+        return "told to keep an area of a stream it does not hold";
+      }
+      crop(newSizeX, newSizeZ);
+      regionId = assignment.regionId();
+      host.assigned(this, run, regionId, lastSequence);
+      return null;
+    }
     if (assignment.resume()) {
       // Resuming must continue the held stream at the held position.
       if (!hasState()
           || assignment.run() != run
           || assignment.regionId() != regionId
           || assignment.sequence() != lastSequence
-          || newSize != size
+          || newSizeX != sizeX
+          || newSizeZ != sizeZ
           || newBaseY != baseY
           || newHeight != height) {
         return "told to resume a stream it does not hold";
@@ -873,7 +959,8 @@ public final class ModeledNode {
     holdsArea = true;
     run = assignment.run();
     regionId = assignment.regionId();
-    size = newSize;
+    sizeX = newSizeX;
+    sizeZ = newSizeZ;
     baseY = newBaseY;
     height = newHeight;
     chunks.clear();
@@ -881,6 +968,29 @@ public final class ModeledNode {
     lastSequence = assignment.sequence();
     host.assigned(this, run, regionId, lastSequence);
     return null;
+  }
+
+  private static boolean side(int size) {
+    return size > 0 && size % Chunks.SIZE == 0 && size <= Short.MAX_VALUE;
+  }
+
+  /** Keeps the chunks inside the smaller area with the same corner, indexed for its sides. */
+  private void crop(int newSizeX, int newSizeZ) {
+    int chunksZ = sizeZ / Chunks.SIZE;
+    int newChunksX = newSizeX / Chunks.SIZE;
+    int newChunksZ = newSizeZ / Chunks.SIZE;
+    Map<Integer, Chunk> kept = new TreeMap<>();
+    for (Map.Entry<Integer, Chunk> chunk : chunks.entrySet()) {
+      int cx = chunk.getKey() / chunksZ;
+      int cz = chunk.getKey() % chunksZ;
+      if (cx < newChunksX && cz < newChunksZ) {
+        kept.put(cx * newChunksZ + cz, chunk.getValue());
+      }
+    }
+    chunks.clear();
+    chunks.putAll(kept);
+    sizeX = newSizeX;
+    sizeZ = newSizeZ;
   }
 
   /** The reason {@code sequence} cannot follow the held state, or null if it can. */
@@ -899,12 +1009,12 @@ public final class ModeledNode {
       return "chunk before region assignment";
     }
     Vec2i position = snapshot.chunkXz();
-    int perSide = size / Chunks.SIZE;
+    int chunksZ = sizeZ / Chunks.SIZE;
     if (position == null
         || position.x() < 0
-        || position.x() >= perSide
+        || position.x() >= sizeX / Chunks.SIZE
         || position.z() < 0
-        || position.z() >= perSide) {
+        || position.z() >= chunksZ) {
       return "chunk "
           + (position == null ? "without a position" : position.x() + "," + position.z())
           + " falls outside the assigned area";
@@ -919,7 +1029,7 @@ public final class ModeledNode {
       return refused;
     }
 
-    int chunkIndex = position.x() * perSide + position.z();
+    int chunkIndex = position.x() * chunksZ + position.z();
     // No columns means the server does not hold the chunk, so it is air.
     if (snapshot.runCountsLength() == 0) {
       chunks.remove(chunkIndex);
@@ -1016,11 +1126,11 @@ public final class ModeledNode {
       return refused;
     }
 
-    int perSide = size / Chunks.SIZE;
+    int chunksZ = sizeZ / Chunks.SIZE;
     for (int i = 0; i < delta.cellsLength(); i++) {
       delta.cells(cell, i);
       Vec3s pos = cell.pos();
-      int chunkIndex = Chunks.of(pos.x()) * perSide + Chunks.of(pos.z());
+      int chunkIndex = Chunks.of(pos.x()) * chunksZ + Chunks.of(pos.z());
       Chunk chunk = chunks.computeIfAbsent(chunkIndex, unseen -> newChunk());
       int index =
           (Math.floorMod(pos.x(), Chunks.SIZE) * Chunks.SIZE + Math.floorMod(pos.z(), Chunks.SIZE))
@@ -1042,6 +1152,6 @@ public final class ModeledNode {
 
   private boolean inArea(int x, int y, int z) {
     int dy = y - baseY;
-    return x >= 0 && x < size && z >= 0 && z < size && dy >= 0 && dy < height;
+    return x >= 0 && x < sizeX && z >= 0 && z < sizeZ && dy >= 0 && dy < height;
   }
 }

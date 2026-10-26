@@ -1,10 +1,12 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.core.Controller;
+import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.region.Region;
-import io.github.davidmenggx.maestro.controller.region.RegionMap;
+import io.github.davidmenggx.maestro.controller.region.Regions;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
+import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -88,8 +90,12 @@ public final class Invariants {
       }
     }
 
-    // Every live node has caught up and holds the same state as a fresh snapshot.
+    // Every live holder has caught up and holds the same state as a fresh snapshot. A spare holds
+    // nothing it must keep.
     for (ModeledNode node : run.sim.nodes()) {
+      if (run.regions().regionOf(node.id()) == Regions.NONE) {
+        continue;
+      }
       if (caughtUp(run.controller, node)) {
         violations.addAll(checkAgainstFreshSnapshot(run, node));
       } else if (run.sim.transport().alive(node.id())) {
@@ -99,6 +105,35 @@ public final class Invariants {
                 + node.lastSequence()
                 + " of "
                 + run.controller.heldSequence(node.id()));
+      }
+    }
+
+    // A region whose holders all could not serve went to a spare that was up within its grace, at
+    // every tick, and to a spare that lived by the end.
+    violations.addAll(run.strandedRegions());
+    if (run.settles()) {
+      List<NodeId> spares = new ArrayList<>();
+      for (NodeId node : run.fleet) {
+        if (run.regions().regionOf(node) == Regions.NONE && run.serves(node)) {
+          spares.add(node);
+        }
+      }
+      for (Region region : run.regions().regions()) {
+        List<NodeId> holders = run.regions().holders(region.id());
+        boolean anyServes = false;
+        for (NodeId holder : holders) {
+          anyServes |= run.serves(holder);
+        }
+        if (!anyServes && !spares.isEmpty()) {
+          violations.add(
+              "region "
+                  + region.id()
+                  + " is held only by nodes that cannot serve "
+                  + holders
+                  + " while "
+                  + spares
+                  + " are spare");
+        }
       }
     }
 
@@ -117,30 +152,39 @@ public final class Invariants {
     // A node that cannot answer is sent no more than a few probing requests.
     violations.addAll(run.sim.failOpenViolations());
 
+    // What is admitted meets the SLO whenever the load fits. Under overload, admission alone keeps
+    // what it admits within it, answered or timed out; placement moving a hot region drops the
+    // requests in flight by design. Every request meets it if the load fits what a holder takes
+    // before it sheds.
     if (run.heldToTheSlo()) {
+      long misses =
+          run.fitsCapacity() ? run.out.admittedMisses() : run.out.dropped(DropReason.TIMEOUT);
+      violations.addAll(checkSlo(run.out.latencies(), misses));
+    }
+    if (run.heldWithoutShedding()) {
       violations.addAll(checkSlo(run.out.latencies(), run.out.sloMisses()));
     }
-    if (run.fitsCapacity()) {
+    if (run.judgedHealthy()) {
       // Nothing here stops a node answering in time, so taking one out of service is wrong.
       long suspected = run.sim.metrics().total("node.suspected");
       long opened = run.sim.metrics().total("node.quiet");
-      if (suspected + opened > 0) {
+      long checks = run.sim.metrics().total("node.check.failed");
+      if (suspected + opened + checks > 0) {
         violations.add(
             "a healthy node was taken out of service: "
                 + suspected
                 + " suspicions, "
                 + opened
-                + " quiet request paths");
+                + " quiet request paths, "
+                + checks
+                + " failed checks");
       }
     }
 
     return violations;
   }
 
-  /**
-   * The latency SLO: p99 below {@link SimRun#TICK_BUDGET}. A miss is a request rejected for queue
-   * depth, never answered in time, or dropped for want of a node. Misses rank above any answer.
-   */
+  /** The latency SLO: p99 below {@link SimRun#TICK_BUDGET}. Misses rank above any answer. */
   static List<String> checkSlo(List<Double> latencies, long misses) {
     double p99 = SimMetrics.percentileWithMisses(latencies, 0.99, misses);
     if (!Double.isNaN(p99) && p99 >= SimRun.TICK_BUDGET) {
@@ -166,8 +210,8 @@ public final class Invariants {
    * world, not through the encoder, so an encoding bug cannot cancel out.
    */
   public static List<String> checkAgainstFreshSnapshot(SimRun run, ModeledNode node) {
-    int region = run.regions.regionOf(node.id());
-    if (region == RegionMap.NONE) {
+    int region = run.regions().regionOf(node.id());
+    if (region == Regions.NONE) {
       return List.of(node.id() + " owns no region to compare");
     }
     if (!node.assigned()) {
@@ -186,18 +230,23 @@ public final class Invariants {
     return List.of();
   }
 
-  /** The state a node of {@code regionId} holds with every frame applied: air for unheld chunks. */
+  /**
+   * The state a holder of {@code regionId} holds with every frame applied: its whole area, with air
+   * for unheld chunks.
+   */
   static long freshDigest(SimRun run, int regionId) {
     SimWorld world = run.world;
-    Region region = run.regions.region(regionId);
-    int perSide = region.size() / Chunks.SIZE;
+    Region region = run.regions().region(regionId);
+    int chunksX = region.areaSizeX() / Chunks.SIZE;
+    int chunksZ = region.areaSizeZ() / Chunks.SIZE;
     ModeledNode.AreaDigest digest =
-        new ModeledNode.AreaDigest(regionId, region.size(), world.minY(), world.height());
-    for (int cx = 0; cx < perSide; cx++) {
-      for (int cz = 0; cz < perSide; cz++) {
-        int chunkX = Chunks.of(region.minX()) + cx;
-        int chunkZ = Chunks.of(region.minZ()) + cz;
-        digest.chunk(cx * perSide + cz, world.chunkHash(chunkX, chunkZ));
+        new ModeledNode.AreaDigest(
+            regionId, region.areaSizeX(), region.areaSizeZ(), world.minY(), world.height());
+    for (int cx = 0; cx < chunksX; cx++) {
+      for (int cz = 0; cz < chunksZ; cz++) {
+        int chunkX = Chunks.of(region.areaMinX()) + cx;
+        int chunkZ = Chunks.of(region.areaMinZ()) + cz;
+        digest.chunk(cx * chunksZ + cz, world.chunkHash(chunkX, chunkZ));
       }
     }
     return digest.value();

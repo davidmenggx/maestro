@@ -4,7 +4,10 @@ import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.region.Region;
+import io.github.davidmenggx.maestro.controller.region.RegionLayout;
 import io.github.davidmenggx.maestro.controller.region.RegionMap;
+import io.github.davidmenggx.maestro.controller.region.Regions;
 import io.github.davidmenggx.maestro.controller.wire.Frames;
 import io.github.davidmenggx.maestro.controller.wire.Reply;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
@@ -18,44 +21,84 @@ import java.util.Objects;
 
 /**
  * Streams each region's world to its holders ({@link WorldStreams}), handles path requests ({@link
- * RequestTracker}), links to nodes ({@link NodeLinks}) and removes unresponsive nodes from service
- * ({@link NodeHealth}). Failover and resharding are not built.
+ * RequestTracker}), links to nodes ({@link NodeLinks}), removes unresponsive nodes from service
+ * ({@link NodeHealth}) and moves regions between nodes ({@link Placement}).
  */
-public final class Controller implements WorldInput, Transport.Listener {
+public final class Controller implements WorldInput, Transport.Listener, Placement.Changes {
+
+  /**
+   * How the controller runs. The run starts with {@link RegionLayout#initial} of the fleet past
+   * {@code spares}. {@code nodeCapacity} is the requests a node serves per tick, as admission
+   * assumes until a node's heartbeats show it serves fewer.
+   */
+  public record Settings(
+      RegionLayout layout,
+      int spares,
+      int nodeCapacity,
+      Dispatch dispatch,
+      Placement.Policy policy) {
+
+    public Settings {
+      Objects.requireNonNull(layout, "layout");
+      Objects.requireNonNull(dispatch, "dispatch");
+      Objects.requireNonNull(policy, "policy");
+      if (spares < 0 || nodeCapacity < 1) {
+        throw new IllegalArgumentException(
+            "spares must not be negative and capacity positive: " + spares + ", " + nodeCapacity);
+      }
+    }
+  }
 
   private final ControllerEnv env;
   private final Violations violations = new Violations();
+  private final RegionMap regions;
   private final NodeLinks links;
   private final NodeHealth health;
+  private final Capacity capacity;
   private final WorldStreams streams;
+  private final Priority priority = new Priority();
+  private final Placement placement;
   private final RequestTracker requests;
 
   private final long run;
 
   public Controller(
-      ControllerEnv env, WorldSource world, WorldOutput out, RegionMap regions, int nodeCapacity) {
+      ControllerEnv env,
+      WorldSource world,
+      WorldOutput out,
+      List<NodeId> fleet,
+      Settings settings) {
     this.env = Objects.requireNonNull(env, "env");
     Objects.requireNonNull(world, "world");
     Objects.requireNonNull(out, "out");
-    Objects.requireNonNull(regions, "regions");
+    Objects.requireNonNull(settings, "settings");
     this.run = env.run();
+    this.regions = settings.layout().initial(fleet, settings.spares());
     Encoder encoder = new Encoder(env);
-    this.links = new NodeLinks(env, run, regions.nodes());
-    this.health = new NodeHealth(env.metrics(), regions.nodes());
+    this.links = new NodeLinks(env, run, fleet);
+    this.health = new NodeHealth(env.metrics(), fleet);
+    this.capacity = new Capacity(settings.nodeCapacity(), fleet);
     this.streams = new WorldStreams(env, world, regions, links, encoder, violations, run);
+    this.placement =
+        new Placement(
+            regions, fleet, links, health, settings.policy(), capacity, this, env.metrics());
     this.requests =
         new RequestTracker(
             env,
             world,
             out,
             regions,
+            fleet,
             links,
             health,
             streams,
+            placement,
+            priority,
             encoder,
             violations,
             run,
-            nodeCapacity);
+            capacity,
+            settings.dispatch());
     env.transport().listen(this);
   }
 
@@ -90,14 +133,30 @@ public final class Controller implements WorldInput, Transport.Listener {
     return links.greeted(node);
   }
 
-  /** Whether the node is neither suspected nor has a quiet request path. */
+  /** Whether the node is not suspected and its request path flows: not quiet, not being probed. */
   public boolean inService(NodeId node) {
     return health.inService(node);
+  }
+
+  /** Whether the node can take a region: linked, in service, and its request path shown to work. */
+  public boolean serves(NodeId node) {
+    return placement.up(node);
+  }
+
+  /** The regions and their holders now. Changed only by the controller, at a tick's start. */
+  public Regions regions() {
+    return regions;
+  }
+
+  /** Counts changes to {@link #regions}, so a reader can tell when to look again. */
+  public int regionsVersion() {
+    return placement.version();
   }
 
   /** Bookkeeping that must be consistent, and every violation the controller noticed itself. */
   public List<String> selfCheck() {
     List<String> found = new ArrayList<>(violations.list());
+    regions.check(found);
     links.check(found);
     streams.check(found);
     requests.check(found);
@@ -110,9 +169,13 @@ public final class Controller implements WorldInput, Transport.Listener {
       case WorldEvent.TickBegan began -> {
         requests.expire(began.tick());
         for (NodeId node : health.evaluate(began.tick(), env.clock().nowNanos())) {
-          requests.outOfService(node);
+          requests.abandonLive(node);
         }
+        placement.evaluate(began.tick());
         links.dial(began.tick());
+        for (NodeId node : health.probesDue(began.tick(), links::greeted)) {
+          requests.probe(node, began.tick());
+        }
       }
       case WorldEvent.TickEnded ended -> {
         // Block changes first, while the chunks about to be read are still marked.
@@ -131,10 +194,29 @@ public final class Controller implements WorldInput, Transport.Listener {
       case WorldEvent.MobRemoved removed -> requests.mobRemoved(removed.mobId());
       case WorldEvent.PathRequested requested -> requests.pathRequested(requested);
       case WorldEvent.PathCanceled canceled -> requests.pathCanceled(canceled.mobId());
-      // Shedding and the failover budget will read player positions.
-      case WorldEvent.PlayerMoved ignored -> {}
-      case WorldEvent.PlayerLeft ignored -> {}
+      case WorldEvent.PlayerMoved moved -> priority.moved(moved.playerId(), moved.pos());
+      case WorldEvent.PlayerLeft left -> priority.left(left.playerId());
     }
+  }
+
+  @Override
+  public void regionSplit(Region parent, Region lower, Region upper) {
+    streams.split(parent, lower, upper);
+    // Their requests name the parent, which they no longer hold.
+    for (NodeId node : regions.holders(lower.id())) {
+      requests.abandonLive(node);
+    }
+  }
+
+  @Override
+  public void holderAdded(Region region, NodeId node) {
+    streams.holderAdded(region.id(), node);
+  }
+
+  @Override
+  public void holderRemoved(Region region, NodeId node) {
+    streams.holderRemoved(region.id(), node);
+    requests.abandonLive(node);
   }
 
   @Override
@@ -155,6 +237,7 @@ public final class Controller implements WorldInput, Transport.Listener {
     }
     links.disconnected(node);
     health.disconnected(node);
+    capacity.linkLost(node);
     requests.linkLost(node);
   }
 
@@ -187,12 +270,17 @@ public final class Controller implements WorldInput, Transport.Listener {
         health.greeted(node, arrivedNanos);
         streams.hello(node, greeting);
       }
-      case Reply.Depth depth -> {
-        requests.depth(node, depth.queueDepth());
+      case Reply.Beat beat -> {
+        // The rate first, which the backlog is read at.
+        capacity.heartbeat(node, beat.searches(), beat.searchMicros(), beat.workers());
+        requests.depth(node, beat.queueDepth());
         health.heartbeat(node, arrivedNanos);
-        // The only view of a node's backlog in production.
-        env.metrics().record("node.queue.reported", depth.queueDepth(), "node", node.toString());
-        env.metrics().gauge("node.queue.depth", depth.queueDepth(), "node", node.toString());
+        String label = node.toString();
+        // The only view of a node's backlog and speed in production.
+        env.metrics().record("node.queue.reported", beat.queueDepth(), "node", label);
+        env.metrics().gauge("node.queue.depth", beat.queueDepth(), "node", label);
+        env.metrics().count("node.searches", beat.searches(), "node", label);
+        env.metrics().gauge("node.capacity", capacity.of(node), "node", label);
       }
       case Reply.Foreign ignored -> env.metrics().count("path.response.foreign", 1);
       case null -> env.metrics().count("controller.unknown.frame", 1, "channel", channel.name());

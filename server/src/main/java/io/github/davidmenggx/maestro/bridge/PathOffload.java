@@ -4,7 +4,7 @@ import io.github.davidmenggx.maestro.config.MaestroConfig.Offload;
 import io.github.davidmenggx.maestro.controller.core.RequestTracker;
 import io.github.davidmenggx.maestro.controller.env.Clock;
 import io.github.davidmenggx.maestro.controller.env.Metrics;
-import io.github.davidmenggx.maestro.controller.region.RegionMap;
+import io.github.davidmenggx.maestro.controller.region.RegionLayout;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.ProfileTable;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
@@ -38,8 +38,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p>While a request waits, the call returns the mob's live path, or else a held path ({@link
  * HeldPaths}); the answer replaces it on arrival. A request refused at admission is searched on the
- * server, through {@link Failover} if the region's nodes cannot take it. One dropped later ends a
- * hold, and the goal asks again.
+ * server, through {@link Failover} if the region's nodes cannot take it, unless it was shed: then
+ * the mob keeps the path it follows, or idles. One dropped later ends a hold, and the goal asks
+ * again.
  *
  * <p>A mob waits only while it follows its placeholder and its navigation was handed it after the
  * call. A mob that does not wait when the tick's work ends cancels its request. Judging at tick end
@@ -101,9 +102,6 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     }
   }
 
-  /** How long an answer the mob did not take may serve a later call for the same search. */
-  static final int FRESH_TICKS = RequestTracker.MAX_TICKS_LATE;
-
   /** Nodes at the front of an answer the mob may have walked past while it waited. */
   static final int MAX_SKIPPED_NODES = 4;
 
@@ -155,12 +153,8 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     }
   }
 
-  /** An answer that arrived after its mob moved on, and what it was asked for. */
-  private record Answer(BlockPos start, BlockPos target, PathResult result) {}
-
   private static final class MobState {
     Pending pending;
-    Answer latest;
   }
 
   /** What became of the requests, for the summary. */
@@ -170,7 +164,7 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     ANSWERED,
     APPLIED,
     MOVED_ON,
-    REUSED,
+    SHED,
     DROPPED,
     CANCELED,
     SHADOW_MATCHED,
@@ -178,7 +172,7 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
   }
 
   private final Level level;
-  private final RegionMap regions;
+  private final RegionLayout layout;
   private final IntFunction<Navigator> navigators;
   private final Clock clock;
   private final Metrics metrics;
@@ -203,17 +197,19 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
   /** Why the controller refused the request it is admitting, or null if it has not. */
   private DropReason refusal;
 
-  /** Offloads the searches of mobs in {@code level} that start in one of {@code regions}. */
+  /**
+   * Offloads the searches of mobs in {@code level} that stand in the square {@code layout} covers.
+   */
   public PathOffload(
       ServerLevel level,
-      RegionMap regions,
+      RegionLayout layout,
       Clock clock,
       Metrics metrics,
       ProfileTable profiles,
       Offload mode) {
     this(
         level,
-        regions,
+        layout,
         id -> level.getEntity(id) instanceof Mob mob ? new MobNavigator(mob) : null,
         clock,
         System::nanoTime,
@@ -229,7 +225,7 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
    */
   PathOffload(
       Level level,
-      RegionMap regions,
+      RegionLayout layout,
       IntFunction<Navigator> navigators,
       Clock clock,
       LongSupplier nanos,
@@ -238,7 +234,7 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
       ProfileTable profiles,
       Offload mode) {
     this.level = level;
-    this.regions = regions;
+    this.layout = layout;
     this.navigators = navigators;
     this.clock = clock;
     this.metrics = metrics;
@@ -269,16 +265,16 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
   }
 
   /**
-   * A mob standing outside every region has its search refused anyway, so it is not read and sent.
-   * A search starts at most a block from the mob, and a start that close to a region's edge cannot
-   * fit its reach, so this refuses nothing the controller would take.
+   * A mob standing outside the covered square is not read and sent. Its search starts at most a
+   * block from it, so of the searches the controller would take, this refuses only those starting
+   * within a block of the square's edge.
    */
   @Override
   public boolean wants(Mob mob) {
     return controller != null
         && Searches.offloadable()
         && mob.level() == level
-        && regions.regionAt(mob.getBlockX(), mob.getBlockZ()) != null;
+        && layout.covers(mob.getBlockX(), mob.getBlockZ());
   }
 
   @Override
@@ -306,16 +302,6 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     if (mode == Offload.SHADOW) {
       return shadow(mobId, navigator, state, call, vanilla);
     }
-    Answer latest = state.latest;
-    state.latest = null;
-    if (latest != null
-        && latest.start().equals(start)
-        && latest.target().equals(target)
-        && clock.tick() - latest.result().issuedTick() <= FRESH_TICKS) {
-      record(Outcome.REUSED);
-      failover.forget(mobId);
-      return toPath(latest.result());
-    }
     Pending pending = state.pending;
     if (pending != null && pending.matches(start, target)) {
       // Asked again for the answer it already waits for.
@@ -326,8 +312,13 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     if (refused == DropReason.UNAVAILABLE) {
       return failover.serve(mobId, navigator, target, vanilla);
     }
-    // Served by its node or by vanilla in full, so a full search in the failover's turns is moot.
+    // Served by its node or by vanilla in full, or shed, so a full search in the failover's turns
+    // is moot.
     failover.forget(mobId);
+    if (refused == DropReason.SHED) {
+      record(Outcome.SHED);
+      return kept(navigator);
+    }
     if (refused != null) {
       return vanilla.search();
     }
@@ -370,7 +361,8 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
               call.profile().classId(),
               pos(call.start()),
               pos(call.target()),
-              call.search()));
+              call.search(),
+              call.hunting()));
     } finally {
       admitting = NO_MOB;
     }
@@ -381,6 +373,15 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
       }
     }
     return refusal;
+  }
+
+  /**
+   * What a shed mob gets: the path it follows, if any, so it goes on as it was, or else null, which
+   * ends the goal that asked, so the mob idles until a goal asks again.
+   */
+  private static Path kept(Navigator navigator) {
+    Path current = navigator.path();
+    return current != null && !current.isDone() && !HeldPaths.isHeld(current) ? current : null;
   }
 
   /**
@@ -484,8 +485,6 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     }
     Path current = navigator.path();
     if (!waitsFor(pending, current)) {
-      // The mob moved on. A later call for the same search may still use the answer, once.
-      state.latest = new Answer(pending.start, pending.target, result);
       record(Outcome.MOVED_ON);
       return;
     }

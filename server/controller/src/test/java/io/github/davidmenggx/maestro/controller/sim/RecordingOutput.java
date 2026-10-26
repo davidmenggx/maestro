@@ -2,7 +2,7 @@ package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.core.WorldStreams;
 import io.github.davidmenggx.maestro.controller.region.Region;
-import io.github.davidmenggx.maestro.controller.region.RegionMap;
+import io.github.davidmenggx.maestro.controller.region.Regions;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
 import io.github.davidmenggx.maestro.controller.world.Pos;
@@ -16,6 +16,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.function.Supplier;
 
 /**
  * Records what came back out of the controller and folds it into the run digest. A ledger of the
@@ -27,10 +28,10 @@ import java.util.TreeMap;
  *
  * <p>A request open when its controller process restarts is closed as lost with the process.
  *
- * <p>A request is servable when it starts far enough inside a region that the search cannot read
- * past it, in a chunk loaded long enough for chunk reads to have reached it. Dropping a servable
- * request for want of a node counts against the SLO, unless its chunk left meanwhile. So does
- * losing a request with its node.
+ * <p>A request is servable when it starts in a region far enough inside the region's area that the
+ * search cannot read past it, in a chunk loaded long enough for chunk reads to have reached it.
+ * Dropping a servable request for want of a node counts against the SLO, unless its chunk left
+ * meanwhile. So does losing a request with its node, and shedding one.
  */
 public final class RecordingOutput implements WorldOutput {
 
@@ -42,7 +43,7 @@ public final class RecordingOutput implements WorldOutput {
 
   private final Simulation sim;
   private final SimWorld world;
-  private final RegionMap regions;
+  private final Supplier<Regions> regions;
   private final List<PathResult> results = new ArrayList<>();
   private final List<Double> latencies = new ArrayList<>();
   private final Map<DropReason, Integer> drops = new EnumMap<>(DropReason.class);
@@ -52,12 +53,16 @@ public final class RecordingOutput implements WorldOutput {
 
   private final List<String> unmatched = new ArrayList<>();
 
+  /** The most chunk reads a full send of every area took so far: a chunk once per area. */
+  private long mostAreaChunks;
+
   private int issued;
   private int lostToRestart;
   private int unservedServable;
   private int answeredOverAir;
 
-  public RecordingOutput(Simulation sim, SimWorld world, RegionMap regions) {
+  /** {@code regions} gives the regions as they are when a request is issued. */
+  public RecordingOutput(Simulation sim, SimWorld world, Supplier<Regions> regions) {
     this.sim = sim;
     this.world = world;
     this.regions = regions;
@@ -77,25 +82,44 @@ public final class RecordingOutput implements WorldOutput {
 
   private boolean servable(WorldEvent.PathRequested request) {
     Pos start = request.start();
-    Region region = regions.regionAt(start.x(), start.z());
+    Region region = regions.get().regionAt(start.x(), start.z());
     MobClass profile = world.mobClass(request.classId());
     if (region == null
         || profile == null
         || !world.contains(start.x(), start.z())
         || !SearchReach.fits(
-            region.minX(),
-            region.minZ(),
-            region.size(),
+            region.areaMinX(),
+            region.areaMinZ(),
+            region.areaSizeX(),
+            region.areaSizeZ(),
             start,
             request.search().maxPathLength(),
             profile.shape().width())) {
       return false;
     }
     long since = world.loadedSince(Chunks.of(start.x()), Chunks.of(start.z()));
-    int readTicks =
-        (world.mostLoaded() + WorldStreams.MAX_CHUNK_READS_PER_TICK - 1)
-            / WorldStreams.MAX_CHUNK_READS_PER_TICK;
-    return since >= 0 && request.tick() - since >= readTicks + SETTLE_TICKS;
+    return since >= 0 && request.tick() - since >= readTicks() + SETTLE_TICKS;
+  }
+
+  /** Ticks the read budget takes to send every area in full, at the most chunks seen loaded. */
+  long readTicks() {
+    long reads = Math.max(world.mostLoaded(), mostAreaChunks);
+    return (reads + WorldStreams.MAX_CHUNK_READS_PER_TICK - 1)
+        / WorldStreams.MAX_CHUNK_READS_PER_TICK;
+  }
+
+  /** A tick ended: counts the chunk reads a full send of every area would take now. */
+  public void tickEnded() {
+    long areaChunks = 0;
+    for (int i = 0; i < world.loadedCount(); i++) {
+      long chunk = world.loadedChunk(i);
+      areaChunks +=
+          regions
+              .get()
+              .reaching((int) (chunk >> 32) * Chunks.SIZE, (int) chunk * Chunks.SIZE)
+              .size();
+    }
+    mostAreaChunks = Math.max(mostAreaChunks, areaChunks);
   }
 
   /** The controller has handled a request, so the older one for its mob must be closed. */
@@ -211,14 +235,16 @@ public final class RecordingOutput implements WorldOutput {
   }
 
   /**
-   * Requests the SLO counts as late: rejected for queue depth, never answered in time, lost with
-   * their node, or servable and dropped for want of a node.
+   * Requests the SLO counts as late: shed, never answered in time, lost with their node, or
+   * servable and dropped for want of a node.
    */
   public long sloMisses() {
-    return dropped(DropReason.QUEUE_DEPTH)
-        + dropped(DropReason.TIMEOUT)
-        + dropped(DropReason.NODE_LOST)
-        + unservedServable;
+    return dropped(DropReason.SHED) + admittedMisses();
+  }
+
+  /** As {@link #sloMisses}, of the requests not shed. */
+  public long admittedMisses() {
+    return dropped(DropReason.TIMEOUT) + dropped(DropReason.NODE_LOST) + unservedServable;
   }
 
   /** Answers the controller accepted although the node searched them over air. */

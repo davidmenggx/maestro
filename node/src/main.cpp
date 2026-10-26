@@ -63,7 +63,7 @@ bool parseNumber(std::string_view Text, T Min, T Max, T &Out) {
 
 // Fills `Opts` from the command line (`Args` includes argv[0]).
 ArgsResult parseArgs(std::span<char *const> Args, Options &Opts) {
-  Opts.Server.Workers = defaultWorkers();
+  Opts.Server.Node.Workers = defaultWorkers();
   for (std::size_t I = 1; I < Args.size(); ++I) {
     const std::string_view Arg = Args[I];
 
@@ -98,8 +98,8 @@ ArgsResult parseArgs(std::span<char *const> Args, Options &Opts) {
       Valid = takePort(Opts.Server.RequestPort);
     } else if (Arg == "--workers") {
       const char *Value = takeValue();
-      Valid =
-          Value && parseNumber<unsigned>(Value, 1, 1024, Opts.Server.Workers);
+      Valid = Value &&
+              parseNumber<unsigned>(Value, 1, 1024, Opts.Server.Node.Workers);
     } else {
       Valid = false;
     }
@@ -135,8 +135,10 @@ int main(int Argc, char **Argv) {
     std::clog << "maestro-node: listening on " << Opts.Server.Bind << ", world "
               << Node.worldPort() << ", control " << Node.controlPort()
               << ", requests " << Node.requestPort() << ", "
-              << Opts.Server.Workers << " workers\n";
+              << Opts.Server.Node.Workers << " workers\n";
     Io.run();
+    std::clog << "maestro-node: stopped after " << Node.searches()
+              << " searches\n";
   } catch (const std::exception &Error) {
     std::cerr << "maestro-node: " << Error.what() << '\n';
     Status = 1;

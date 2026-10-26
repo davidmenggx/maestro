@@ -9,14 +9,22 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.function.Predicate;
 
 /**
  * Which nodes may be sent requests. A node leaves service on either signal: overdue heartbeats by a
  * phi accrual detector (a frozen or cut-off node), or a quiet request path (requests fell due
  * unanswered and none was answered within the tick budget, as with blocked datagrams or answers too
  * late to use). A node out of service gets no requests, so its mobs fall back to the server.
- * Heartbeats alone restore a suspected node. A quiet path is probed once after a backoff that
+ * Heartbeats alone restore a suspected node, but requests that fell due unanswered before still
+ * count toward a quiet path, which may close meanwhile. A quiet path is probed after a backoff that
  * doubles per failed probe, and any answer in time ends it.
+ *
+ * <p>A probe is a {@code PathProbe}, which waits in the node's queue and is answered by a worker
+ * like a request. A node whose path nothing has shown to work for {@link #CHECK_TICKS}, as a spare
+ * or an idle holder, is probed too, and a probe that goes unanswered, with no other answer in time
+ * meanwhile, quiets its path. A node is verified once an answer has come on its current link since
+ * its path last went quiet.
  *
  * <p>The detector uses the controller's clock at transport arrival, so server stalls do not stretch
  * learned intervals. Phi uses {@code StrictMath} so runs replay on every platform.
@@ -64,6 +72,9 @@ public final class NodeHealth {
   /** Ticks a probe has to be answered: sent the next tick, then the tick budget. */
   public static final int PROBE_TICKS = RequestTracker.SEND_TICKS + RequestTracker.MAX_TICKS_LATE;
 
+  /** Ticks with no answer from a node before its path is probed: a second. */
+  public static final int CHECK_TICKS = 20;
+
   private static final long NONE = Long.MIN_VALUE;
 
   /** The request path's circuit. */
@@ -72,9 +83,7 @@ public final class NodeHealth {
     CLOSED,
     /** Quiet: no requests until the backoff ends. */
     OPEN,
-    /** The backoff ended: the next request admitted is the probe. */
-    HALF_OPEN,
-    /** A probe is out, and nothing else is sent until it is answered or its time runs out. */
+    /** The backoff ended and a probe is out. Nothing else is sent until it is answered. */
     PROBING
   }
 
@@ -97,9 +106,15 @@ public final class NodeHealth {
     private int missedCount;
 
     private long reopensAt;
-    private long probeTick;
-    private long probeRequest;
     private int backoff = FIRST_BACKOFF_TICKS;
+
+    /** The probe out and the tick it was sent, or {@link #NONE}. */
+    private long probeRequest = NONE;
+
+    private long probeTick;
+
+    /** The last tick an answer showed the path works, or {@link #NONE} if none has since. */
+    private long verified = NONE;
 
     /** Whether the node was in service at the last {@link NodeHealth#evaluate}, or null before. */
     private Boolean inService;
@@ -186,13 +201,19 @@ public final class NodeHealth {
 
   /**
    * The link is gone, with its heartbeats and the requests the node forgot. The circuit stays as
-   * is.
+   * is, but a probe out is withdrawn: one that ended a backoff is sent again once a link is up.
    */
   void disconnected(NodeId node) {
     Health health = health(node);
     health.lastArrival = NONE;
     health.suspected = false;
     health.forgetMissed();
+    health.verified = NONE;
+    health.probeRequest = NONE;
+    if (health.circuit == Circuit.PROBING) {
+      health.circuit = Circuit.OPEN;
+      health.reopensAt = NONE;
+    }
   }
 
   /**
@@ -206,12 +227,14 @@ public final class NodeHealth {
   }
 
   /**
-   * The node answered in time, so its request path works. A late answer to an abandoned request
-   * does not count.
+   * The node answered in time at {@code tick}, so its request path works, and a check out on it has
+   * its answer. A late answer to an abandoned request does not count.
    */
-  void answered(NodeId node) {
+  void answered(NodeId node, long tick) {
     Health health = health(node);
     health.forgetMissed();
+    health.verified = tick;
+    health.probeRequest = NONE;
     if (health.circuit != Circuit.CLOSED) {
       health.circuit = Circuit.CLOSED;
       health.backoff = FIRST_BACKOFF_TICKS;
@@ -219,52 +242,68 @@ public final class NodeHealth {
     }
   }
 
-  /** Whether the node may be sent a new request now, if it is linked. */
-  boolean admits(NodeId node) {
-    Health health = health(node);
-    return !health.suspected
-        && (health.circuit == Circuit.CLOSED || health.circuit == Circuit.HALF_OPEN);
-  }
-
   /**
-   * Whether requests the node holds may still be answered: not suspected and path not quiet. A
-   * probe out keeps it in service.
+   * Whether the node may be sent requests and still holds those sent: not suspected, with its
+   * request path flowing.
    */
   boolean inService(NodeId node) {
     return inService(health(node));
   }
 
   private static boolean inService(Health health) {
-    return !health.suspected && health.circuit != Circuit.OPEN;
+    return !health.suspected && health.circuit == Circuit.CLOSED;
   }
 
-  /** A request was admitted for the node. While it is half open, that request is its probe. */
-  void admitted(NodeId node, long requestId, long tick) {
-    Health health = health(node);
-    if (health.circuit == Circuit.HALF_OPEN) {
-      health.circuit = Circuit.PROBING;
-      health.probeTick = tick;
-      health.probeRequest = requestId;
-      metrics.count("node.circuit", 1, "node", node.toString(), "state", "probing");
-    }
-  }
-
-  /** Whether the request is the node's probe, which is sent until answered or out of time. */
-  boolean probing(NodeId node, long requestId) {
-    Health health = health(node);
-    return health.circuit == Circuit.PROBING && health.probeRequest == requestId;
+  /** Whether an answer has shown the node's request path works since it last went quiet. */
+  boolean verified(NodeId node) {
+    return health(node).verified != NONE;
   }
 
   /**
-   * A request was given up before it left. If it was the probe, the next admitted request is the
-   * probe.
+   * The nodes to probe now, in fleet order: one whose backoff ended, which then waits for its
+   * probe, and one in service that has not answered for {@link #CHECK_TICKS}. Only {@code
+   * reachable} nodes are probed, and none that is suspected or has a probe out.
    */
-  void withdrawn(NodeId node, long requestId) {
-    Health health = health(node);
-    if (health.circuit == Circuit.PROBING && health.probeRequest == requestId) {
-      health.circuit = Circuit.HALF_OPEN;
-      metrics.count("node.circuit", 1, "node", node.toString(), "state", "half_open");
+  List<NodeId> probesDue(long tick, Predicate<NodeId> reachable) {
+    List<NodeId> due = new ArrayList<>();
+    for (Map.Entry<NodeId, Health> entry : nodes.entrySet()) {
+      NodeId node = entry.getKey();
+      Health health = entry.getValue();
+      if (health.probeRequest != NONE || health.suspected || !reachable.test(node)) {
+        continue;
+      }
+      if (health.circuit == Circuit.OPEN && tick >= health.reopensAt) {
+        health.circuit = Circuit.PROBING;
+        metrics.count("node.circuit", 1, "node", node.toString(), "state", "probing");
+        due.add(node);
+      } else if (health.circuit == Circuit.CLOSED
+          && (health.verified == NONE || tick - health.verified >= CHECK_TICKS)) {
+        metrics.count("node.check", 1, "node", node.toString());
+        due.add(node);
+      }
     }
+    return due;
+  }
+
+  /** {@code requestId} is the probe of a node {@link #probesDue} named, sent at {@code tick}. */
+  void probeSent(NodeId node, long requestId, long tick) {
+    Health health = health(node);
+    health.probeRequest = requestId;
+    health.probeTick = tick;
+  }
+
+  /** The node's probe out, or {@link Long#MIN_VALUE} if none. */
+  long probeOut(NodeId node) {
+    return health(node).probeRequest;
+  }
+
+  /** The probe was answered at {@code tick}. An answer to an earlier probe shows nothing. */
+  void probeAnswered(NodeId node, long requestId, long tick) {
+    Health health = health(node);
+    if (health.probeRequest != requestId) {
+      return;
+    }
+    answered(node, tick);
   }
 
   /**
@@ -286,6 +325,7 @@ public final class NodeHealth {
         }
         health.suspected = suspected;
       }
+      boolean probeLate = health.probeRequest != NONE && tick - health.probeTick > PROBE_TICKS;
       switch (health.circuit) {
         case CLOSED -> {
           TreeMap<Long, Integer> missed = health.missed;
@@ -295,17 +335,14 @@ public final class NodeHealth {
           if (health.missedCount >= QUIET_REQUESTS && tick - missed.firstKey() >= QUIET_TICKS) {
             metrics.count("node.quiet", 1, "node", label);
             open(health, tick, label);
+          } else if (probeLate) {
+            metrics.count("node.check.failed", 1, "node", label);
+            open(health, tick, label);
           }
         }
-        case OPEN -> {
-          if (tick >= health.reopensAt) {
-            health.circuit = Circuit.HALF_OPEN;
-            metrics.count("node.circuit", 1, "node", label, "state", "half_open");
-          }
-        }
-        case HALF_OPEN -> {}
+        case OPEN -> {}
         case PROBING -> {
-          if (tick - health.probeTick > PROBE_TICKS) {
+          if (probeLate) {
             health.backoff = Math.min(2 * health.backoff, MAX_BACKOFF_TICKS);
             open(health, tick, label);
           }
@@ -315,8 +352,8 @@ public final class NodeHealth {
       if (health.inService == null || inService != health.inService) {
         metrics.gauge("node.in_service", inService ? 1 : 0, "node", label);
         if (!inService) {
-          // Its requests are canceled now, so unanswered ones show nothing.
-          health.forgetMissed();
+          // Its live requests are canceled now, so they show nothing. Those that fell due
+          // unanswered before still do, even if heartbeats bring the node back first.
           lost.add(node);
         }
       }
@@ -328,6 +365,8 @@ public final class NodeHealth {
   private void open(Health health, long tick, String label) {
     health.circuit = Circuit.OPEN;
     health.reopensAt = tick + health.backoff;
+    health.probeRequest = NONE;
+    health.verified = NONE;
     health.forgetMissed();
     metrics.count("node.circuit", 1, "node", label, "state", "open");
   }

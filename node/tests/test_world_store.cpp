@@ -14,6 +14,9 @@
 #include "maestro/search/vanilla_search.hpp"
 #include "test_world.hpp"
 
+using maestro::test::applyBytes;
+using maestro::test::clearedChunk;
+using maestro::test::delta;
 using maestro::test::DenseWorld;
 using maestro::test::Fence;
 using maestro::test::Frame;
@@ -45,6 +48,25 @@ void load(WorldStore &Store, const DenseWorld &World) {
     for (int Z = 0; Z < 2; ++Z)
       ASSERT_EQ(test::applyBytes(Store, World.chunk(Sequence++, X, Z)),
                 ApplyStatus::Applied);
+}
+
+/// As `load`, for region `RegionId`.
+void loadRegion(WorldStore &Store, const DenseWorld &World,
+                std::uint32_t RegionId) {
+  ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 1, RegionId, 0)),
+            ApplyStatus::Applied);
+  std::uint64_t Sequence = 1;
+  for (int X = 0; X < 2; ++X)
+    for (int Z = 0; Z < 2; ++Z)
+      ASSERT_EQ(test::applyBytes(Store, World.chunk(Sequence++, X, Z)),
+                ApplyStatus::Applied);
+}
+
+/// An assignment keeping region `From` of `Run` at `Sequence` as `RegionId`,
+/// cut down to `To`.
+Frame kept(Geometry To, std::uint64_t Run, std::uint32_t RegionId,
+           std::uint32_t From, std::uint64_t Sequence, bool Resume = false) {
+  return test::assignmentFrame(To, Run, RegionId, Resume, Sequence, From);
 }
 
 /// A chunk frame at chunk (0, 0), or with no position if `Positioned` is
@@ -82,15 +104,9 @@ Frame uniformChunk(std::uint64_t Sequence,
   return chunkFrame(Sequence, Counts, All);
 }
 
-Frame assignmentOf(int Size, int MinY, int Height) {
-  flatbuffers::FlatBufferBuilder Builder;
-  const auto Body = fbs::CreateRegionAssignment(
-      Builder, 1, 0, static_cast<std::uint16_t>(Size), MinY,
-      static_cast<std::uint16_t>(Height), false);
-  Builder.Finish(fbs::CreateWorldFrame(Builder, fbs::WorldMsg::RegionAssignment,
-                                       Body.Union()));
-  return {Builder.GetBufferPointer(),
-          Builder.GetBufferPointer() + Builder.GetSize()};
+Frame assignmentOf(int SizeX, int SizeZ, int MinY, int Height) {
+  return test::assignmentFrame(Geometry{SizeX, SizeZ, MinY, Height}, 1, 1,
+                               false, 0);
 }
 
 /// Applies `Bad` to a store holding `flatWorld` and checks it is refused with
@@ -128,7 +144,7 @@ TEST(WorldStore, AnAssignmentStartsTheAreaAsAir) {
             ApplyStatus::Applied);
   const auto Held = Store.pin();
   ASSERT_NE(Held, nullptr);
-  EXPECT_EQ(Held->geometry(), (Geometry{32, 0, 24}));
+  EXPECT_EQ(Held->geometry(), (Geometry{32, 32, 0, 24}));
   EXPECT_EQ(Held->at(5, 1, 5), Air);
   EXPECT_EQ(Held->run(), 9u);
   EXPECT_EQ(Held->regionId(), 4u);
@@ -179,7 +195,7 @@ TEST(WorldStore, TheFirstFrameFollowsTheAssignment) {
   const DenseWorld World = flatWorld();
   WorldStore Store;
   // Sequences continue across a reassignment; the assignment gives where.
-  ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 1, 0, 40)),
+  ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 1, 1, 40)),
             ApplyStatus::Applied);
   EXPECT_EQ(test::applyBytes(Store, World.chunk(41, 0, 0)),
             ApplyStatus::Applied);
@@ -194,7 +210,7 @@ TEST(WorldStore, AFirstFrameThatSkipsPastTheAssignmentIsRefused) {
   const DenseWorld World = flatWorld();
   for (const std::uint64_t First : {40u, 42u}) {
     WorldStore Store;
-    ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 1, 0, 40)),
+    ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 1, 1, 40)),
               ApplyStatus::Applied);
     EXPECT_EQ(test::applyBytes(Store, World.chunk(First, 0, 0)),
               ApplyStatus::OutOfSequence)
@@ -258,7 +274,7 @@ TEST(WorldStore, AFreshAssignmentDropsWhatIsHeld) {
   const DenseWorld World = flatWorld();
   WorldStore Store;
   load(Store, World);
-  ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 2, 0, 89)),
+  ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 2, 1, 89)),
             ApplyStatus::Applied);
   EXPECT_EQ(Store.pin()->at(0, 0, 0), Air);
   EXPECT_EQ(sequenceOf(Store), 89u);
@@ -273,25 +289,40 @@ TEST(WorldStore, AnAssignmentOfRunZeroIsRefused) {
   EXPECT_EQ(test::applyBytes(Empty, World.assignment(false, /*Run=*/0)),
             ApplyStatus::Malformed);
   EXPECT_EQ(Empty.pin(), nullptr);
-  expectRefusedAndReset(World.assignment(false, /*Run=*/0, 0, 4),
+  expectRefusedAndReset(World.assignment(false, /*Run=*/0, 1, 4),
                         ApplyStatus::Malformed);
-  expectRefusedAndReset(World.assignment(true, /*Run=*/0, 0, 4),
+  expectRefusedAndReset(World.assignment(true, /*Run=*/0, 1, 4),
+                        ApplyStatus::Malformed);
+}
+
+TEST(WorldStore, AnAssignmentOfRegionZeroIsRefused) {
+  const DenseWorld World = flatWorld();
+  WorldStore Empty;
+  EXPECT_EQ(test::applyBytes(Empty, World.assignment(false, 1, /*RegionId=*/0)),
+            ApplyStatus::Malformed);
+  EXPECT_EQ(Empty.pin(), nullptr);
+  expectRefusedAndReset(World.assignment(false, 1, /*RegionId=*/0, 4),
+                        ApplyStatus::Malformed);
+  expectRefusedAndReset(World.assignment(true, 1, /*RegionId=*/0, 4),
+                        ApplyStatus::Malformed);
+  // Kept as region 0, from the region held.
+  expectRefusedAndReset(kept(Geometry{32, 16, 0, 24}, 1, 0, 1, 4),
                         ApplyStatus::Malformed);
 }
 
 TEST(WorldStore, AFreshAssignmentBehindTheStreamHeldIsRefused) {
   const DenseWorld World = flatWorld();
-  // `load` leaves the store at sequence 4 of run 1, region 0.
-  expectRefusedAndReset(World.assignment(false, 1, 0, /*Sequence=*/3),
+  // `load` leaves the store at sequence 4 of run 1, region 1.
+  expectRefusedAndReset(World.assignment(false, 1, 1, /*Sequence=*/3),
                         ApplyStatus::Behind);
-  expectRefusedAndReset(World.assignment(false, 1, 0, /*Sequence=*/0),
+  expectRefusedAndReset(World.assignment(false, 1, 1, /*Sequence=*/0),
                         ApplyStatus::Behind);
 
   // Where the stream stands, or past it, starts the area over.
   for (const std::uint64_t Sequence : {4u, 9u}) {
     WorldStore Store;
     load(Store, World);
-    ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 1, 0, Sequence)),
+    ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 1, 1, Sequence)),
               ApplyStatus::Applied)
         << Sequence;
     EXPECT_EQ(Store.pin()->at(0, 0, 0), Air);
@@ -299,7 +330,7 @@ TEST(WorldStore, AFreshAssignmentBehindTheStreamHeldIsRefused) {
   }
 
   // Another run's or another region's stream may stand anywhere.
-  EXPECT_EQ(applyToLoaded(World.assignment(false, 2, 0, 1)),
+  EXPECT_EQ(applyToLoaded(World.assignment(false, 2, 1, 1)),
             ApplyStatus::Applied);
   EXPECT_EQ(applyToLoaded(World.assignment(false, 1, 3, 1)),
             ApplyStatus::Applied);
@@ -310,7 +341,7 @@ TEST(WorldStore, AResumeKeepsWhatIsHeldAndContinuesTheStream) {
   WorldStore Store;
   load(Store, World);
   const auto Held = Store.pin();
-  ASSERT_EQ(test::applyBytes(Store, World.assignment(true, 1, 0, 4)),
+  ASSERT_EQ(test::applyBytes(Store, World.assignment(true, 1, 1, 4)),
             ApplyStatus::Applied);
   EXPECT_EQ(Store.pin(), Held);
   EXPECT_EQ(test::applyBytes(Store, World.chunk(5, 0, 0)),
@@ -334,15 +365,15 @@ TEST(WorldStore, AResumeOfAStreamNotHeldIsRefused) {
 
   // Another run, another region, another shape, and another position in the
   // stream. `load` leaves the store at sequence 4.
-  expectRefusedAndReset(World.assignment(true, /*Run=*/2, 0, 4),
+  expectRefusedAndReset(World.assignment(true, /*Run=*/2, 1, 4),
                         ApplyStatus::CannotResume);
   expectRefusedAndReset(World.assignment(true, 1, /*RegionId=*/3, 4),
                         ApplyStatus::CannotResume);
-  expectRefusedAndReset(DenseWorld(48, 0, 24).assignment(true, 1, 0, 4),
+  expectRefusedAndReset(DenseWorld(48, 0, 24).assignment(true, 1, 1, 4),
                         ApplyStatus::CannotResume);
-  expectRefusedAndReset(World.assignment(true, 1, 0, /*Sequence=*/3),
+  expectRefusedAndReset(World.assignment(true, 1, 1, /*Sequence=*/3),
                         ApplyStatus::CannotResume);
-  expectRefusedAndReset(World.assignment(true, 1, 0, /*Sequence=*/5),
+  expectRefusedAndReset(World.assignment(true, 1, 1, /*Sequence=*/5),
                         ApplyStatus::CannotResume);
 }
 
@@ -353,7 +384,7 @@ TEST(WorldStore, AfterARejectionTheNextStreamStartsClean) {
   ASSERT_EQ(test::applyBytes(Store, World.chunk(9, 0, 0)),
             ApplyStatus::OutOfSequence);
   // What the controller sends a node whose `Hello` reported nothing held.
-  ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 1, 0, 19)),
+  ASSERT_EQ(test::applyBytes(Store, World.assignment(false, 1, 1, 19)),
             ApplyStatus::Applied);
   ASSERT_EQ(test::applyBytes(Store, World.chunk(20, 0, 0)),
             ApplyStatus::Applied);
@@ -368,15 +399,119 @@ TEST(WorldStore, RejectsBytesThatAreNotAFrame) {
 }
 
 TEST(WorldStore, RejectsAnAreaThatDoesNotTileIntoChunks) {
-  expectRefusedAndReset(assignmentOf(24, 0, 24), ApplyStatus::Malformed);
-  expectRefusedAndReset(assignmentOf(0, 0, 24), ApplyStatus::Malformed);
-  expectRefusedAndReset(assignmentOf(32, 0, 0), ApplyStatus::Malformed);
-  // Wire positions are shorts, so the top of the area must fit in one.
-  expectRefusedAndReset(assignmentOf(32, 32700, 100), ApplyStatus::Malformed);
+  expectRefusedAndReset(assignmentOf(24, 32, 0, 24), ApplyStatus::Malformed);
+  expectRefusedAndReset(assignmentOf(32, 24, 0, 24), ApplyStatus::Malformed);
+  expectRefusedAndReset(assignmentOf(0, 32, 0, 24), ApplyStatus::Malformed);
+  expectRefusedAndReset(assignmentOf(32, 0, 0, 24), ApplyStatus::Malformed);
+  expectRefusedAndReset(assignmentOf(32, 32, 0, 0), ApplyStatus::Malformed);
+  // Wire positions are shorts, so each side must fit in one.
+  expectRefusedAndReset(assignmentOf(32768, 32, 0, 24), ApplyStatus::Malformed);
+  expectRefusedAndReset(assignmentOf(32, 32768, 0, 24), ApplyStatus::Malformed);
+  // So must the top of the area.
+  expectRefusedAndReset(assignmentOf(32, 32, 32700, 100),
+                        ApplyStatus::Malformed);
   // Even when the sum would overflow an `int`.
   expectRefusedAndReset(
-      assignmentOf(32, std::numeric_limits<int>::max() - 10, 100),
+      assignmentOf(32, 32, std::numeric_limits<int>::max() - 10, 100),
       ApplyStatus::Malformed);
+}
+
+TEST(WorldStore, HoldsARectangularArea) {
+  DenseWorld World(64, 32, 0, 24);
+  World.fill(48, 0, 16, 63, 3, 31, Stone);
+  WorldStore Store;
+  ASSERT_EQ(applyBytes(Store, World.assignment()), ApplyStatus::Applied);
+  ASSERT_EQ(applyBytes(Store, World.chunk(1, 3, 1)), ApplyStatus::Applied);
+  const CellEdit Edit{63, 5, 31, Water};
+  ASSERT_EQ(applyBytes(Store, delta(2, std::span(&Edit, 1))),
+            ApplyStatus::Applied);
+  const auto Held = Store.pin();
+  EXPECT_EQ(Held->geometry(), (Geometry{64, 32, 0, 24}));
+  EXPECT_EQ(Held->at(63, 3, 31), Stone);
+  EXPECT_EQ(Held->at(63, 5, 31), Water);
+  EXPECT_EQ(Held->at(31, 3, 31), Air);
+  // Past the shorter side reads as air, as past any edge.
+  EXPECT_EQ(Held->at(16, 3, 32), Air);
+  EXPECT_EQ(Held->column(16, 32), nullptr);
+
+  // The last chunk along the shorter side is inside, and the next is outside.
+  EXPECT_EQ(applyBytes(Store, World.chunk(3, 1, 1)), ApplyStatus::Applied);
+  WorldStore Other;
+  ASSERT_EQ(applyBytes(Other, World.assignment()), ApplyStatus::Applied);
+  EXPECT_EQ(applyBytes(Other, clearedChunk(1, 1, 2)), ApplyStatus::Malformed);
+  // And so is a cell past it.
+  ASSERT_EQ(applyBytes(Other, World.assignment()), ApplyStatus::Applied);
+  const CellEdit Outside{1, 1, 32, Water};
+  EXPECT_EQ(applyBytes(Other, delta(1, std::span(&Outside, 1))),
+            ApplyStatus::Malformed);
+}
+
+TEST(WorldStore, AFreshAssignmentOfAnotherRegionReplacesTheAreaEvenBehindIt) {
+  // `load` leaves the store at sequence 4 of run 1, region 1.
+  WorldStore Store;
+  load(Store, flatWorld());
+  const DenseWorld Other(16, 32, 0, 24);
+  ASSERT_EQ(test::applyBytes(Store, Other.assignment(false, 1, 5, 0)),
+            ApplyStatus::Applied);
+  const auto Held = Store.pin();
+  EXPECT_EQ(Held->regionId(), 5u);
+  EXPECT_EQ(Held->sequence(), 0u);
+  EXPECT_EQ(Held->geometry(), Other.geometry());
+  EXPECT_EQ(Held->at(5, 3, 5), Air);
+}
+
+TEST(WorldStore, AKeptAssignmentCropsTheAreaAndGoesOnWithTheStream) {
+  DenseWorld World = flatWorld();
+  World.set(5, 4, 5, Water);
+  World.set(20, 4, 20, Water);
+  for (const Geometry To : {Geometry{32, 16, 0, 24}, Geometry{16, 32, 0, 24}}) {
+    WorldStore Store;
+    loadRegion(Store, World, 3);
+    ASSERT_EQ(test::applyBytes(Store, kept(To, 1, 7, 3, 4)),
+              ApplyStatus::Applied);
+    const auto Held = Store.pin();
+    EXPECT_EQ(Held->geometry(), To);
+    EXPECT_EQ(Held->run(), 1u);
+    EXPECT_EQ(Held->regionId(), 7u);
+    EXPECT_EQ(Held->sequence(), 4u);
+    // What lies inside is kept where it was; the rest reads as air.
+    EXPECT_EQ(Held->at(5, 4, 5), Water);
+    EXPECT_EQ(Held->at(To.SizeX - 1, 3, To.SizeZ - 1), Stone);
+    EXPECT_EQ(Held->at(20, 4, 20), Air);
+    EXPECT_EQ(Held->column(20, 20), nullptr);
+
+    const CellEdit Inside{10, 5, 10, Water};
+    ASSERT_EQ(test::applyBytes(Store, test::delta(5, {&Inside, 1})),
+              ApplyStatus::Applied);
+    EXPECT_EQ(Store.pin()->at(10, 5, 10), Water);
+    const CellEdit Past{20, 5, 20, Water};
+    EXPECT_EQ(test::applyBytes(Store, test::delta(6, {&Past, 1})),
+              ApplyStatus::Malformed);
+  }
+}
+
+TEST(WorldStore, AKeptAssignmentOfAnyOtherStreamPositionOrShapeIsRefused) {
+  const Geometry Half{32, 16, 0, 24};
+  // The store holds run 1, region 3, at sequence 4, in a 32 by 32 area.
+  const auto Refused = [](const Frame &Bad, ApplyStatus Expected) {
+    WorldStore Store;
+    loadRegion(Store, flatWorld(), 3);
+    EXPECT_EQ(test::applyBytes(Store, Bad), Expected);
+    EXPECT_EQ(Store.pin(), nullptr);
+  };
+  Refused(kept(Half, 1, 7, 9, 4), ApplyStatus::CannotKeep);
+  Refused(kept(Half, 2, 7, 3, 4), ApplyStatus::CannotKeep);
+  Refused(kept(Half, 1, 7, 3, 3), ApplyStatus::CannotKeep);
+  Refused(kept(Half, 1, 7, 3, 5), ApplyStatus::CannotKeep);
+  Refused(kept(Geometry{48, 16, 0, 24}, 1, 7, 3, 4), ApplyStatus::CannotKeep);
+  Refused(kept(Geometry{32, 16, 0, 20}, 1, 7, 3, 4), ApplyStatus::CannotKeep);
+  Refused(kept(Geometry{32, 16, -16, 40}, 1, 7, 3, 4), ApplyStatus::CannotKeep);
+  Refused(kept(Half, 1, 7, 3, 4, /*Resume=*/true), ApplyStatus::Malformed);
+
+  WorldStore Empty;
+  EXPECT_EQ(test::applyBytes(Empty, kept(Half, 1, 7, 3, 0)),
+            ApplyStatus::CannotKeep);
+  EXPECT_EQ(Empty.pin(), nullptr);
 }
 
 TEST(WorldStore, RejectsChunksThatBreakTheContract) {

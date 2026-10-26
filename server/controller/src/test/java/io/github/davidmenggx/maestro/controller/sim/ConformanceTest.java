@@ -96,7 +96,8 @@ class ConformanceTest {
   private static String describe(Effect effect) {
     return switch (effect.kind()) {
       case EffectKind.Hello -> hello(effect.run(), effect.regionId(), effect.sequence());
-      case EffectKind.Heartbeat -> "heartbeat depth=" + effect.depth();
+      case EffectKind.Heartbeat ->
+          "heartbeat depth=" + effect.depth() + " searches=" + effect.searches();
       case EffectKind.Answer -> answer(effect.requestId(), effect.run(), effect.sequence());
       case EffectKind.UnknownProfile -> unknownProfile(effect.requestId(), effect.run());
       case EffectKind.LinkDropped -> "link dropped";
@@ -138,7 +139,8 @@ class ConformanceTest {
           effects.add(hello(hello.run(), hello.regionId(), hello.lastSequence()));
         } else {
           Heartbeat heartbeat = (Heartbeat) reply.body(new Heartbeat());
-          effects.add("heartbeat depth=" + heartbeat.queueDepth());
+          effects.add(
+              "heartbeat depth=" + heartbeat.queueDepth() + " searches=" + heartbeat.searches());
         }
         return;
       }

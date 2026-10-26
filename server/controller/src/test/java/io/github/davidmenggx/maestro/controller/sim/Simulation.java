@@ -20,6 +20,7 @@ import java.util.function.Consumer;
 import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 import maestro.fbs.ChunkSnapshot;
+import maestro.fbs.PathProbe;
 import maestro.fbs.PathRequestBatch;
 import maestro.fbs.RegionAssignment;
 import maestro.fbs.RequestFrame;
@@ -50,6 +51,9 @@ public final class Simulation {
 
   /** A server that works the whole tick still leaves its last step for the fleet. */
   static final int MAX_BUSY_STEPS = STEPS_PER_TICK - 2;
+
+  /** Most steps an offload job takes, such as encoding a batch handed over at a tick's end. */
+  static final int MAX_OFFLOAD_STEPS = 40;
 
   /** A slow tick works between one and this many ticks' worth of steps. */
   static final int MAX_SLOW_TICKS = 3;
@@ -278,9 +282,17 @@ public final class Simulation {
     failOpen.linkLost(node, env.run(), tick);
   }
 
-  /** Records each request a request frame to {@code node} carries, for {@link FailOpenCheck}. */
+  /**
+   * Records each request or probe a request frame to {@code node} carries, for {@link
+   * FailOpenCheck}.
+   */
   void requestFrameSent(NodeId node, byte[] bytes) {
     RequestFrame frame = RequestFrame.getRootAsRequestFrame(ByteBuffer.wrap(bytes));
+    if (frame.bodyType() == RequestMsg.PathProbe) {
+      PathProbe probe = (PathProbe) frame.body(new PathProbe());
+      failOpen.probeSent(node, frame.run(), probe.requestId(), tick);
+      return;
+    }
     if (frame.bodyType() != RequestMsg.PathRequestBatch) {
       return;
     }
@@ -504,16 +516,15 @@ public final class Simulation {
   }
 
   /**
-   * Work and its completion run at the first hand-over after it finishes, so a result never reaches
-   * the controller inside the submitting call. Failures report at the same point. Jobs of a
-   * restarted process report nothing. The lane is ignored.
+   * A job's work runs on its worker when it finishes, between hand-overs, so a job that sends does
+   * so then. Its completion runs at the next hand-over, so a result never reaches the controller
+   * inside the submitting call. Failures report at the same point. Jobs of a restarted process
+   * neither run nor report. The lane is ignored.
    */
   private final class SimOffload implements Offload {
 
     /** Encodes take tens of microseconds. At least one step, so work never finishes at submit. */
     private static final int MIN_WORK_STEPS = 2;
-
-    private static final int MAX_WORK_STEPS = 40;
 
     private final int process;
 
@@ -524,7 +535,8 @@ public final class Simulation {
     @Override
     public <T> void submit(
         String name, Lane lane, Supplier<T> work, Consumer<T> completion, Runnable failure) {
-      long ready = now + MIN_WORK_STEPS + offloadRng.nextInt(MAX_WORK_STEPS - MIN_WORK_STEPS + 1);
+      long ready =
+          now + MIN_WORK_STEPS + offloadRng.nextInt(MAX_OFFLOAD_STEPS - MIN_WORK_STEPS + 1);
       metrics.count("offload.submitted", 1, "job", name);
       // Drawn only if failures are possible, so other runs replay unchanged.
       if (tick < settleFrom
@@ -535,24 +547,31 @@ public final class Simulation {
             new Scheduled(ready, order++, "offload-failed:" + name, () -> live(failure)));
         return;
       }
-      finishedWork.add(
+      queue.add(
           new Scheduled(
               ready,
               order++,
-              "offload:" + name,
-              () ->
-                  live(
-                      () -> {
-                        T result;
-                        try {
-                          result = work.get();
-                        } catch (RuntimeException e) {
-                          metrics.count("offload.threw", 1, "job", name);
-                          failure.run();
-                          return;
-                        }
-                        completion.accept(result);
-                      })));
+              "offload-run:" + name,
+              () -> {
+                if (process != incarnation) {
+                  return;
+                }
+                T result;
+                try {
+                  result = work.get();
+                } catch (RuntimeException e) {
+                  metrics.count("offload.threw", 1, "job", name);
+                  finishedWork.add(
+                      new Scheduled(now, order++, "offload-threw:" + name, () -> live(failure)));
+                  return;
+                }
+                finishedWork.add(
+                    new Scheduled(
+                        now,
+                        order++,
+                        "offload:" + name,
+                        () -> live(() -> completion.accept(result))));
+              }));
     }
 
     private void live(Runnable action) {

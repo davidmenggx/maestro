@@ -111,17 +111,34 @@ ApplyStatus WorldStore::applyFrame(const fbs::WorldFrame &Frame) {
 }
 
 ApplyStatus WorldStore::assign(const fbs::RegionAssignment &Assignment) {
-  const Geometry Geo{Assignment.size(), Assignment.min_y(),
-                     Assignment.height()};
+  const Geometry Geo{Assignment.size_x(), Assignment.size_z(),
+                     Assignment.min_y(), Assignment.height()};
   // Wire positions are shorts, so the area must fit in one.
   constexpr int ShortMin = std::numeric_limits<std::int16_t>::min();
   constexpr int ShortMax = std::numeric_limits<std::int16_t>::max();
-  if (Assignment.run() == 0 || Geo.Size <= 0 || Geo.Size % ChunkSize != 0 ||
-      Geo.Size > ShortMax || Geo.Height <= 0 || Geo.MinY < ShortMin ||
-      std::int64_t{Geo.MinY} + Geo.Height - 1 > ShortMax)
+  const auto Side = [](int Size) {
+    return Size > 0 && Size % ChunkSize == 0 && Size <= ShortMax;
+  };
+  // Region 0 is none on the wire, and probes name it.
+  if (Assignment.run() == 0 || Assignment.region_id() == 0 ||
+      !Side(Geo.SizeX) || !Side(Geo.SizeZ) || Geo.Height <= 0 ||
+      Geo.MinY < ShortMin || std::int64_t{Geo.MinY} + Geo.Height - 1 > ShortMax)
     return ApplyStatus::Malformed;
 
   const auto Held = pin();
+  if (Assignment.from_region_id() != 0) {
+    if (Assignment.resume())
+      return ApplyStatus::Malformed;
+    // Keeping goes on with the stream held, under a new id, in part of its
+    // area. Positions do not move, since the corner is the same.
+    if (!Held || Held->run() != Assignment.run() ||
+        Held->regionId() != Assignment.from_region_id() ||
+        Held->sequence() != Assignment.sequence() ||
+        !Held->geometry().holds(Geo))
+      return ApplyStatus::CannotKeep;
+    Current.store(Held->cropped(Geo, Assignment.region_id()));
+    return ApplyStatus::Applied;
+  }
   const bool SameStream = Held && Held->run() == Assignment.run() &&
                           Held->regionId() == Assignment.region_id();
   if (Assignment.resume()) {
@@ -147,9 +164,9 @@ ApplyStatus WorldStore::applyChunk(const fbs::ChunkSnapshot &Snapshot) {
     return ApplyStatus::Unassigned;
 
   const auto *Position = Snapshot.chunk_xz();
-  const int PerSide = Held->geometry().chunksPerSide();
-  if (!Position || Position->x() < 0 || Position->x() >= PerSide ||
-      Position->z() < 0 || Position->z() >= PerSide)
+  const Geometry &Geo = Held->geometry();
+  if (!Position || Position->x() < 0 || Position->x() >= Geo.chunksX() ||
+      Position->z() < 0 || Position->z() >= Geo.chunksZ())
     return ApplyStatus::Malformed;
 
   bool Malformed = false;

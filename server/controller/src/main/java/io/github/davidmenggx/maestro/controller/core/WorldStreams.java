@@ -5,13 +5,14 @@ import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Offload;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.region.Region;
-import io.github.davidmenggx.maestro.controller.region.RegionMap;
+import io.github.davidmenggx.maestro.controller.region.Regions;
 import io.github.davidmenggx.maestro.controller.wire.Frames;
 import io.github.davidmenggx.maestro.controller.wire.Reply;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldSource;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -22,9 +23,11 @@ import java.util.TreeMap;
 import java.util.function.Supplier;
 
 /**
- * The world stream of each region: one log of sequence-numbered frames and each holder's place in
- * it. The log belongs to the region, so it survives reconnects and its sequence keeps rising across
- * resnapshots. Every holder is sent the same frames.
+ * The world stream of each region's area: one log of sequence-numbered frames and each holder's
+ * place in it. The log belongs to the region, so it survives reconnects and holder changes, and its
+ * sequence keeps rising across resnapshots. Every holder is sent the same sequence. A chunk read
+ * only because some holders lack it reaches the others as an empty delta, so a holder starting over
+ * costs the rest nothing. A chunk in the halo of several regions goes to each of their logs.
  *
  * <p>Encodes can finish out of order but frames leave in sequence order, so finished frames wait
  * for the gap before them. A frame whose encode keeps failing starts the region's log over.
@@ -56,6 +59,21 @@ public final class WorldStreams {
     private final Map<Long, Long> resident = new LinkedHashMap<>();
   }
 
+  /**
+   * A produced frame. Holders in {@code skipping} already hold its chunk as it is, so they are sent
+   * {@code skip}, an empty delta of the same sequence, instead of {@code full}.
+   */
+  private record Frame(byte[] full, byte[] skip, Set<NodeId> skipping) {
+
+    static Frame plain(byte[] full) {
+      return new Frame(full, null, Collections.emptySet());
+    }
+
+    byte[] bytesFor(NodeId node) {
+      return skipping.contains(node) ? skip : full;
+    }
+  }
+
   private static final class Log {
 
     private final Region region;
@@ -75,10 +93,13 @@ public final class WorldStreams {
     /** Highest sequence dropped from {@link #frames}. Resuming before it is impossible. */
     private long evicted;
 
-    private final TreeMap<Long, byte[]> frames = new TreeMap<>();
+    private final TreeMap<Long, Frame> frames = new TreeMap<>();
 
-    /** Chunks whose state changed and has not been read. */
+    /** Chunks to read: their residency changed, or a holder lacks them. */
     private final Set<Long> dirty = new LinkedHashSet<>();
+
+    /** Chunks of {@link #dirty} whose residency changed, which every holder is sent in full. */
+    private final Set<Long> stale = new LinkedHashSet<>();
 
     private final Map<NodeId, Holder> holders = new LinkedHashMap<>();
 
@@ -89,7 +110,7 @@ public final class WorldStreams {
 
   private final ControllerEnv env;
   private final WorldSource world;
-  private final RegionMap regions;
+  private final Regions regions;
   private final NodeLinks links;
   private final Encoder encoder;
   private final Violations violations;
@@ -107,7 +128,7 @@ public final class WorldStreams {
   WorldStreams(
       ControllerEnv env,
       WorldSource world,
-      RegionMap regions,
+      Regions regions,
       NodeLinks links,
       Encoder encoder,
       Violations violations,
@@ -120,18 +141,118 @@ public final class WorldStreams {
     this.violations = violations;
     this.run = run;
     for (Region region : regions.regions()) {
-      Log log = new Log(region);
+      Log log = addLog(region);
       for (NodeId node : regions.holders(region.id())) {
         log.holders.put(node, new Holder());
       }
-      logs.put(region.id(), log);
+    }
+  }
+
+  /** A new region, whose log starts empty. Its loaded chunks are read for its first holder. */
+  private Log addLog(Region region) {
+    Log log = new Log(region);
+    logs.put(region.id(), log);
+    markArea(log);
+    return log;
+  }
+
+  /**
+   * {@code parent} was cut and its holders hold {@code lower}, whose area has the parent's corner
+   * and lies inside its area. A greeted holder sent every frame the parent's log produced keeps
+   * what it holds there, and the lower half's log goes on from the parent's sequence. Other holders
+   * start the lower half over. The upper half starts empty.
+   */
+  void split(Region parent, Region lower, Region upper) {
+    if (lower.minX() != parent.minX() || lower.minZ() != parent.minZ()) {
+      throw new IllegalArgumentException(lower + " does not share the corner of " + parent);
+    }
+    Log old = logs.remove(parent.id());
+    Log kept = new Log(lower);
+    logs.put(lower.id(), kept);
+    // Frames of the parent's log still encoding never reach the lower half's holders.
+    kept.lastSequence = old.lastSequence;
+    kept.ready = old.lastSequence;
+    kept.logBase = old.lastSequence + 1;
+    kept.evicted = old.lastSequence;
+    for (long key : old.dirty) {
+      if (inArea(lower, key)) {
+        kept.dirty.add(key);
+      }
+    }
+    for (long key : old.stale) {
+      if (inArea(lower, key)) {
+        kept.stale.add(key);
+      }
+    }
+    for (Map.Entry<NodeId, Holder> entry : old.holders.entrySet()) {
+      NodeId node = entry.getKey();
+      Holder was = entry.getValue();
+      Holder holder = new Holder();
+      kept.holders.put(node, holder);
+      if (!links.greeted(node)) {
+        // It starts over when it greets, since it reports holding the parent.
+        continue;
+      }
+      if (was.nextToSend == old.lastSequence + 1) {
+        env.metrics().count("world.kept", 1, "node", node.toString());
+        holder.nextToSend = was.nextToSend;
+        for (Map.Entry<Long, Long> chunk : was.resident.entrySet()) {
+          if (inArea(lower, chunk.getKey())) {
+            holder.resident.put(chunk.getKey(), chunk.getValue());
+          }
+        }
+        links.send(
+            node,
+            Channel.WORLD,
+            Frames.keptAssignment(
+                run,
+                lower.id(),
+                parent.id(),
+                lower.areaSizeX(),
+                lower.areaSizeZ(),
+                kept.lastSequence,
+                world));
+      } else {
+        env.metrics().count("world.resnapshot", 1, "node", node.toString());
+        startOver(kept, holder);
+        sendAssignment(kept, node, kept.lastSequence, false);
+      }
+    }
+    // A frame of the parent's log that finishes encoding later goes to no one.
+    old.holders.clear();
+    addLog(upper);
+  }
+
+  private static boolean inArea(Region region, long chunk) {
+    return region.inArea((int) (chunk >> 32) * Chunks.SIZE, (int) chunk * Chunks.SIZE);
+  }
+
+  /**
+   * {@code node}, which is linked, holds the region from now on. It starts over from where the log
+   * stands.
+   */
+  void holderAdded(int regionId, NodeId node) {
+    Log log = logs.get(regionId);
+    Holder holder = new Holder();
+    log.holders.put(node, holder);
+    env.metrics().count("world.resnapshot", 1, "node", node.toString());
+    startOver(log, holder);
+    sendAssignment(log, node, log.lastSequence, false);
+    drain(log);
+  }
+
+  /** {@code node} no longer holds the region and is sent none of its frames. */
+  void holderRemoved(int regionId, NodeId node) {
+    Log log = logs.get(regionId);
+    if (log != null) {
+      log.holders.remove(node);
     }
   }
 
   /** The sequence a holder reports once it has applied everything produced for its region. */
   long heldSequence(NodeId node) {
     int region = regions.regionOf(node);
-    return region == RegionMap.NONE ? 0 : logs.get(region).lastSequence;
+    return region == Regions.NONE ? 0 : logs.get(region).lastSequence;
   }
 
   /**
@@ -145,7 +266,7 @@ public final class WorldStreams {
   /** The sequence from which the node has the chunk resident, or null if it holds air there. */
   Long residentSince(NodeId node, long chunk) {
     int region = regions.regionOf(node);
-    return region == RegionMap.NONE ? null : logs.get(region).holders.get(node).resident.get(chunk);
+    return region == Regions.NONE ? null : logs.get(region).holders.get(node).resident.get(chunk);
   }
 
   void blockChanged(WorldEvent.BlockChanged change) {
@@ -159,9 +280,10 @@ public final class WorldStreams {
     if (!changed) {
       return;
     }
-    Region region = regions.regionAt(chunkX * Chunks.SIZE, chunkZ * Chunks.SIZE);
-    if (region != null) {
-      logs.get(region.id()).dirty.add(key);
+    for (Region region : regions.reaching(chunkX * Chunks.SIZE, chunkZ * Chunks.SIZE)) {
+      Log log = logs.get(region.id());
+      log.dirty.add(key);
+      log.stale.add(key);
     }
   }
 
@@ -171,7 +293,7 @@ public final class WorldStreams {
    */
   void hello(NodeId node, Reply.Greeting hello) {
     int regionId = regions.regionOf(node);
-    if (regionId == RegionMap.NONE) {
+    if (regionId == Regions.NONE) {
       return;
     }
     Log log = logs.get(regionId);
@@ -196,20 +318,21 @@ public final class WorldStreams {
   }
 
   /**
-   * Deltas per region for chunks its holders have resident. A chunk about to be read is skipped,
-   * since the read includes its changes and a later delta could re-add a block to a chunk that
-   * left.
+   * Deltas per region for loaded chunks. A chunk whose residency changed is skipped, since its read
+   * includes its changes and a later delta could re-add a block to a chunk that left. One read only
+   * for holders that lack it still takes the delta, which the others need.
    */
   void flushCells() {
     Map<Integer, List<WorldEvent.BlockChanged>> byRegion = new TreeMap<>();
     for (WorldEvent.BlockChanged change : pendingCells) {
-      Region region = regions.regionAt(change.pos().x(), change.pos().z());
-      if (region == null) {
+      long key = Chunks.key(Chunks.of(change.pos().x()), Chunks.of(change.pos().z()));
+      if (!loadedChunks.contains(key)) {
         continue;
       }
-      long key = Chunks.key(Chunks.of(change.pos().x()), Chunks.of(change.pos().z()));
-      if (loadedChunks.contains(key) && !logs.get(region.id()).dirty.contains(key)) {
-        byRegion.computeIfAbsent(region.id(), unseen -> new ArrayList<>()).add(change);
+      for (Region region : regions.reaching(change.pos().x(), change.pos().z())) {
+        if (!logs.get(region.id()).stale.contains(key)) {
+          byRegion.computeIfAbsent(region.id(), unseen -> new ArrayList<>()).add(change);
+        }
       }
     }
     pendingCells.clear();
@@ -218,21 +341,24 @@ public final class WorldStreams {
       // Produced even with no holder connected, so a reconnect within retention is replayed.
       Log log = logs.get(entry.getKey());
       List<WorldEvent.BlockChanged> cells = entry.getValue();
-      int minX = log.region.minX();
-      int minZ = log.region.minZ();
+      int minX = log.region.areaMinX();
+      int minZ = log.region.areaMinZ();
       for (int from = 0; from < cells.size(); from += Frames.MAX_CELLS_PER_DELTA) {
         List<WorldEvent.BlockChanged> part =
             cells.subList(from, Math.min(cells.size(), from + Frames.MAX_CELLS_PER_DELTA));
         long sequence = ++log.lastSequence;
-        produce(log, sequence, "delta", () -> Frames.delta(sequence, part, minX, minZ));
+        produce(
+            log, sequence, "delta", () -> Frame.plain(Frames.delta(sequence, part, minX, minZ)));
       }
     }
   }
 
   /**
-   * One frame per chunk whose residency or content changed, for regions with a holder. Stops at
-   * {@link #MAX_CHUNK_READS_PER_TICK}; the rest stay marked. Unreadable chunks stay marked at no
-   * cost. Regions take turns going first.
+   * One frame per marked chunk, for regions with a holder. A chunk whose residency changed goes to
+   * every holder in full; one marked because holders lack it goes in full to those, and as an empty
+   * delta to the rest, and is not read if none lacks it. Stops at {@link
+   * #MAX_CHUNK_READS_PER_TICK}; the rest stay marked. Unreadable chunks stay marked at no cost.
+   * Regions take turns going first.
    */
   void flushChunks() {
     List<Log> order = List.copyOf(logs.values());
@@ -245,18 +371,31 @@ public final class WorldStreams {
       if (log.dirty.isEmpty() || !anyGreeted(log)) {
         continue;
       }
-      int originChunkX = Chunks.of(log.region.minX());
-      int originChunkZ = Chunks.of(log.region.minZ());
+      int originChunkX = Chunks.of(log.region.areaMinX());
+      int originChunkZ = Chunks.of(log.region.areaMinZ());
       Iterator<Long> dirty = log.dirty.iterator();
       while (dirty.hasNext()) {
         long key = dirty.next();
         boolean loaded = loadedChunks.contains(key);
+        boolean stale = log.stale.contains(key);
+        Set<NodeId> skipping = new LinkedHashSet<>();
+        if (!stale) {
+          for (Map.Entry<NodeId, Holder> holder : log.holders.entrySet()) {
+            if (holder.getValue().resident.containsKey(key)) {
+              skipping.add(holder.getKey());
+            }
+          }
+        }
+        if (loaded && !stale && skipping.size() == log.holders.size()) {
+          dirty.remove();
+          continue;
+        }
         if (loaded && reads == MAX_CHUNK_READS_PER_TICK) {
           break;
         }
         int chunkX = (int) (key >> 32);
         int chunkZ = (int) key;
-        // Wire positions, including chunk indices, are relative to the region.
+        // Wire positions, including chunk indices, are relative to the area.
         int localX = chunkX - originChunkX;
         int localZ = chunkZ - originChunkZ;
         Frames.ChunkRuns runs = null;
@@ -268,6 +407,7 @@ public final class WorldStreams {
           reads++;
         }
         dirty.remove();
+        log.stale.remove(key);
         long sequence = ++log.lastSequence;
         if (runs != null) {
           for (Holder holder : log.holders.values()) {
@@ -275,13 +415,30 @@ public final class WorldStreams {
             holder.resident.putIfAbsent(key, sequence);
           }
           Frames.ChunkRuns read = runs;
+          Set<NodeId> skip = Collections.unmodifiableSet(skipping);
+          if (!skip.isEmpty()) {
+            env.metrics().count("world.chunks.skipped", skip.size());
+          }
           produce(
-              log, sequence, "chunk", () -> Frames.chunkSnapshot(sequence, localX, localZ, read));
+              log,
+              sequence,
+              "chunk",
+              () ->
+                  skip.isEmpty()
+                      ? Frame.plain(Frames.chunkSnapshot(sequence, localX, localZ, read))
+                      : new Frame(
+                          Frames.chunkSnapshot(sequence, localX, localZ, read),
+                          Frames.delta(sequence, List.of(), 0, 0),
+                          skip));
         } else {
           for (Holder holder : log.holders.values()) {
             holder.resident.remove(key);
           }
-          produce(log, sequence, "chunk", () -> Frames.chunkCleared(sequence, localX, localZ));
+          produce(
+              log,
+              sequence,
+              "chunk",
+              () -> Frame.plain(Frames.chunkCleared(sequence, localX, localZ)));
         }
       }
     }
@@ -334,7 +491,7 @@ public final class WorldStreams {
    * Stores a finished frame under its sequence and sends what the gap held back. Frames of a
    * restarted log are dropped; one whose encode is given up on restarts the log.
    */
-  private void produce(Log log, long sequence, String job, Supplier<byte[]> work) {
+  private void produce(Log log, long sequence, String job, Supplier<Frame> work) {
     encoder.encode(
         job,
         Offload.Lane.WORLD,
@@ -379,11 +536,29 @@ public final class WorldStreams {
   private void startOver(Log log, Holder holder) {
     holder.nextToSend = log.lastSequence + 1;
     holder.resident.clear();
-    int minChunkX = Chunks.of(log.region.minX());
-    int minChunkZ = Chunks.of(log.region.minZ());
-    int perSide = log.region.size() / Chunks.SIZE;
-    for (int x = minChunkX; x < minChunkX + perSide; x++) {
-      for (int z = minChunkZ; z < minChunkZ + perSide; z++) {
+    markArea(log);
+  }
+
+  /** Marks every loaded chunk of the log's area to be read. */
+  private void markArea(Log log) {
+    Region region = log.region;
+    int minChunkX = Chunks.of(region.areaMinX());
+    int minChunkZ = Chunks.of(region.areaMinZ());
+    int chunksX = region.areaSizeX() / Chunks.SIZE;
+    int chunksZ = region.areaSizeZ() / Chunks.SIZE;
+    // The fewer of the area's chunks and the loaded ones are looked through.
+    if ((long) chunksX * chunksZ > loadedChunks.size()) {
+      for (long key : loadedChunks) {
+        int x = (int) (key >> 32) - minChunkX;
+        int z = (int) key - minChunkZ;
+        if (x >= 0 && x < chunksX && z >= 0 && z < chunksZ) {
+          log.dirty.add(key);
+        }
+      }
+      return;
+    }
+    for (int x = minChunkX; x < minChunkX + chunksX; x++) {
+      for (int z = minChunkZ; z < minChunkZ + chunksZ; z++) {
         long key = Chunks.key(x, z);
         if (loadedChunks.contains(key)) {
           log.dirty.add(key);
@@ -400,7 +575,14 @@ public final class WorldStreams {
     links.send(
         node,
         Channel.WORLD,
-        Frames.assignment(run, log.region.id(), log.region.size(), sequence, resume, world));
+        Frames.assignment(
+            run,
+            log.region.id(),
+            log.region.areaSizeX(),
+            log.region.areaSizeZ(),
+            sequence,
+            resume,
+            world));
   }
 
   /**
@@ -417,7 +599,10 @@ public final class WorldStreams {
         continue;
       }
       for (; holder.nextToSend <= log.ready; holder.nextToSend++) {
-        links.send(entry.getKey(), Channel.WORLD, log.frames.get(holder.nextToSend));
+        links.send(
+            entry.getKey(),
+            Channel.WORLD,
+            log.frames.get(holder.nextToSend).bytesFor(entry.getKey()));
       }
     }
     long lowest = log.ready - RETENTION_FRAMES;

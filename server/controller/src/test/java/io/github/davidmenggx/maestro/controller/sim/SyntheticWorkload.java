@@ -265,7 +265,13 @@ public final class SyntheticWorkload implements Workload {
               : mob.getValue();
       input.accept(
           new WorldEvent.PathRequested(
-              tick, mob.getKey(), randomClass(), start, randomStanding(), randomSearch()));
+              tick,
+              mob.getKey(),
+              randomClass(),
+              start,
+              randomStanding(),
+              randomSearch(),
+              hunting()));
       if (rng.nextDouble() < scenario.chances().get(Chance.REPEAT_REQUEST)) {
         input.accept(
             new WorldEvent.PathRequested(
@@ -274,7 +280,8 @@ public final class SyntheticWorkload implements Workload {
                 randomClass(),
                 mob.getValue(),
                 randomStanding(),
-                randomSearch()));
+                randomSearch(),
+                hunting()));
       }
     }
   }
@@ -342,6 +349,11 @@ public final class SyntheticWorkload implements Workload {
     int mobId = nextMobId++;
     mobs.put(mobId, pos);
     input.accept(new WorldEvent.MobSpawned(tick, mobId, pos));
+  }
+
+  /** Drawn per request, since a mob gains and loses its target. */
+  private boolean hunting() {
+    return rng.nextDouble() < scenario.chances().get(Chance.HUNTING);
   }
 
   /** Drawn per request, since a goal can change a mob's evaluator inputs between requests. */

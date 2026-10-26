@@ -49,6 +49,14 @@ table PathCancel {
   request_ids:[ulong];
 }
 
+// Asks whether the node serves requests. It waits in the queue and is taken by
+// a worker like a request, under the same id rules, but needs no profile and
+// runs no search: the answer is a `PathResponse` with no nodes at
+// `world_sequence` 0. The frame's `region_id` is 0.
+table PathProbe {
+  request_id:ulong;
+}
+
 // One node of a Minecraft `Path`; `type` is the resolved `PathType`.
 struct PathNode {
   pos:Vec3s;

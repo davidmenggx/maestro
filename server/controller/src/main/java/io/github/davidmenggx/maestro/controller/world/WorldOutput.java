@@ -6,14 +6,21 @@ import java.util.Objects;
 /** What the controller returns to the server, on the main thread. One call per request. */
 public interface WorldOutput {
 
-  /** Why a request will not produce a computed path. The server then searches itself. */
+  /**
+   * Why a request will not produce a computed path. The server then searches itself, unless the
+   * request was shed.
+   */
   enum DropReason {
-    /** Rejected before sending: the owning node would answer past the tick budget. */
-    QUEUE_DEPTH,
     /**
-     * No node can serve it: it starts outside every region, its search could read past its region,
-     * or a position does not fit the wire. Also an answer searched before the start chunk reached
-     * the node.
+     * Refused before sending: every ready holder holds more ahead of it than the request's share of
+     * its queue allows, a share that shrinks with distance from the nearest player and for a mob
+     * not hunting. The mob keeps its path or idles.
+     */
+    SHED,
+    /**
+     * No node can serve it: it starts outside every region, its search could read past its region's
+     * area, or a position does not fit the wire. Also an answer searched before the start chunk
+     * reached the node.
      */
     NO_NODE,
     /**
@@ -26,7 +33,10 @@ public interface WorldOutput {
      * overtakes it is answered as unknown.
      */
     CLASS_UNREGISTERED,
-    /** The owning node was lost before answering: its link went, or it was taken out of service. */
+    /**
+     * The owning node was lost before answering: its link went, it was taken out of service, or it
+     * stopped holding the region.
+     */
     NODE_LOST,
     /** No answer arrived in time, resends included. */
     TIMEOUT,

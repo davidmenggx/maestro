@@ -1,6 +1,8 @@
 #include "maestro/serve/node_core.hpp"
 
+#include <algorithm>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -23,6 +25,8 @@ const char *describe(world::ApplyStatus Status) {
     return "out of sequence";
   case world::ApplyStatus::CannotResume:
     return "resume of a stream not held";
+  case world::ApplyStatus::CannotKeep:
+    return "a kept area of a stream not held";
   case world::ApplyStatus::Behind:
     return "a fresh assignment behind the stream held";
   default:
@@ -131,8 +135,15 @@ void NodeCore::onWorldFrame(std::span<const std::uint8_t> Frame) {
              Status != world::ApplyStatus::Applied) {
     Refused = describe(Status);
   }
-  if (!Refused)
+  if (!Refused) {
+    if (const auto *Kept = Root->body_as_RegionAssignment();
+        Kept && Kept->from_region_id() != 0)
+      std::clog << "maestro-node: kept region " +
+                       std::to_string(Kept->from_region_id()) + " as region " +
+                       std::to_string(Kept->region_id()) + " at sequence " +
+                       std::to_string(Kept->sequence()) + "\n";
     return;
+  }
   Store.clear();
   dropLink(std::string("refused a world frame: ") + Refused +
            ", so all world state was dropped");
@@ -182,6 +193,17 @@ void NodeCore::datagram(std::span<const std::uint8_t> Frame,
       for (const std::uint64_t RequestId : *Cancel->request_ids())
         Queue.cancel(RequestId, At);
     return;
+  case fbs::RequestMsg::PathProbe:
+    // No profile and region 0, so a worker answers it with no path.
+    if (const auto *Probe = Root->body_as_PathProbe())
+      enqueue({.RequestId = Probe->request_id(),
+               .Mob = nullptr,
+               .Call = {},
+               .ReplyTo = From,
+               .Run = Root->run(),
+               .RegionId = 0},
+              At);
+    return;
   default:
     return;
   }
@@ -200,24 +222,36 @@ void NodeCore::admit(const fbs::PathRequest &Wire,
   std::optional<search::Request> Call = search::Request::decode(Wire);
   if (!Call)
     return;
+  enqueue({.RequestId = Wire.request_id(),
+           .Mob = Found->second,
+           .Call = *Call,
+           .ReplyTo = From,
+           .Run = Run,
+           .RegionId = RegionId},
+          At);
+}
+
+void NodeCore::enqueue(Job Next, Clock::time_point At) {
+  const asio::ip::udp::endpoint ReplyTo = Next.ReplyTo;
   Answer Cached;
-  const Admission Admitted = Queue.admit({.RequestId = Wire.request_id(),
-                                          .Mob = Found->second,
-                                          .Call = *Call,
-                                          .ReplyTo = From,
-                                          .Run = Run,
-                                          .RegionId = RegionId},
-                                         At, Cached);
-  if (Admitted == Admission::Answered)
-    Out.sendTo(From, *Cached);
+  if (Queue.admit(std::move(Next), At, Cached) == Admission::Answered)
+    Out.sendTo(ReplyTo, *Cached);
 }
 
 void NodeCore::heartbeat() {
+  // Taken even with no link to report to, so a beat covers one interval.
+  const std::uint64_t Finished = BeatSearches.exchange(0);
+  const std::uint64_t Micros = BeatMicros.exchange(0);
   if (!Live || !joined(Port::Control))
     return;
+  constexpr std::uint64_t MaxSearches =
+      std::numeric_limits<std::uint32_t>::max();
+  constexpr unsigned MaxWorkers = std::numeric_limits<std::uint16_t>::max();
   Builder.Clear();
-  const auto Body =
-      fbs::CreateHeartbeat(Builder, static_cast<std::uint32_t>(Queue.depth()));
+  const auto Body = fbs::CreateHeartbeat(
+      Builder, static_cast<std::uint32_t>(Queue.depth()),
+      static_cast<std::uint32_t>(std::min(Finished, MaxSearches)), Micros,
+      static_cast<std::uint16_t>(std::min(Opts.Workers, MaxWorkers)));
   Builder.Finish(fbs::CreateControlReplyFrame(
       Builder, fbs::ControlReplyMsg::Heartbeat, Body.Union()));
   Out.send(*joined(Port::Control),
@@ -238,16 +272,20 @@ void NodeCore::expirePending() {
 }
 
 Outcome NodeCore::run(const Job &Next, Scratch &With) {
-  if (const Clock::time_point Taken = Now();
-      Taken - Next.Admitted > Opts.MaxWait) {
+  const Clock::time_point Taken = Now();
+  if (Taken - Next.Admitted > Opts.MaxWait) {
     Queue.settle(Next, nullptr, Taken);
     return {};
   }
   const auto Held = Store.pin();
   std::uint64_t Sequence = 0;
-  if (Held && Held->run() == Next.Run && Held->regionId() == Next.RegionId) {
+  // A probe has no profile, so it never searches.
+  const bool Searched = Next.Mob && Held && Held->run() == Next.Run &&
+                        Held->regionId() == Next.RegionId;
+  if (Searched) {
     With.Search->find(*Held, *Next.Mob, Next.Call, With.Path);
     Sequence = Held->sequence();
+    ++Searches;
   } else {
     // Sequence 0 reads as a search that ran too early.
     With.Path.Nodes.clear();
@@ -266,7 +304,16 @@ Outcome NodeCore::run(const Job &Next, Scratch &With) {
                        std::to_string(With.Builder.GetSize()) +
                        " bytes, too large for a datagram, so it was dropped\n";
   }
-  if (!Queue.settle(Next, Result, Now()))
+  const Clock::time_point Settled = Now();
+  const bool Deliver = Queue.settle(Next, Result, Settled);
+  if (Searched) {
+    const auto Took =
+        std::chrono::duration_cast<std::chrono::microseconds>(Settled - Taken);
+    BeatMicros +=
+        static_cast<std::uint64_t>(std::max<std::int64_t>(0, Took.count()));
+    ++BeatSearches;
+  }
+  if (!Deliver)
     return {.Searched = true};
   return {.Searched = true, .Result = std::move(Result)};
 }

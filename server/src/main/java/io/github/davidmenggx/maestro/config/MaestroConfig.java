@@ -7,6 +7,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.annotations.SerializedName;
+import io.github.davidmenggx.maestro.controller.region.RegionLayout;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
@@ -25,7 +26,10 @@ import java.util.stream.Collectors;
  * startup.
  *
  * <p>{@code nodes} lists the compute fleet. With none, nothing is offloaded. {@code nodeCapacity}
- * is the requests a node serves per tick, as admission assumes.
+ * is the requests a node serves per tick, as admission assumes until the node's heartbeats show it
+ * serves fewer; it is never taken to serve more. {@code areaCells} is the side, in 256-block cells,
+ * of the square around the origin whose mobs are offloaded. {@code spares} is how many nodes start
+ * with no region, to take over a dead node's or relieve a hot one.
  */
 public record MaestroConfig(
     Mode mode,
@@ -33,6 +37,8 @@ public record MaestroConfig(
     Offload offload,
     List<NodeAddress> nodes,
     int nodeCapacity,
+    int areaCells,
+    int spares,
     String otlpEndpoint) {
 
   /** How compute nodes hold world state. */
@@ -87,7 +93,7 @@ public record MaestroConfig(
 
   public static final MaestroConfig DEFAULT =
       new MaestroConfig(
-          Mode.STATEFUL, SubMode.BATCH, Offload.ON, List.of(), 100, "http://localhost:4317");
+          Mode.STATEFUL, SubMode.BATCH, Offload.ON, List.of(), 100, 5, 1, "http://localhost:4317");
 
   private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
@@ -105,6 +111,10 @@ public record MaestroConfig(
     }
     nodes = List.copyOf(nodes);
     require(nodeCapacity >= 1, "`nodeCapacity` must be at least 1");
+    require(
+        areaCells >= 1 && areaCells <= RegionLayout.MAX_CELLS,
+        "`areaCells` must be 1 to " + RegionLayout.MAX_CELLS);
+    require(spares >= 0, "`spares` must not be negative");
     require(otlpEndpoint != null && !otlpEndpoint.isBlank(), "`otlpEndpoint` must not be empty");
   }
 

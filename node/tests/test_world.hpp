@@ -30,8 +30,12 @@ inline constexpr world::Cell OpenDoor{world::PathType::DOOR_OPEN,
 /// are in wire coordinates.
 class DenseWorld {
 public:
-  /// An all-air world.
-  DenseWorld(int Size, int MinY, int Height);
+  /// An all-air square world.
+  DenseWorld(int Size, int MinY, int Height)
+      : DenseWorld(Size, Size, MinY, Height) {}
+
+  /// An all-air world of `SizeX` by `SizeZ` columns.
+  DenseWorld(int SizeX, int SizeZ, int MinY, int Height);
 
   const world::Geometry &geometry() const { return Geo; }
 
@@ -43,7 +47,7 @@ public:
 
   /// An assignment standing at `Sequence` of the stream.
   Frame assignment(bool Resume = false, std::uint64_t Run = 1,
-                   std::uint32_t RegionId = 0,
+                   std::uint32_t RegionId = 1,
                    std::uint64_t Sequence = 0) const;
 
   /// One chunk's state, run-length encoded as the controller encodes it.
@@ -60,6 +64,11 @@ private:
 };
 
 /// A chunk the server no longer holds.
+/// An assignment of a `Geo` area; with `FromRegionId`, a kept one.
+Frame assignmentFrame(const world::Geometry &Geo, std::uint64_t Run,
+                      std::uint32_t RegionId, bool Resume,
+                      std::uint64_t Sequence, std::uint32_t FromRegionId = 0);
+
 Frame clearedChunk(std::uint64_t Sequence, int ChunkX, int ChunkZ);
 
 Frame delta(std::uint64_t Sequence, std::span<const world::CellEdit> Edits);

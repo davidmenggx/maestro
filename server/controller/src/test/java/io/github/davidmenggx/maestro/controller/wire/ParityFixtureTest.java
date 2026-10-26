@@ -62,8 +62,9 @@ class ParityFixtureTest {
       RegionAssignment assignment = assignment(fixture.world().get(0));
       assertFalse(assignment.resume(), name);
       assertEquals(0, assignment.sequence(), name + ": the stream starts at the assignment");
-      assertEquals(0, assignment.size() % Chunks.SIZE, name);
-      int chunksPerSide = assignment.size() / Chunks.SIZE;
+      assertEquals(0, assignment.sizeX() % Chunks.SIZE, name);
+      assertEquals(assignment.sizeX(), assignment.sizeZ(), name + ": a capture area is square");
+      int chunksPerSide = assignment.sizeX() / Chunks.SIZE;
       int chunks = chunksPerSide * chunksPerSide;
       assertTrue(fixture.world().size() > chunks + 1, name + ": the stream has deltas");
 
@@ -97,8 +98,8 @@ class ParityFixtureTest {
           CellDelta cell = delta.cells(c);
           assertTrue(PathTypes.isPerBlock((byte) cell.nodeType()), name);
           assertTrue(cell.floor() <= Cells.MAX_FLOOR, name);
-          assertTrue(cell.pos().x() >= 0 && cell.pos().x() < assignment.size(), name);
-          assertTrue(cell.pos().z() >= 0 && cell.pos().z() < assignment.size(), name);
+          assertTrue(cell.pos().x() >= 0 && cell.pos().x() < assignment.sizeX(), name);
+          assertTrue(cell.pos().z() >= 0 && cell.pos().z() < assignment.sizeZ(), name);
           assertTrue(
               cell.pos().y() >= assignment.minY()
                   && cell.pos().y() < assignment.minY() + assignment.height(),
@@ -152,7 +153,8 @@ class ParityFixtureTest {
           Frames.assignment(
               assignment.run(),
               (int) assignment.regionId(),
-              assignment.size(),
+              assignment.sizeX(),
+              assignment.sizeZ(),
               assignment.sequence(),
               assignment.resume(),
               new ChunkWorld(null, assignment.minY(), assignment.height())),

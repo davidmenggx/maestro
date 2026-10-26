@@ -89,11 +89,11 @@ run-server: schema-java ## Boot a dev server (WORLD=<name> loads worlds/<name>)
 test-boot: schema-java ## Boot the released mod and assert the mixins applied
 	tools/boot-smoke-test.sh
 
-# Each run is `offload:faults`.
-E2E_RUNS := $(if $(OFFLOAD),$(OFFLOAD):$(FAULTS),shadow: on: on:failover)
+# Each run is `offload-submode[-faults]`.
+E2E_RUNS := $(if $(OFFLOAD),$(OFFLOAD)-$(or $(SUBMODE),batch)-$(FAULTS),shadow-batch on-batch on-batch-failover on-stream on-stream-failover on-batch-split on-batch-replica)
 
-test-e2e: node schema-java ## Run the released mod against a real node (OFFLOAD=shadow|on FAULTS=failover pick one run; all by default)
-	$(foreach run,$(E2E_RUNS),OFFLOAD=$(word 1,$(subst :, ,$(run))) FAULTS=$(word 2,$(subst :, ,$(run))) tools/e2e-test.sh &&) true
+test-e2e: node schema-java ## Run the released mod against real nodes (OFFLOAD=shadow|on SUBMODE=batch|stream FAULTS=failover|split|replica pick one run; all by default)
+	$(foreach run,$(E2E_RUNS),OFFLOAD=$(word 1,$(subst -, ,$(run))) SUBMODE=$(word 2,$(subst -, ,$(run))) FAULTS=$(word 3,$(subst -, ,$(run))) tools/e2e-test.sh &&) true
 
 capture: schema-java ## Record parity fixtures into fixtures/parity (SEED="1 2" N=cases)
 	tools/capture-fixtures.sh "$(if $(SEED),$(SEED),$(error set SEED, e.g. SEED="1 2 3"))" \

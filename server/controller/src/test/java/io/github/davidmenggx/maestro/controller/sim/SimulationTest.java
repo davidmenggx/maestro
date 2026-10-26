@@ -12,7 +12,10 @@ import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
+import io.github.davidmenggx.maestro.controller.world.Pos;
+import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
@@ -33,9 +36,6 @@ class SimulationTest {
   /** Quiet ticks after the partition ends, for the new snapshot to arrive and the run to settle. */
   private static final long TAIL_TICKS = 50;
 
-  /** Tick at which a node dies, two ticks before the controller's next reconnect attempt. */
-  private static final long DEATH_TICK = 38;
-
   /** Tick at which the control channel stalls, before profiles register. */
   private static final long STALL_TICK = 2;
 
@@ -49,8 +49,15 @@ class SimulationTest {
   /** Holds the origin's region, where the spawn chunks keep the world loaded. */
   private static final NodeId SPAWN_HOLDER = NodeId.of(0);
 
-  /** The default grid with no region held twice, so a node that cannot answer has no stand-in. */
-  private static final Topology ALONE = Topology.DEFAULT.withReplicated(0);
+  /**
+   * The default square with no spare, so a node that cannot answer keeps its region however long it
+   * is out, and has no stand-in.
+   */
+  private static final Topology ALONE = Topology.DEFAULT.withNodes(4).withSpares(0);
+
+  /** One node holding a one-cell square, with no spare to relieve it. */
+  private static final Topology LONE_NODE =
+      Topology.DEFAULT.withCells(1).withNodes(1).withSpares(0);
 
   /** Block changes per tick, enough that most regions see one on most ticks. */
   private static final int CHANGES_PER_TICK = 2 * Topology.DEFAULT.nodeCount();
@@ -67,30 +74,38 @@ class SimulationTest {
   }
 
   @Test
-  void eachChunkIsSentOnceThenStreamedAsDeltas() {
+  void eachChunkIsSentOnceToEachAreaHoldingItThenStreamedAsDeltas() {
     SimRun run = SimRun.of(3L, FaultPlan.reliable(), TICKS).go();
 
+    // A chunk in a halo is in the areas of every region beside it.
+    long areaChunks = 0;
+    for (int i = 0; i < run.world.loadedCount(); i++) {
+      long chunk = run.world.loadedChunk(i);
+      areaChunks +=
+          run.regions()
+              .reaching((int) (chunk >> 32) * Chunks.SIZE, (int) chunk * Chunks.SIZE)
+              .size();
+    }
+    assertEquals(run.chunkCount(), run.world.loadedCount(), run.describe());
     assertEquals(
-        run.chunkCount(),
-        run.sim.metrics().counter("offload.submitted", "job", "chunk"),
-        run.describe());
+        areaChunks, run.sim.metrics().counter("offload.submitted", "job", "chunk"), run.describe());
     assertTrue(
         run.sim.metrics().counter("offload.submitted", "job", "delta")
-            > run.regions.regions().size(),
+            > run.regions().regions().size(),
         run.describe());
     // A region where no chunk was ever loaded has nothing to stream.
     Set<Integer> loaded = new TreeSet<>();
     for (int i = 0; i < run.world.loadedCount(); i++) {
       long chunk = run.world.loadedChunk(i);
       Region region =
-          run.regions.regionAt((int) (chunk >> 32) * Chunks.SIZE, (int) chunk * Chunks.SIZE);
+          run.regions().regionAt((int) (chunk >> 32) * Chunks.SIZE, (int) chunk * Chunks.SIZE);
       if (region != null) {
         loaded.add(region.id());
       }
     }
     assertFalse(loaded.isEmpty(), run.describe());
     for (ModeledNode node : run.sim.nodes()) {
-      if (loaded.contains(run.regions.regionOf(node.id()))) {
+      if (loaded.contains(run.regions().regionOf(node.id()))) {
         assertTrue(node.hasState(), run.describe());
         assertTrue(node.lastSequence() > 1, run.describe());
       }
@@ -216,8 +231,9 @@ class SimulationTest {
         run.describe());
     assertTrue(run.sim.metrics().counter("offload.retried", "job", "chunk") > 0, run.describe());
     assertTrue(run.sim.metrics().counter("offload.retried", "job", "delta") > 0, run.describe());
-    for (ModeledNode node : run.sim.nodes()) {
-      assertTrue(Invariants.caughtUp(run.controller, node), node.id() + " " + run.describe());
+    for (NodeId holder : run.regions().nodes()) {
+      assertTrue(
+          Invariants.caughtUp(run.controller, run.sim.node(holder)), holder + " " + run.describe());
     }
   }
 
@@ -248,13 +264,100 @@ class SimulationTest {
   void saturationIsRejectedBeforeSendingRatherThanMissedLater() {
     SimRun run = SimRun.of(SimRun.baseSeed(), FaultPlan.reliable(), TICKS, Scenario.SATURATED).go();
 
-    assertTrue(run.out.dropped(DropReason.QUEUE_DEPTH) > 0, run.describe());
+    assertTrue(run.out.dropped(DropReason.SHED) > 0, run.describe());
     assertTrue(run.out.answered() > 0, run.describe());
     // Requests the controller gave up on still counted against their node.
     assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
-    // A saturated fleet is not held to the 3-tick SLO. Shedding exists for that case.
-    assertFalse(run.fitsCapacity(), run.describe());
+    // A node here cannot serve even its assumed capacity in a tick at worst cost, so not even what
+    // is admitted is held to the 3-tick SLO.
+    assertFalse(run.heldToTheSlo(), run.describe());
     assertEquals(List.of(), run.violations(), run.describe());
+  }
+
+  /**
+   * Shedding exists for this case: far more demand than the node serves, yet what it admits is
+   * answered within the SLO, at an assumed capacity the node serves within a tick.
+   */
+  @Test
+  void anOverloadedNodeMeetsTheSloForWhatItAdmits() {
+    SimRun run = SimRun.of(3L, FaultPlan.reliable(), 400, LONE_NODE, overloaded(75)).go();
+
+    assertFalse(run.fitsCapacity(), run.describe());
+    assertTrue(run.admissionFits(), run.describe());
+    assertTrue(run.heldToTheSlo(), run.describe());
+    assertTrue(run.out.dropped(DropReason.SHED) > run.out.answered(), run.describe());
+    assertEquals(List.of(), run.violations(), run.describe());
+  }
+
+  /**
+   * A node serving half the assumed capacity is taken at the rate its searches show, so admission
+   * keeps within the SLO after the first few seconds. Taken at the assumed rate, p99 is a tick
+   * over.
+   */
+  @Test
+  void aNodeSlowerThanAssumedIsTakenAtItsMeasuredRate() {
+    Scenario overestimated = overloaded(200);
+    SimRun run = SimRun.of(3L, FaultPlan.reliable(), 2000, LONE_NODE, overestimated).go();
+
+    String node = run.fleet.get(0).toString();
+    assertEquals(
+        overestimated.nodeCapacity(),
+        run.sim.metrics().gauge("node.capacity", "node", node),
+        run.describe());
+    assertTrue(overestimated.assumedCapacity() > overestimated.nodeCapacity());
+    assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
+    assertEquals(
+        List.of(),
+        Invariants.checkSlo(run.out.latencies(), run.out.admittedMisses()),
+        run.describe());
+    assertEquals(List.of(), run.violations(), run.describe());
+  }
+
+  /**
+   * A server that works all tick hands over before its tick-end batch is encoded, so the batch
+   * leaves a hand-over late. It still leaves before the next tick's requests, which must not wait
+   * behind it: one request a tick fits even a share below one of a node serving two.
+   */
+  @Test
+  void aBatchStillEncodingDoesNotCountAheadOfTheNextTicksRequests() {
+    Scenario busy =
+        Scenario.DEFAULT
+            .with(Count.SERVER_BUSY_PERCENT, 100)
+            .with(Count.WORKERS, 1)
+            .with(Count.WORKER_CAPACITY, 2)
+            .with(Count.COST_SPREAD_PERCENT, 0);
+    Pos here = new Pos(20, 40, 20);
+    List<WorldEvent> script = new ArrayList<>();
+    script.add(new WorldEvent.ChunkLoaded(0, Chunks.of(here.x()), Chunks.of(here.z())));
+    script.add(new WorldEvent.PlayerMoved(0, 1, here));
+    // Four mobs taking turns, so each waits for its answer before it asks again.
+    for (int mob = 1; mob <= 4; mob++) {
+      script.add(new WorldEvent.MobSpawned(0, mob, here));
+    }
+    WorldEvent.Search search = new WorldEvent.Search(0, 16f, 256, 3);
+    for (long tick = 10; tick < 100; tick++) {
+      // Not hunting, so its share is below one.
+      script.add(
+          new WorldEvent.PathRequested(
+              tick, 1 + (int) (tick % 4), (short) 1, here, here, search, false));
+    }
+
+    SimRun run = SimRun.scripted(3L, FaultPlan.reliable(), 120, LONE_NODE, busy, script).go();
+
+    assertEquals(0, run.out.dropped(DropReason.SHED), run.describe());
+    assertTrue(run.out.answered() > 80, run.describe());
+    assertEquals(List.of(), run.violations(), run.describe());
+  }
+
+  /**
+   * Saturation on one node that serves four requests a tick, each at the same cost, which the
+   * controller assumes is {@code estimatePercent} of that.
+   */
+  private static Scenario overloaded(int estimatePercent) {
+    return Scenario.SATURATED
+        .with(Count.WORKER_CAPACITY, 4)
+        .with(Count.COST_SPREAD_PERCENT, 0)
+        .with(Count.CAPACITY_ESTIMATE_PERCENT, estimatePercent);
   }
 
   @Test
@@ -329,6 +432,7 @@ class SimulationTest {
                 29L,
                 plan,
                 CUT_TICK + AWAY_TICKS + TAIL_TICKS,
+                ALONE,
                 Scenario.DEFAULT.with(Count.BLOCK_CHANGES_PER_TICK, CHANGES_PER_TICK))
             .go();
 
@@ -355,7 +459,7 @@ class SimulationTest {
     assertEquals(List.of(), run.violations(), run.describe());
     // Nothing on the control channel requests this, so the test checks that a depth arrives at all.
     assertTrue(
-        run.regions.nodes().stream()
+        run.regions().nodes().stream()
             .anyMatch(
                 node ->
                     run.sim
@@ -484,26 +588,6 @@ class SimulationTest {
   }
 
   @Test
-  void aRegionWithASecondHolderIsServedByItWhileTheFirstCannotAnswer() {
-    NodeId victim = SPAWN_HOLDER;
-    NodeId replica = run(Topology.DEFAULT).regions.holders(1).get(1);
-    FaultPlan plan =
-        FaultPlan.reliable()
-            .with(
-                new FaultPlan.Blackholed(40, victim, true),
-                new FaultPlan.Blackholed(100, victim, false));
-
-    SimRun run = SimRun.of(17L, plan, 200, Topology.DEFAULT, Scenario.DEFAULT).go();
-
-    assertEquals(List.of(), run.violations(), run.describe());
-    assertEquals(1, opened(run, victim), run.describe());
-    assertEquals(0, opened(run, replica), run.describe());
-    // Every mob of the region found a holder in service, so none was refused for it.
-    assertEquals(
-        0, run.sim.metrics().counter("path.rejected", "reason", "unavailable"), run.describe());
-  }
-
-  @Test
   void aRestartedControllerStartsEveryStreamOverAndItsOldAnswersAreIgnored() {
     FaultPlan plan = FaultPlan.reliable().with(new FaultPlan.ControllerRestarted(40));
 
@@ -513,13 +597,14 @@ class SimulationTest {
     assertEquals(2, run.sim.incarnations(), run.describe());
     // Every node still holds the old run's area, which the new run cannot resume.
     assertEquals(
-        2L * run.regions.nodes().size(),
+        2L * run.regions().nodes().size(),
         run.sim.metrics().total("world.resnapshot"),
         run.describe());
     assertEquals(0, run.sim.metrics().total("world.resume"), run.describe());
     assertTrue(run.out.answered() > 0, run.describe());
-    for (ModeledNode node : run.sim.nodes()) {
-      assertTrue(Invariants.caughtUp(run.controller, node), node.id() + " " + run.describe());
+    for (NodeId holder : run.regions().nodes()) {
+      assertTrue(
+          Invariants.caughtUp(run.controller, run.sim.node(holder)), holder + " " + run.describe());
     }
   }
 
@@ -563,7 +648,7 @@ class SimulationTest {
                 5L,
                 FaultPlan.reliable(),
                 TICKS,
-                Topology.DEFAULT.withRegionsPerSide(3),
+                Topology.DEFAULT.withCells(3).withNodes(10),
                 Scenario.DEFAULT.with(Count.PLAYERS, 3))
             .go();
 
@@ -588,9 +673,5 @@ class SimulationTest {
   /** A run's fleet first greets with nothing held, so each node is resnapshotted once. */
   private static long nodes(SimRun run) {
     return run.sim.nodes().size();
-  }
-
-  private static SimRun run(Topology topology) {
-    return SimRun.of(1L, FaultPlan.reliable(), 1, topology, Scenario.DEFAULT);
   }
 }

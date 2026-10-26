@@ -31,23 +31,36 @@ class SearchReachTest {
     int size = 384;
 
     assertTrue(
-        SearchReach.fits(minX, minZ, size, new Pos(minX + 192, 64, minZ + 192), 64f, NARROW));
+        SearchReach.fits(minX, minZ, size, size, new Pos(minX + 192, 64, minZ + 192), 64f, NARROW));
     // Exactly at each edge, then one block past it.
     assertTrue(
-        SearchReach.fits(minX, minZ, size, new Pos(minX + reach, 64, minZ + 192), 64f, NARROW));
+        SearchReach.fits(
+            minX, minZ, size, size, new Pos(minX + reach, 64, minZ + 192), 64f, NARROW));
     assertFalse(
-        SearchReach.fits(minX, minZ, size, new Pos(minX + reach - 1, 64, minZ + 192), 64f, NARROW));
+        SearchReach.fits(
+            minX, minZ, size, size, new Pos(minX + reach - 1, 64, minZ + 192), 64f, NARROW));
     assertTrue(
         SearchReach.fits(
-            minX, minZ, size, new Pos(minX + size - 1 - reach, 64, minZ + 192), 64f, NARROW));
+            minX, minZ, size, size, new Pos(minX + size - 1 - reach, 64, minZ + 192), 64f, NARROW));
     assertFalse(
         SearchReach.fits(
-            minX, minZ, size, new Pos(minX + size - reach, 64, minZ + 192), 64f, NARROW));
-    assertFalse(
-        SearchReach.fits(minX, minZ, size, new Pos(minX + 192, 64, minZ + reach - 1), 64f, NARROW));
+            minX, minZ, size, size, new Pos(minX + size - reach, 64, minZ + 192), 64f, NARROW));
     assertFalse(
         SearchReach.fits(
-            minX, minZ, size, new Pos(minX + 192, 64, minZ + size - reach), 64f, NARROW));
+            minX, minZ, size, size, new Pos(minX + 192, 64, minZ + reach - 1), 64f, NARROW));
+    assertFalse(
+        SearchReach.fits(
+            minX, minZ, size, size, new Pos(minX + 192, 64, minZ + size - reach), 64f, NARROW));
+  }
+
+  @Test
+  void eachSideOfARectangleBoundsItsOwnAxis() {
+    int reach = SearchReach.blocks(16f, NARROW);
+    // Long along x, short along z.
+    assertTrue(SearchReach.fits(0, 0, 512, 64, new Pos(256, 64, reach), 16f, NARROW));
+    assertFalse(SearchReach.fits(0, 0, 512, 64, new Pos(256, 64, 64 - reach), 16f, NARROW));
+    assertTrue(SearchReach.fits(0, 0, 64, 512, new Pos(reach, 64, 256), 16f, NARROW));
+    assertFalse(SearchReach.fits(0, 0, 64, 512, new Pos(64 - reach, 64, 256), 16f, NARROW));
   }
 
   @Test
@@ -59,8 +72,9 @@ class SearchReachTest {
     int size = region + 2 * halo;
     assertTrue(
         SearchReach.fits(
-            0, 0, size, new Pos(halo + region / 2, 64, halo + region / 2), 64f, NARROW));
-    assertFalse(SearchReach.fits(0, 0, size, new Pos(halo, 64, halo + region / 2), 64f, NARROW));
+            0, 0, size, size, new Pos(halo + region / 2, 64, halo + region / 2), 64f, NARROW));
+    assertFalse(
+        SearchReach.fits(0, 0, size, size, new Pos(halo, 64, halo + region / 2), 64f, NARROW));
   }
 
   @Test
@@ -70,6 +84,9 @@ class SearchReachTest {
     assertThrows(IllegalArgumentException.class, () -> SearchReach.blocks(16f, 0f));
     assertThrows(
         IllegalArgumentException.class,
-        () -> SearchReach.fits(0, 0, 0, new Pos(0, 0, 0), 16f, NARROW));
+        () -> SearchReach.fits(0, 0, 0, 16, new Pos(0, 0, 0), 16f, NARROW));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> SearchReach.fits(0, 0, 16, 0, new Pos(0, 0, 0), 16f, NARROW));
   }
 }

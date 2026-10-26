@@ -27,8 +27,6 @@ struct ServerOptions {
   std::uint16_t WorldPort = 25700;
   std::uint16_t ControlPort = 25701;
   std::uint16_t RequestPort = 25702;
-  /// Search threads. With none, requests only wait, which suits tests.
-  unsigned Workers = 1;
   /// The node's own heartbeat interval: 20 ticks.
   std::chrono::milliseconds HeartbeatInterval{1000};
   serve::NodeOptions Node;
@@ -51,6 +49,9 @@ public:
   std::uint16_t worldPort() const { return WorldPort; }
   std::uint16_t controlPort() const { return ControlPort; }
   std::uint16_t requestPort() const { return RequestPort; }
+
+  /// Searches run over the area held, since the node started.
+  std::uint64_t searches() const { return Core.searches(); }
 
   /// Closes every socket and stops the workers, after which the
   /// `io_context` runs out of work. Safe to call from any thread.

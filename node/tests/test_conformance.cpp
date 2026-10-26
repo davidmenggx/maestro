@@ -37,8 +37,9 @@ std::string hello(std::uint64_t Run, std::uint32_t RegionId,
          ")";
 }
 
-std::string heartbeat(std::uint32_t Depth) {
-  return "Heartbeat(depth " + std::to_string(Depth) + ")";
+std::string heartbeat(std::uint32_t Depth, std::uint32_t Searches) {
+  return "Heartbeat(depth " + std::to_string(Depth) + ", searches " +
+         std::to_string(Searches) + ")";
 }
 
 std::string answer(std::uint64_t RequestId, std::uint64_t Run,
@@ -58,7 +59,7 @@ std::string expected(const fbs::Effect &Wire) {
   case fbs::EffectKind::Hello:
     return hello(Wire.run(), Wire.region_id(), Wire.sequence());
   case fbs::EffectKind::Heartbeat:
-    return heartbeat(Wire.depth());
+    return heartbeat(Wire.depth(), Wire.searches());
   case fbs::EffectKind::Answer:
     return answer(Wire.request_id(), Wire.run(), Wire.sequence());
   case fbs::EffectKind::UnknownProfile:
@@ -173,7 +174,8 @@ private:
       Effects.push_back(
           hello(Body->run(), Body->region_id(), Body->last_sequence()) + Where);
     else if (const auto *Beat = Reply ? Reply->body_as_Heartbeat() : nullptr)
-      Effects.push_back(heartbeat(Beat->queue_depth()) + Where);
+      Effects.push_back(heartbeat(Beat->queue_depth(), Beat->searches()) +
+                        Where);
     else
       Effects.push_back("an unreadable frame" + Where);
   }
@@ -275,6 +277,7 @@ public:
     std::uint64_t Sequence = 0;
     std::uint32_t Depth = 0;
     std::uint64_t RequestId = 0;
+    std::uint32_t Searches = 0;
   };
 
   Script &step(fbs::StepKind Kind, fbs::LinkPort On, const Bytes &Frame,
@@ -283,7 +286,8 @@ public:
     std::vector<flatbuffers::Offset<fbs::Effect>> Built;
     for (const Effect &E : Effects)
       Built.push_back(fbs::CreateEffect(Builder, E.Kind, E.Run, E.RegionId,
-                                        E.Sequence, E.Depth, E.RequestId));
+                                        E.Sequence, E.Depth, E.RequestId,
+                                        E.Searches));
     Steps.push_back(fbs::CreateStep(
         Builder, Kind, On, Frame.empty() ? 0 : Builder.CreateVector(Frame),
         Millis, Count, Builder.CreateVector(Built)));
@@ -367,8 +371,9 @@ TEST(Conformance, TheReplayChecksEveryKindOfStepAndEffect) {
       // 4 waited past the longest wait, so it is skipped and not counted.
       .step(StepKind::Serve, LinkPort::World, {}, {Answered(5)}, 0, 1)
       .step(StepKind::Datagram, LinkPort::World, requestFrame({4}))
+      // 3 and 5 were searched since the last heartbeat.
       .step(StepKind::Heartbeat, LinkPort::World, {},
-            {{.Kind = EffectKind::Heartbeat, .Depth = 0}})
+            {{.Kind = EffectKind::Heartbeat, .Depth = 0, .Searches = 2}})
       .step(StepKind::Connect, LinkPort::Control,
             joinFrame(Port::Control, TestRun, 1), {{EffectKind::Refused}})
       // The refused connection never became the port's.

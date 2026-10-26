@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.core.NodeHealth;
 import io.github.davidmenggx.maestro.controller.core.RequestTracker;
+import io.github.davidmenggx.maestro.controller.region.Region;
+import io.github.davidmenggx.maestro.controller.region.RegionLayout;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import org.junit.jupiter.api.Test;
 
@@ -96,9 +98,11 @@ class HarnessConstantsTest {
     assertTrue(Topology.MAX_HEIGHT >= Topology.MIN_HEIGHT, "height range is inverted");
     assertTrue(
         Topology.MAX_RELIEF <= Topology.MIN_HEIGHT / 4, "a sampled hill can outgrow its column");
-    assertEquals(0, Topology.REGION_SIZE % Chunks.SIZE, "regions are not chunk aligned");
+    assertEquals(0, RegionLayout.CELL % Chunks.SIZE, "cells are not chunk aligned");
+    assertEquals(0, Region.HALO % Chunks.SIZE, "halos are not chunk aligned");
     // Four pathfinding horizons of about 64 blocks, the smallest region the spec allows.
-    assertTrue(Topology.REGION_SIZE >= 4 * 64, "regions are smaller than the spec allows");
+    assertTrue(RegionLayout.CELL >= 4 * 64, "regions are smaller than the spec allows");
+    assertTrue(Region.HALO >= 64, "a halo is narrower than one pathfinding horizon");
   }
 
   @Test

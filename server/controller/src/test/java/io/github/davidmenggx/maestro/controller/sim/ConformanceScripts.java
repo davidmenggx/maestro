@@ -23,6 +23,7 @@ import maestro.fbs.EffectKind;
 import maestro.fbs.Join;
 import maestro.fbs.LinkPort;
 import maestro.fbs.PathType;
+import maestro.fbs.RegionAssignment;
 import maestro.fbs.Step;
 import maestro.fbs.StepKind;
 import maestro.fbs.Vec2i;
@@ -87,7 +88,7 @@ final class ConformanceScripts {
         new Script("a fresh node reports nothing held")
             .connect(LinkPort.Control, Frames.joinControl(RUN, 1), hello(0, 0, 0))
             .connect(LinkPort.World, Frames.joinWorld(RUN, 1))
-            .heartbeat(heartbeat(0)));
+            .heartbeat(heartbeat(0, 0)));
 
     cases.add(
         new Script("a hello follows the control join and reports what is held")
@@ -113,10 +114,10 @@ final class ConformanceScripts {
         held("a request is answered once and a copy gets the same answer")
             .datagram(requests(RUN, REGION, 10))
             .datagram(requests(RUN, REGION, 10))
-            .heartbeat(heartbeat(1))
+            .heartbeat(heartbeat(1, 0))
             .serve(0, answer(10, RUN, 1))
             .datagram(requests(RUN, REGION, 10), answer(10, RUN, 1))
-            .heartbeat(heartbeat(0)));
+            .heartbeat(heartbeat(0, 1)));
 
     cases.add(
         held("an answer is kept for 1000 ms")
@@ -132,7 +133,7 @@ final class ConformanceScripts {
         held("a cancel drops a waiting request and its later copies")
             .datagram(requests(RUN, REGION, 10, 11))
             .datagram(Frames.cancels(RUN, REGION, List.of(10L)))
-            .heartbeat(heartbeat(1))
+            .heartbeat(heartbeat(1, 0))
             .serve(0, answer(11, RUN, 1))
             .datagram(requests(RUN, REGION, 10))
             .serve(0));
@@ -158,7 +159,7 @@ final class ConformanceScripts {
             .datagram(requests(RUN, REGION, 10, 11, 12))
             .datagram(Frames.cancels(RUN, REGION, List.of(10L)))
             .serve(1, answer(11, RUN, 1))
-            .heartbeat(heartbeat(1))
+            .heartbeat(heartbeat(1, 1))
             .serve(1, answer(12, RUN, 1)));
 
     cases.add(
@@ -167,7 +168,7 @@ final class ConformanceScripts {
             .datagram(Frames.cancels(RUN, REGION, List.of(10L)))
             .advance(1000)
             .datagram(requests(RUN, REGION, 10))
-            .heartbeat(heartbeat(1))
+            .heartbeat(heartbeat(1, 0))
             .serve(0, answer(10, RUN, 1))
             .serve(0));
 
@@ -177,9 +178,9 @@ final class ConformanceScripts {
             .advance(1000)
             .serve(1, answer(10, RUN, 1))
             .advance(1)
-            .heartbeat(heartbeat(1))
+            .heartbeat(heartbeat(1, 1))
             .serve(0)
-            .heartbeat(heartbeat(0))
+            .heartbeat(heartbeat(0, 0))
             .datagram(requests(RUN, REGION, 11))
             .serve(0)
             .advance(1000)
@@ -209,6 +210,23 @@ final class ConformanceScripts {
         held("a request for another region is answered as if no area were held")
             .datagram(requests(RUN, REGION + 1, 10))
             .serve(0, answer(10, RUN, 0)));
+
+    cases.add(
+        held("a probe waits behind requests and is answered with no path at sequence 0")
+            .datagram(requests(RUN, REGION, 10))
+            .datagram(Frames.probe(RUN, 20))
+            .serve(1, answer(10, RUN, 1))
+            .serve(1, answer(20, RUN, 0))
+            .datagram(Frames.probe(RUN, 20), answer(20, RUN, 0)));
+
+    cases.add(
+        new Script("a probe needs neither a profile nor an area")
+            .link(RUN, 1)
+            .datagram(Frames.probe(RUN, 5))
+            .serve(0, answer(5, RUN, 0)));
+
+    cases.add(
+        held("a probe of another run is dropped").datagram(Frames.probe(OTHER_RUN, 5)).serve(0));
 
     cases.add(
         new Script("a node holding no area answers at sequence 0")
@@ -248,6 +266,70 @@ final class ConformanceScripts {
         cases, "a fresh assignment behind the held sequence", assignment(RUN, 0, false));
     refusedWorldFrame(cases, "a fresh assignment of another run", assignment(OTHER_RUN, 1, false));
     refusedWorldFrame(cases, "a fresh assignment of run 0", assignment(0, 1, false));
+
+    cases.add(
+        new Script("a rectangular area takes chunks and cells along its longer side")
+            .link(RUN, 1).stream(LinkPort.World, longArea()).stream(
+                    LinkPort.World, rawChunk(1, 0, 1, COLUMNS, 32, PathType.OPEN, 0))
+                .stream(LinkPort.World, rawDelta(2, 1, 8, SIZE + 4, PathType.BLOCKED, 16))
+                .disconnect(LinkPort.World, linkDropped())
+                .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(RUN, REGION, 2)));
+
+    cases.add(
+        new Script("a chunk past a rectangle's shorter side is refused")
+            .link(RUN, 1).stream(LinkPort.World, longArea()).stream(
+                    LinkPort.World, rawChunk(1, 1, 0, COLUMNS, 32, PathType.OPEN, 0), linkDropped())
+                .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(0, 0, 0)));
+
+    cases.add(
+        held("a fresh assignment of another region replaces the area, even behind it").stream(
+                LinkPort.World, Frames.assignment(RUN, REGION + 1, SIZE, SIZE, 0, false, FLAT))
+            .stream(LinkPort.World, chunk(1))
+            .datagram(requests(RUN, REGION, 10))
+            .serve(0, answer(10, RUN, 0))
+            .datagram(requests(RUN, REGION + 1, 11))
+            .serve(0, answer(11, RUN, 1))
+            .disconnect(LinkPort.Control, linkDropped())
+            .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(RUN, REGION + 1, 1)));
+
+    cases.add(
+        new Script("a kept area goes on with the stream under a new id")
+            .link(RUN, 1).stream(LinkPort.Control, Frames.mobClass(profile(MOB_CLASS, 0.6f)))
+                .stream(LinkPort.World, longArea())
+                .stream(LinkPort.World, chunk(1))
+                .stream(LinkPort.World, kept(RUN, REGION + 1, REGION, SIZE, SIZE, 1))
+                .stream(LinkPort.World, delta(2))
+                .datagram(requests(RUN, REGION + 1, 10))
+                .serve(0, answer(10, RUN, 2))
+                .datagram(requests(RUN, REGION, 11))
+                .serve(0, answer(11, RUN, 0))
+                .disconnect(LinkPort.Control, linkDropped())
+                .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(RUN, REGION + 1, 2)));
+
+    cases.add(
+        new Script("a cell past a kept area's new edge is refused")
+            .link(RUN, 1).stream(LinkPort.World, longArea()).stream(
+                    LinkPort.World, kept(RUN, REGION + 1, REGION, SIZE, SIZE, 0))
+                .stream(
+                    LinkPort.World,
+                    rawDelta(1, 1, 8, SIZE + 4, PathType.BLOCKED, 16),
+                    linkDropped())
+                .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(0, 0, 0)));
+
+    refusedWorldFrame(
+        cases, "a kept area of another region", kept(RUN, REGION + 1, REGION + 2, SIZE, SIZE, 1));
+    refusedWorldFrame(
+        cases, "a kept area of another run", kept(OTHER_RUN, REGION + 1, REGION, SIZE, SIZE, 1));
+    refusedWorldFrame(
+        cases, "a kept area at another sequence", kept(RUN, REGION + 1, REGION, SIZE, SIZE, 0));
+    refusedWorldFrame(
+        cases,
+        "a kept area larger than the one held",
+        kept(RUN, REGION + 1, REGION, SIZE, 2 * SIZE, 1));
+    refusedWorldFrame(cases, "a kept area that also resumes", keptAndResumed());
+    refusedWorldFrame(
+        cases, "an assignment of region 0", Frames.assignment(RUN, 0, SIZE, SIZE, 1, false, FLAT));
+    refusedWorldFrame(cases, "a kept area as region 0", kept(RUN, 0, REGION, SIZE, SIZE, 1));
 
     cases.add(
         new Script("a world frame before any assignment is refused")
@@ -299,7 +381,7 @@ final class ConformanceScripts {
             .connect(LinkPort.Control, Frames.joinControl(RUN, 3), linkDropped(), hello(0, 0, 0))
             .connect(LinkPort.World, Frames.joinWorld(RUN, 2), refused())
             .connect(LinkPort.World, Frames.joinWorld(RUN, 3))
-            .heartbeat(heartbeat(0)));
+            .heartbeat(heartbeat(0, 0)));
 
     cases.add(
         new Script("a connection whose first frame is not a join is refused")
@@ -308,14 +390,14 @@ final class ConformanceScripts {
             .connect(LinkPort.Control, Frames.mobClass(profile(MOB_CLASS, 0.6f)), refused())
             .connect(LinkPort.Control, rawJoinControl(0, 4), refused())
             .connect(LinkPort.World, rawJoinWorld(RUN, 0), refused())
-            .heartbeat(heartbeat(0)));
+            .heartbeat(heartbeat(0, 0)));
 
     cases.add(
         new Script("a second connection for a joined port is refused")
             .link(RUN, 1)
             .connect(LinkPort.Control, Frames.joinControl(RUN, 1), refused())
             .connect(LinkPort.World, Frames.joinWorld(RUN, 1), refused())
-            .heartbeat(heartbeat(0)));
+            .heartbeat(heartbeat(0, 0)));
 
     cases.add(
         new Script("the token of a dropped link is refused")
@@ -328,9 +410,29 @@ final class ConformanceScripts {
         held("a join after the first frame is ignored").stream(
                 LinkPort.World, Frames.joinWorld(RUN, 1))
             .stream(LinkPort.Control, Frames.joinControl(OTHER_RUN, 9))
-            .heartbeat(heartbeat(0))
+            .heartbeat(heartbeat(0, 0))
             .disconnect(LinkPort.World, linkDropped())
             .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(RUN, REGION, 1)));
+
+    cases.add(
+        held("a heartbeat counts the searches finished since the last, not probes or misses")
+            .datagram(requests(RUN, REGION, 10, 11))
+            .datagram(Frames.probe(RUN, 12))
+            .datagram(requests(RUN, REGION + 1, 13))
+            .serve(
+                0, answer(10, RUN, 1), answer(11, RUN, 1), answer(12, RUN, 0), answer(13, RUN, 0))
+            .heartbeat(heartbeat(0, 2))
+            .heartbeat(heartbeat(0, 0)));
+
+    cases.add(
+        held("a heartbeat with no link to send on still ends its interval")
+            .datagram(requests(RUN, REGION, 10))
+            .serve(0, answer(10, RUN, 1))
+            .disconnect(LinkPort.Control, linkDropped())
+            .heartbeat()
+            .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(RUN, REGION, 1))
+            .connect(LinkPort.World, Frames.joinWorld(RUN, 2))
+            .heartbeat(heartbeat(0, 0)));
 
     cases.add(
         new Script("the heartbeat needs the control connection and counts waiting requests")
@@ -338,7 +440,7 @@ final class ConformanceScripts {
             .connect(LinkPort.World, Frames.joinWorld(RUN, 1))
             .heartbeat()
             .connect(LinkPort.Control, Frames.joinControl(RUN, 1), hello(0, 0, 0))
-            .heartbeat(heartbeat(0)));
+            .heartbeat(heartbeat(0, 0)));
 
     FlatBufferBuilder builder = new FlatBufferBuilder(1 << 16);
     int[] offsets = new int[cases.size()];
@@ -374,7 +476,34 @@ final class ConformanceScripts {
   }
 
   private static byte[] assignment(long run, long sequence, boolean resume) {
-    return Frames.assignment(run, REGION, SIZE, sequence, resume, FLAT);
+    return Frames.assignment(run, REGION, SIZE, SIZE, sequence, resume, FLAT);
+  }
+
+  /** An area twice as long along z as along x. */
+  private static byte[] longArea() {
+    return Frames.assignment(RUN, REGION, SIZE, 2 * SIZE, 0, false, FLAT);
+  }
+
+  private static byte[] kept(long run, int region, int from, int sizeX, int sizeZ, long sequence) {
+    return Frames.keptAssignment(run, region, from, sizeX, sizeZ, sequence, FLAT);
+  }
+
+  /** A kept area that also sets `resume`, which the encoder refuses to build. */
+  private static byte[] keptAndResumed() {
+    FlatBufferBuilder builder = new FlatBufferBuilder(128);
+    RegionAssignment.startRegionAssignment(builder);
+    RegionAssignment.addRun(builder, RUN);
+    RegionAssignment.addRegionId(builder, REGION + 1);
+    RegionAssignment.addSizeX(builder, SIZE);
+    RegionAssignment.addSizeZ(builder, SIZE);
+    RegionAssignment.addMinY(builder, FLAT.minY());
+    RegionAssignment.addHeight(builder, FLAT.height());
+    RegionAssignment.addResume(builder, true);
+    RegionAssignment.addSequence(builder, 1);
+    RegionAssignment.addFromRegionId(builder, REGION);
+    int body = RegionAssignment.endRegionAssignment(builder);
+    builder.finish(WorldFrame.createWorldFrame(builder, WorldMsg.RegionAssignment, body));
+    return builder.sizedByteArray();
   }
 
   private static byte[] chunk(long sequence) {
@@ -474,35 +603,38 @@ final class ConformanceScripts {
   }
 
   /** One expected effect, with only the fields its kind compares set. */
-  record Expected(int kind, long run, long regionId, long sequence, long depth, long requestId) {
+  record Expected(
+      int kind, long run, long regionId, long sequence, long depth, long requestId, long searches) {
 
     int encode(FlatBufferBuilder builder) {
-      return Effect.createEffect(builder, kind, run, regionId, sequence, depth, requestId);
+      return Effect.createEffect(
+          builder, kind, run, regionId, sequence, depth, requestId, searches);
     }
   }
 
   static Expected hello(long run, long region, long sequence) {
-    return new Expected(EffectKind.Hello, run, region, sequence, 0, 0);
+    return new Expected(EffectKind.Hello, run, region, sequence, 0, 0, 0);
   }
 
-  static Expected heartbeat(long depth) {
-    return new Expected(EffectKind.Heartbeat, 0, 0, 0, depth, 0);
+  /** {@code searches} counts those finished since the timer last fired. */
+  static Expected heartbeat(long depth, long searches) {
+    return new Expected(EffectKind.Heartbeat, 0, 0, 0, depth, 0, searches);
   }
 
   static Expected answer(long requestId, long run, long sequence) {
-    return new Expected(EffectKind.Answer, run, 0, sequence, 0, requestId);
+    return new Expected(EffectKind.Answer, run, 0, sequence, 0, requestId, 0);
   }
 
   static Expected unknownProfile(long requestId, long run) {
-    return new Expected(EffectKind.UnknownProfile, run, 0, 0, 0, requestId);
+    return new Expected(EffectKind.UnknownProfile, run, 0, 0, 0, requestId, 0);
   }
 
   static Expected linkDropped() {
-    return new Expected(EffectKind.LinkDropped, 0, 0, 0, 0, 0);
+    return new Expected(EffectKind.LinkDropped, 0, 0, 0, 0, 0, 0);
   }
 
   static Expected refused() {
-    return new Expected(EffectKind.Refused, 0, 0, 0, 0, 0);
+    return new Expected(EffectKind.Refused, 0, 0, 0, 0, 0, 0);
   }
 
   /** One case being written. */

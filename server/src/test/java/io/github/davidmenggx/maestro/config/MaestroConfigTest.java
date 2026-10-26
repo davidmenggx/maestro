@@ -39,6 +39,8 @@ class MaestroConfigTest {
                 {"host": "node-2"}
               ],
               "nodeCapacity": 40,
+              "areaCells": 9,
+              "spares": 2,
               "otlpEndpoint": "http://collector:4317"
             }
             """);
@@ -59,7 +61,15 @@ class MaestroConfigTest {
                 MaestroConfig.NodeAddress.DEFAULT_REQUEST_PORT)),
         config.nodes());
     assertEquals(40, config.nodeCapacity());
+    assertEquals(9, config.areaCells());
+    assertEquals(2, config.spares());
     assertEquals("http://collector:4317", config.otlpEndpoint());
+  }
+
+  @Test
+  void theDefaultCoversFiveCellsAroundTheOriginAndKeepsOneSpare() {
+    assertEquals(5, MaestroConfig.DEFAULT.areaCells());
+    assertEquals(1, MaestroConfig.DEFAULT.spares());
   }
 
   @Test
@@ -119,6 +129,16 @@ class MaestroConfigTest {
             """,
             """
             {"nodes": [null]}
+            """,
+            // A square of no cells, one too large for the wire, and negative spares.
+            """
+            {"areaCells": 0}
+            """,
+            """
+            {"areaCells": 128}
+            """,
+            """
+            {"spares": -1}
             """);
 
     for (String json : unusable) {

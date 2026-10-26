@@ -53,7 +53,8 @@ public interface Transport {
 
   /**
    * The caller must not change the frame after this returns. A send to a node that is not connected
-   * is discarded silently; backpressure comes from the node's reported queue depth.
+   * is discarded silently; backpressure comes from the controller's model of the node's queue. May
+   * be called from an offload worker, which sends a streamed request.
    */
   void send(NodeId node, Channel channel, ByteBuffer frame);
 

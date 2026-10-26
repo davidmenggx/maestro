@@ -157,7 +157,7 @@ final class ParityCapture implements Searches.Interceptor {
     forgetCachedTypes();
 
     List<byte[]> worldFrames = new ArrayList<>();
-    worldFrames.add(Frames.assignment(RUN, REGION, SIZE, 0, false, world));
+    worldFrames.add(Frames.assignment(RUN, REGION, SIZE, SIZE, 0, false, world));
     long sequence = 0;
     int firstChunk = Chunks.of(ORIGIN);
     for (int dx = 0; dx < AREA_CHUNKS; dx++) {
@@ -333,7 +333,13 @@ final class ParityCapture implements Searches.Interceptor {
     MobClass profile = call.profile();
     Pos start = pos(call.start());
     if (!SearchReach.fits(
-        ORIGIN, ORIGIN, SIZE, start, call.search().maxPathLength(), profile.shape().width())) {
+        ORIGIN,
+        ORIGIN,
+        SIZE,
+        SIZE,
+        start,
+        call.search().maxPathLength(),
+        profile.shape().width())) {
       return null;
     }
     byte[] request =

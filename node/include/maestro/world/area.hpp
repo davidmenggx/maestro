@@ -17,16 +17,24 @@ inline constexpr int ColumnsPerChunk = ChunkSize * ChunkSize;
 /// Shape of an assigned area. Positions use the wire's frame: `X` and `Z`
 /// relative to the area's corner, `Y` absolute.
 struct Geometry {
-  /// Blocks per side, a multiple of `ChunkSize`.
-  int Size = 0;
+  /// Blocks along each horizontal axis, multiples of `ChunkSize`.
+  int SizeX = 0;
+  int SizeZ = 0;
   int MinY = 0;
   int Height = 0;
 
-  int chunksPerSide() const { return Size / ChunkSize; }
+  int chunksX() const { return SizeX / ChunkSize; }
+  int chunksZ() const { return SizeZ / ChunkSize; }
 
   bool contains(int X, int Y, int Z) const {
-    return X >= 0 && X < Size && Z >= 0 && Z < Size && Y >= MinY &&
+    return X >= 0 && X < SizeX && Z >= 0 && Z < SizeZ && Y >= MinY &&
            Y < MinY + Height;
+  }
+
+  /// Whether an area of shape `Other` with the same corner lies inside.
+  bool holds(const Geometry &Other) const {
+    return Other.SizeX <= SizeX && Other.SizeZ <= SizeZ && Other.MinY == MinY &&
+           Other.Height == Height;
   }
 
   friend bool operator==(const Geometry &, const Geometry &) = default;
@@ -122,6 +130,11 @@ public:
   /// edit must be inside the area.
   std::shared_ptr<const Area> withCells(std::span<const CellEdit> Edits,
                                         std::uint64_t Sequence) const;
+
+  /// This version cut down to `To`, which `geometry()` must hold, as region
+  /// `RegionId` of the same run and sequence. Chunks inside are shared.
+  std::shared_ptr<const Area> cropped(Geometry To,
+                                      std::uint32_t RegionId) const;
 
 private:
   /// The chunks at one `ChunkX`, indexed by `ChunkZ`. A null chunk is air.
