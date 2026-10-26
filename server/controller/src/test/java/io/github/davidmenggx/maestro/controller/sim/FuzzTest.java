@@ -292,7 +292,9 @@ class FuzzTest {
     assertTrue(splits > 0, "no hot region was ever cut");
     assertTrue(replicasAdded > 0, "no hot region ever took a replica");
     assertTrue(replicasReturned > 0, "no cold replica ever returned to the spares");
+    assertTrue(multiCellReplicas > 0, "no region of several cells ever took a replica");
     assertTrue(reassigned > 0, "no down holder's region ever went to a spare");
+    assertTrue(reclaimed > 0, "no region left with no holder up ever took another's replica");
     assertTrue(keptHalves > 0, "no holder of a cut region ever kept its lower side");
     assertTrue(streamedRuns > 0 && streamedAnswered > 0, "no streamed request was ever answered");
     assertTrue(shedNearAPlayer > 0, "no run shed requests with a player online");

@@ -67,6 +67,11 @@ class PathOffloadTest {
   /** Whether the mob of the next call has a target. */
   private boolean hunting = true;
 
+  /** Whether the next calls' vanilla searches, in the call and later, find nothing. */
+  private boolean vanillaFindsNothing;
+
+  private boolean laterFindsNothing;
+
   private PathOffload offload;
 
   @BeforeAll
@@ -427,6 +432,110 @@ class PathOffloadTest {
   }
 
   @Test
+  void shadowModeAsksOnceForARepeatedCallButRunsVanillaEachTime() {
+    offload = offload(Offload.SHADOW);
+
+    search(START, TARGET);
+    search(START, TARGET);
+
+    assertEquals(2, vanillaCalls.size());
+    assertEquals(1, controller.requests());
+  }
+
+  @Test
+  void shadowModeComparesReachAndEveryNode() {
+    offload = offload(Offload.SHADOW);
+
+    search(START, TARGET);
+    List<BlockPos> unreached = line(0, 6);
+    offload.pathComputed(answer(START, TARGET, unreached, false));
+    search(START, TARGET);
+    List<BlockPos> stepped = line(0, 6);
+    stepped.set(3, stepped.get(3).above());
+    offload.pathComputed(answer(START, TARGET, stepped, true));
+    search(START, TARGET);
+    offload.pathComputed(answer(START, TARGET, line(0, 6)));
+
+    assertEquals(2, offload.outcomes("SHADOW_DIFFERED"));
+    assertEquals(1, offload.outcomes("SHADOW_MATCHED"));
+  }
+
+  @Test
+  void shadowModeMatchesNoPathOnlyWithNoPath() {
+    offload = offload(Offload.SHADOW);
+    vanillaFindsNothing = true;
+
+    search(START, TARGET);
+    offload.pathComputed(answer(START, TARGET, List.of()));
+    search(START, TARGET);
+    offload.pathComputed(answer(START, TARGET, line(0, 6)));
+
+    assertEquals(1, offload.outcomes("SHADOW_MATCHED"));
+    assertEquals(1, offload.outcomes("SHADOW_DIFFERED"));
+  }
+
+  @Test
+  void shadowModeCountsEveryMismatchPastThoseItLogs() {
+    offload = offload(Offload.SHADOW);
+
+    for (int i = 0; i <= PathOffload.MAX_LOGGED_MISMATCHES; i++) {
+      search(START, TARGET);
+      offload.pathComputed(answer(START, TARGET, line(0, 5)));
+    }
+
+    assertEquals(PathOffload.MAX_LOGGED_MISMATCHES + 1, offload.outcomes("SHADOW_DIFFERED"));
+  }
+
+  @Test
+  void shadowModeComparesNothingForARefusedCall() {
+    offload = offload(Offload.SHADOW);
+    controller.refuseWith = DropReason.NO_NODE;
+
+    Path vanilla = search(START, TARGET);
+    offload.pathComputed(answer(START, TARGET, line(0, 6)));
+
+    assertSame(vanillaCalls.get(0), vanilla);
+    assertEquals(0, offload.outcomes("ANSWERED"));
+  }
+
+  @Test
+  void anAnswerOrADropForAMobWithNoRequestIsIgnored() {
+    offload.pathComputed(answer(START, TARGET, line(0, 6)));
+    offload.pathDropped(MOB, DropReason.TIMEOUT);
+    navigator.follow(search(START, TARGET), TARGET);
+    offload.pathComputed(answer(START, TARGET, line(0, 6)));
+    offload.pathDropped(MOB, DropReason.TIMEOUT);
+
+    assertEquals(1, offload.outcomes("ANSWERED"));
+    assertEquals(0, offload.outcomes("DROPPED"));
+  }
+
+  @Test
+  void aDropForAMobThatLeftIsCountedAndEndsNothing() {
+    navigator.follow(search(START, TARGET), TARGET);
+    navigators.remove(MOB);
+
+    offload.pathDropped(MOB, DropReason.TIMEOUT);
+
+    assertEquals(1, offload.outcomes("DROPPED"));
+    assertTrue(HeldPaths.isHeld(navigator.path));
+  }
+
+  @Test
+  void theSummaryCountsEachOutcomeAndHowLateEachAnswerWas() {
+    navigator.follow(search(START, TARGET), TARGET);
+    WorldOutput.PathResult answer = answer(START, TARGET, line(0, 6));
+    clock.tick += 2;
+    offload.pathComputed(answer);
+
+    String summary = offload.summary();
+
+    assertTrue(summary.startsWith("requested=1 refused=0 answered=1 applied=1 "), summary);
+    assertTrue(summary.contains(" failover_full=0 "), summary);
+    assertTrue(summary.endsWith(" ticks_late=2:1"), summary);
+  }
+
+  @Test
   void aMobWhoseNodeCannotTakeItKeepsAPathMadeRecently() {
     controller.refuseWith = DropReason.UNAVAILABLE;
     Path recent = path(line(-4, 0));
@@ -590,6 +699,91 @@ class PathOffloadTest {
   }
 
   @Test
+  void aHeldOrFinishedPathIsNotKeptAsARecentOne() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    navigator.follow(HeldPaths.hold(START, TARGET), TARGET);
+    search(START, TARGET);
+    Path finished = path(line(-1, 0));
+    finished.advance();
+    finished.advance();
+    navigator.path = finished;
+
+    search(START, TARGET);
+
+    assertEquals(0, offload.failover().outcomes(Failover.Outcome.RECENT));
+    assertEquals(2, offload.failover().outcomes(Failover.Outcome.FULL));
+  }
+
+  @Test
+  void aCheapSearchThatFindsNothingLeavesTheMobIdleAndNotWaiting() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    spendTheBudget();
+    vanillaFindsNothing = true;
+
+    assertNull(search(START, TARGET));
+
+    assertFalse(offload.failover().waits(MOB));
+    assertEquals(1, offload.failover().outcomes(Failover.Outcome.CHEAP));
+  }
+
+  @Test
+  void aFullSearchThatFindsNothingLaterStopsTheNavigation() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    spendTheBudget();
+    navigator.follow(search(START, TARGET), TARGET);
+    laterFindsNothing = true;
+
+    clock.tick++;
+    offload.tickEnding();
+
+    assertEquals(List.of(MOB), laterSearches);
+    assertNull(navigator.path);
+  }
+
+  @Test
+  void aMobThatLeftWhileWaitingLosesItsTurn() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    spendTheBudget();
+    navigator.follow(search(START, TARGET), TARGET);
+    navigators.remove(MOB);
+
+    clock.tick++;
+    offload.tickEnding();
+
+    assertEquals(List.of(), laterSearches);
+    assertEquals(1, offload.failover().outcomes(Failover.Outcome.MOVED_ON));
+  }
+
+  @Test
+  void aWaitingMobThatAsksAgainKeepsItsPlaceInTheQueue() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    spendTheBudget();
+    FakeNavigator first = navigator(2);
+    FakeNavigator second = navigator(1);
+    first.follow(search(2, first, START, TARGET), TARGET);
+    // Past the time its cheap path counts as recent, so it asks the failover again.
+    clock.tick += Failover.RECENT_TICKS + 2;
+    second.follow(search(1, second, START, TARGET), TARGET);
+    first.follow(search(2, first, START, TARGET), TARGET);
+
+    clock.tick++;
+    offload.tickEnding();
+
+    assertEquals(List.of(2, 1), laterSearches);
+  }
+
+  @Test
+  void theFailoverSummaryNamesEachOutcome() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    search(START, TARGET);
+
+    assertEquals(
+        "failover_recent=0 failover_full=1 failover_cheap=0 failover_later=0"
+            + " failover_moved_on=0",
+        offload.failover().summary());
+  }
+
+  @Test
   void anAnswerBecomesThePathVanillasSearchWouldHaveReturned() {
     WorldOutput.PathResult answer =
         new WorldOutput.PathResult(
@@ -677,7 +871,7 @@ class PathOffloadTest {
         call,
         new Searches.Vanilla(
             share -> {
-              Path vanilla = path(line(start.getX(), target.getX()));
+              Path vanilla = vanillaFindsNothing ? null : path(line(start.getX(), target.getX()));
               vanillaCalls.add(vanilla);
               vanillaShares.add(share);
               nanos += (long) (SEARCH_NANOS * share);
@@ -686,11 +880,17 @@ class PathOffloadTest {
             () -> {
               laterSearches.add(mob);
               nanos += SEARCH_NANOS;
-              return path(line(start.getX(), target.getX() + 1));
+              return laterFindsNothing ? null : path(line(start.getX(), target.getX() + 1));
             }));
   }
 
   private WorldOutput.PathResult answer(BlockPos start, BlockPos target, List<BlockPos> nodes) {
+    return answer(
+        start, target, nodes, !nodes.isEmpty() && nodes.get(nodes.size() - 1).equals(target));
+  }
+
+  private WorldOutput.PathResult answer(
+      BlockPos start, BlockPos target, List<BlockPos> nodes, boolean reached) {
     List<WorldOutput.Node> answered = new ArrayList<>();
     for (BlockPos node : nodes) {
       answered.add(
@@ -700,7 +900,7 @@ class PathOffloadTest {
     return new WorldOutput.PathResult(
         MOB,
         new Pos(target.getX(), target.getY(), target.getZ()),
-        !nodes.isEmpty() && nodes.get(nodes.size() - 1).equals(target),
+        reached,
         answered,
         1f,
         clock.tick);

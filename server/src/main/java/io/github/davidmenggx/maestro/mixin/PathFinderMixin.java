@@ -71,6 +71,7 @@ public abstract class PathFinderMixin {
             maxPathLength,
             reachRange,
             budget,
+            mob.level().getMinY(),
             interceptor.profiles(),
             MALUS);
     if (call == null) {

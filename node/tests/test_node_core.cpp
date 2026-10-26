@@ -406,6 +406,42 @@ TEST_F(NodeCoreTest, ADatagramNeedsALiveLinkOfItsRun) {
   EXPECT_EQ(Response->body_as_UnknownProfile()->request_id(), 3u);
 }
 
+TEST_F(NodeCoreTest, ARequestWithoutPositionsIsDroppedUnanswered) {
+  startLink();
+  flatbuffers::FlatBufferBuilder Builder;
+  const fbs::Vec3s Start(2, 4, 2);
+  Builder.Finish(
+      fbs::CreatePathRequest(Builder, 1, TestClass, &Start, nullptr));
+  const auto *Wire =
+      flatbuffers::GetRoot<fbs::PathRequest>(Builder.GetBufferPointer());
+  EXPECT_TRUE(datagram(requestFrame(*Wire, 1, TestRun, TestRegion)).empty());
+  EXPECT_EQ(Core.queue().depth(), 0u);
+  EXPECT_NE(answer(requestFrame({2})), nullptr);
+}
+
+TEST_F(NodeCoreTest, MessagesOfATypeThisBuildLacksAreIgnored) {
+  // As a newer controller may send them: the link stays and nothing waits.
+  startLink();
+  constexpr std::uint8_t Unknown = 200;
+  flatbuffers::FlatBufferBuilder Control;
+  Control.Finish(
+      fbs::CreateControlFrame(Control, static_cast<fbs::ControlMsg>(Unknown),
+                              fbs::CreateJoin(Control, TestRun, 1).Union()));
+  EXPECT_TRUE(
+      receive(ControlId, Bytes(Control.GetBufferPointer(),
+                               Control.GetBufferPointer() + Control.GetSize()))
+          .empty());
+  flatbuffers::FlatBufferBuilder Request;
+  Request.Finish(fbs::CreateRequestFrame(
+      Request, static_cast<fbs::RequestMsg>(Unknown),
+      fbs::CreatePathProbe(Request, 1).Union(), TestRun, TestRegion));
+  EXPECT_TRUE(datagram(Bytes(Request.GetBufferPointer(),
+                             Request.GetBufferPointer() + Request.GetSize()))
+                  .empty());
+  EXPECT_EQ(Core.queue().depth(), 0u);
+  EXPECT_NE(answer(requestFrame({2})), nullptr);
+}
+
 TEST_F(NodeCoreTest, ACancelOfAnotherRunIsDropped) {
   startLink();
   ASSERT_TRUE(datagram(requestFrame({1})).empty());

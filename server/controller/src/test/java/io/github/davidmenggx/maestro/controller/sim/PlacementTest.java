@@ -120,6 +120,24 @@ class PlacementTest {
   }
 
   @Test
+  void aRegionCutWhileItsChunksAreStillBeingReadReadsTheRestForItsHalves() {
+    // Many players' views take many ticks of the read budget, so chunks are still waiting to be
+    // read when the region is cut.
+    Topology one = Topology.DEFAULT.withCells(2).withNodes(2).withSpares(1);
+    Scenario hot = Scenario.SATURATED.with(Count.HOT_WINDOWS, 1).with(Count.PLAYERS, 16);
+
+    SimRun run = SimRun.of(3L, FaultPlan.reliable(), TICKS, one, hot).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, run.sim.metrics().total("region.split"), run.describe());
+    assertTrue(run.sim.metrics().total("world.chunks.deferred") > 0, run.describe());
+    assertEquals(1, run.sim.metrics().total("world.kept"), run.describe());
+    for (ModeledNode node : run.sim.nodes()) {
+      assertTrue(Invariants.caughtUp(run.controller, node), node.id() + " " + run.describe());
+    }
+  }
+
+  @Test
   void aHotSingleCellRegionSharesItsMobsWithAReplicaUntilItCools() {
     Topology single = Topology.DEFAULT.withCells(1).withNodes(2).withSpares(1);
     Scenario hot = ONE_A_TICK.with(Count.HOT_WINDOWS, 1).with(Count.COLD_WINDOWS, 1);

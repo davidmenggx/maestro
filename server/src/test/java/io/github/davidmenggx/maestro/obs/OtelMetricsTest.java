@@ -1,6 +1,7 @@
 package io.github.davidmenggx.maestro.obs;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.sdk.common.CompletableResultCode;
@@ -75,6 +76,33 @@ class OtelMetricsTest {
             .getValue();
     assertEquals(8.25, node0);
     assertEquals(2, data.getDoubleGaugeData().getPoints().size());
+  }
+
+  @Test
+  void aCounterSumsItsDeltasPerLabel() {
+    metrics.count("path.offload", 1, "outcome", "APPLIED");
+    metrics.count("path.offload", 2, "outcome", "APPLIED");
+    metrics.count("path.offload", 1, "outcome", "SHED");
+    metrics.count("path.answered", 5);
+
+    assertEquals(3, sum("path.offload", "outcome", "APPLIED"));
+    assertEquals(1, sum("path.offload", "outcome", "SHED"));
+    assertEquals(
+        5, metric("path.answered").getLongSumData().getPoints().iterator().next().getValue());
+  }
+
+  @Test
+  void labelsMustComeInKeyAndValuePairs() {
+    assertThrows(IllegalArgumentException.class, () -> metrics.count("path.offload", 1, "outcome"));
+    assertThrows(IllegalArgumentException.class, () -> metrics.gauge("node.phi", 1.0, "node"));
+  }
+
+  private long sum(String name, String key, String value) {
+    return metric(name).getLongSumData().getPoints().stream()
+        .filter(point -> value.equals(point.getAttributes().get(AttributeKey.stringKey(key))))
+        .findFirst()
+        .orElseThrow()
+        .getValue();
   }
 
   private HistogramPointData histogram(String name) {

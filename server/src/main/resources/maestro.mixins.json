@@ -11,7 +11,8 @@
     "PathFinderMixin",
     "PathMixin",
     "PathNavigationMixin",
-    "PortalShapeMixin"
+    "PortalShapeMixin",
+    "WallClimberNavigationMixin"
   ],
   "injectors": {
     "defaultRequire": 1

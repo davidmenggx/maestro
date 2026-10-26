@@ -22,7 +22,7 @@ MAESTRO_SANITIZE ?=
 .PHONY: all help flatc schema schema-cpp schema-java \
         node node-configure node-test \
         server server-test fuzz test test-boot test-e2e capture conformance run-node run-server \
-        clean distclean
+        coverage clean distclean
 
 all: node server ## Build the C++ node and the Java mod
 
@@ -104,12 +104,40 @@ conformance: schema-java ## Write the node conformance fixture into fixtures/con
 		-Dmaestro.conformance.write=true
 
 # ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
+# Clang's source-based coverage. llvm-profdata and llvm-cov must match the compiler, so they are
+# taken from its directory, looked up only when a recipe uses it.
+COVERAGE_CXX  ?= clang++
+LLVM_BIN       = $(dir $(realpath $(shell command -v $(COVERAGE_CXX))))
+COVERAGE      := $(BUILD)/coverage
+NODE_COVERAGE := $(BUILD)/node-coverage
+
+coverage: schema ## Measure the unit suites' line and branch coverage into build/coverage (COVERAGE_CXX=clang++)
+	cd server && $(GRADLE) --init-script $(ROOT)/tools/jacoco.init.gradle \
+		-Dmaestro.coverage.dir=$(COVERAGE)/java coverageReport
+	cmake -S node -B $(NODE_COVERAGE) -DCMAKE_BUILD_TYPE=Debug \
+		-DCMAKE_CXX_COMPILER=$(COVERAGE_CXX) -DMAESTRO_WITH_OTEL=OFF \
+		-DCMAKE_CXX_FLAGS="-fprofile-instr-generate -fcoverage-mapping"
+	cmake --build $(NODE_COVERAGE) -j
+	rm -rf $(NODE_COVERAGE)/profiles
+	LLVM_PROFILE_FILE=$(NODE_COVERAGE)/profiles/%p.profraw \
+		ctest --test-dir $(NODE_COVERAGE) -j $(shell nproc) --output-on-failure
+	$(LLVM_BIN)llvm-profdata merge -sparse $(NODE_COVERAGE)/profiles/*.profraw \
+		-o $(NODE_COVERAGE)/tests.profdata
+	$(LLVM_BIN)llvm-cov show $(NODE_COVERAGE)/maestro_tests -object $(NODE_COVERAGE)/maestro-node \
+		-instr-profile=$(NODE_COVERAGE)/tests.profdata -show-branches=count \
+		-format=html -output-dir=$(COVERAGE)/node node/src node/include
+	$(LLVM_BIN)llvm-cov report $(NODE_COVERAGE)/maestro_tests -object $(NODE_COVERAGE)/maestro-node \
+		-instr-profile=$(NODE_COVERAGE)/tests.profdata node/src node/include
+
+# ---------------------------------------------------------------------------
 # Aggregate / cleanup
 # ---------------------------------------------------------------------------
 test: node-test server-test ## Run every unit test suite (see `fuzz` for the sweeps)
 
 clean: ## Remove build outputs (keeps fetched dependencies)
-	rm -rf $(BUILD)/node $(GEN_CPP) $(GEN_JAVA)
+	rm -rf $(BUILD)/node $(NODE_COVERAGE) $(COVERAGE) $(GEN_CPP) $(GEN_JAVA)
 	cd server && $(GRADLE) clean || true
 
 distclean: ## Remove everything, including fetched dependencies

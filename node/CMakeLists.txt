@@ -25,6 +25,7 @@ endif()
 
 # --- Core library shared by the node binary and the tests --------------------
 add_library(maestro_core
+  src/cli.cpp
   src/net/framing.cpp
   src/net/server.cpp
   src/obs.cpp
@@ -84,10 +85,12 @@ if(MAESTRO_BUILD_TESTS)
   add_executable(maestro_tests
     tests/test_area.cpp
     tests/test_binary_heap.cpp
+    tests/test_cli.cpp
     tests/test_conformance.cpp
     tests/test_coord_map.cpp
     tests/test_frames.cpp
     tests/test_framing.cpp
+    tests/test_java_math.cpp
     tests/test_node_core.cpp
     tests/test_obs.cpp
     tests/test_parity.cpp
@@ -100,6 +103,8 @@ if(MAESTRO_BUILD_TESTS)
     tests/test_world_store.cpp
   )
   target_link_libraries(maestro_tests PRIVATE maestro_core GTest::gtest_main)
+  # Lets tests reach headers private to the library, such as `java_math.hpp`.
+  target_include_directories(maestro_tests PRIVATE src)
   # Parity fixtures recorded from vanilla by `make capture`, committed with the
   # repository and shared with the Java tests, and the conformance scripts the
   # controller's modeled node also replays.

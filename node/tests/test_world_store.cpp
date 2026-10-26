@@ -92,6 +92,23 @@ Frame chunkFrame(std::uint64_t Sequence,
           Builder.GetBufferPointer() + Builder.GetSize()};
 }
 
+/// A chunk frame at chunk (0, 0) holding `Counts` and no runs.
+Frame chunkWithoutRuns(std::uint64_t Sequence,
+                       const std::vector<std::uint16_t> &Counts) {
+  flatbuffers::FlatBufferBuilder Builder;
+  const auto CountsVec = Builder.CreateVector(Counts);
+  const fbs::Vec2i ChunkXz(0, 0);
+  fbs::ChunkSnapshotBuilder Snapshot(Builder);
+  Snapshot.add_sequence(Sequence);
+  Snapshot.add_chunk_xz(&ChunkXz);
+  Snapshot.add_run_counts(CountsVec);
+  const auto Body = Snapshot.Finish();
+  Builder.Finish(fbs::CreateWorldFrame(Builder, fbs::WorldMsg::ChunkSnapshot,
+                                       Body.Union()));
+  return {Builder.GetBufferPointer(),
+          Builder.GetBufferPointer() + Builder.GetSize()};
+}
+
 /// A chunk frame whose runs come from `Runs` for every column.
 Frame uniformChunk(std::uint64_t Sequence,
                    const std::vector<fbs::CellRun> &Runs,
@@ -414,6 +431,10 @@ TEST(WorldStore, RejectsAnAreaThatDoesNotTileIntoChunks) {
   expectRefusedAndReset(
       assignmentOf(32, 32, std::numeric_limits<int>::max() - 10, 100),
       ApplyStatus::Malformed);
+  // And the bottom.
+  expectRefusedAndReset(
+      assignmentOf(32, 32, std::numeric_limits<std::int16_t>::min() - 1, 24),
+      ApplyStatus::Malformed);
 }
 
 TEST(WorldStore, HoldsARectangularArea) {
@@ -565,6 +586,12 @@ TEST(WorldStore, RejectsChunksThatBreakTheContract) {
   std::vector<fbs::CellRun> Extra = Runs;
   Extra.push_back(Air20);
   expectRefusedAndReset(chunkFrame(5, Counts, Extra), ApplyStatus::Malformed);
+  // Too few runs for the last column.
+  std::vector<fbs::CellRun> Short = Runs;
+  Short.pop_back();
+  expectRefusedAndReset(chunkFrame(5, Counts, Short), ApplyStatus::Malformed);
+  // Counts with no runs at all.
+  expectRefusedAndReset(chunkWithoutRuns(5, Counts), ApplyStatus::Malformed);
 
   WorldStore Store;
   load(Store, flatWorld());
@@ -574,7 +601,20 @@ TEST(WorldStore, RejectsChunksThatBreakTheContract) {
 
 TEST(WorldStore, RejectsAChunkOutsideTheArea) {
   expectRefusedAndReset(test::clearedChunk(5, 2, 0), ApplyStatus::Malformed);
+  expectRefusedAndReset(test::clearedChunk(5, -1, 0), ApplyStatus::Malformed);
+  expectRefusedAndReset(test::clearedChunk(5, 0, 2), ApplyStatus::Malformed);
   expectRefusedAndReset(test::clearedChunk(5, 0, -1), ApplyStatus::Malformed);
+}
+
+TEST(WorldStore, RejectsAFrameOfAnotherChannel) {
+  // A `Join` belongs to the link, which the node handles before the store.
+  flatbuffers::FlatBufferBuilder Builder;
+  const auto Body = fbs::CreateJoin(Builder, 1, 1);
+  Builder.Finish(
+      fbs::CreateWorldFrame(Builder, fbs::WorldMsg::Join, Body.Union()));
+  expectRefusedAndReset(Frame(Builder.GetBufferPointer(),
+                              Builder.GetBufferPointer() + Builder.GetSize()),
+                        ApplyStatus::Malformed);
 }
 
 TEST(WorldStore, RejectsADeltaThatBreaksTheContract) {

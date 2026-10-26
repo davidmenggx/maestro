@@ -20,6 +20,8 @@ import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import maestro.fbs.ControlReplyFrame;
+import maestro.fbs.ControlReplyMsg;
 import maestro.fbs.PathNode;
 import maestro.fbs.PathResponse;
 import maestro.fbs.PathType;
@@ -375,6 +377,53 @@ class WorldBoundaryTest {
         run.sim.env().clock().nowNanos());
     assertEquals(0, run.controller.outstandingCount(), run.describe());
     assertEquals(1, run.out.answered(), run.describe());
+  }
+
+  @Test
+  void framesFromOutsideTheFleetOrOfNoKnownKindAreCountedAndIgnored() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH, true));
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 3, script).go();
+    NodeId owner = holders(run, HERE).get(0);
+    NodeId stranger = NodeId.of(Topology.DEFAULT.nodeCount());
+    long now = run.sim.env().clock().nowNanos();
+    long strangers = run.sim.metrics().total("transport.unknown.node");
+
+    run.controller.onConnected(stranger);
+    run.controller.onDisconnected(stranger);
+    run.controller.onFrame(
+        stranger,
+        Channel.REQUEST,
+        answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE),
+        now);
+    assertEquals(strangers + 3, run.sim.metrics().total("transport.unknown.node"), run.describe());
+
+    // Frames with no body, as from a node newer than this controller.
+    FlatBufferBuilder response = new FlatBufferBuilder(64);
+    response.finish(
+        ResponseFrame.createResponseFrame(response, ResponseMsg.NONE, 0, run.controller.run()));
+    run.controller.onFrame(owner, Channel.REQUEST, ByteBuffer.wrap(response.sizedByteArray()), now);
+    FlatBufferBuilder control = new FlatBufferBuilder(64);
+    control.finish(ControlReplyFrame.createControlReplyFrame(control, ControlReplyMsg.NONE, 0));
+    run.controller.onFrame(owner, Channel.CONTROL, ByteBuffer.wrap(control.sizedByteArray()), now);
+    assertEquals(2, run.sim.metrics().total("controller.unknown.frame"), run.describe());
+
+    assertEquals(1, run.controller.outstandingCount(), run.describe());
+    assertEquals(List.of(), run.controller.selfCheck(), run.describe());
+  }
+
+  @Test
+  void aNodeThatSendsOnTheWorldChannelIsFlagged() {
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 3, prelude()).go();
+
+    run.controller.onFrame(
+        OWNER, Channel.WORLD, ByteBuffer.wrap(new byte[] {1}), run.sim.env().clock().nowNanos());
+
+    assertTrue(
+        run.controller.selfCheck().stream()
+            .anyMatch(found -> found.equals(OWNER + " sent a frame on the world channel")),
+        run.describe());
   }
 
   /** The node answered before the chunk the search starts in reached it, so it searched air. */

@@ -182,6 +182,18 @@ TEST(VanillaSearch, StaysWithinThePathLength) {
   EXPECT_EQ(positions(Path), Expected);
 }
 
+TEST(VanillaSearch, APathLengthOfZeroNeverExpandsTheStart) {
+  // The start is popped and, at distance 0 from itself, not expanded, so the
+  // path is the start, the node nearest the target that the search saw.
+  Request Call = walk({2, 1, 2}, {8, 1, 2});
+  Call.MaxPathLength = 0.0F;
+  const Result Path = find(flat(), Profile{}, Call);
+  EXPECT_FALSE(Path.Reached);
+  ASSERT_EQ(Path.Nodes.size(), 1u);
+  EXPECT_EQ(Path.Nodes[0].Pos, (BlockPos{2, 1, 2}));
+  EXPECT_EQ(Path.Cost, 0.0F);
+}
+
 TEST(VanillaSearch, OpensWoodenDoorsOnlyForMobsThatCan) {
   DenseWorld World = flat();
   World.fill(5, 1, 0, 5, 3, 31, Stone);
@@ -361,6 +373,80 @@ TEST(WalkNodeEvaluator, LeavingAFenceSweepsTheMobsBox) {
   EXPECT_FALSE(offers(Neighbors, {6, 1, 2}));
 }
 
+TEST(WalkNodeEvaluator, ASweepOfNoLengthTestsNoBox) {
+  // A 1 by 2 mob on a fence node, stepping west onto the node straight below
+  // the start. The sweep from the start's bottom centre has zero length, so
+  // vanilla takes no step, and the stone inside the mob's box at the start
+  // never counts.
+  DenseWorld World = flat();
+  World.set(6, 1, 5, Fence);
+  World.set(5, 3, 5, Stone);
+  const auto Area = World.load();
+  Profile Mob;
+  Mob.Width = 1.0F;
+  Mob.Height = 2.0F;
+  Mob.Malus[static_cast<int>(PathType::FENCE)] = 0.0F;
+  const Request Call = walk({5, 2, 5}, {8, 1, 5});
+
+  WalkNodeEvaluator Evaluator;
+  Evaluator.prepare(*Area, Mob, Call);
+  const NodeId OnTheFence = Evaluator.getTarget({6, 1, 5});
+  EXPECT_EQ(Evaluator.getCachedPathType(6, 1, 5), PathType::FENCE);
+  std::array<NodeId, 32> Ids{};
+  const int Count = Evaluator.getNeighbors(Ids, OnTheFence);
+  std::vector<Node> Neighbors;
+  for (int I = 0; I < Count; ++I)
+    Neighbors.push_back(Evaluator.node(Ids[I]));
+  EXPECT_TRUE(offers(Neighbors, {5, 1, 5}));
+}
+
+TEST(WalkNodeEvaluator, ASweepCollidesOnlyWithBlocksItOverlaps) {
+  // A 1 by 2 mob on a fence node steps west, away from the fence. Its box
+  // rises half a block each of two steps and ends flush under y = 4.
+  DenseWorld World = flat();
+  World.set(6, 1, 5, Fence);
+  Profile Mob;
+  Mob.Width = 1.0F;
+  Mob.Height = 2.0F;
+  Mob.Malus[static_cast<int>(PathType::FENCE)] = 0.0F;
+  const Request Call = walk({5, 1, 5}, {0, 1, 5});
+  WalkNodeEvaluator Evaluator;
+
+  const auto Clear = World.load();
+  Evaluator.prepare(*Clear, Mob, Call);
+  EXPECT_TRUE(offers(neighborsOf(Evaluator, Call.Start), {4, 1, 5}));
+
+  // Touching faces do not collide.
+  World.set(4, 4, 5, Stone);
+  const auto Flush = World.load();
+  Evaluator.prepare(*Flush, Mob, Call);
+  EXPECT_TRUE(offers(neighborsOf(Evaluator, Call.Start), {4, 1, 5}));
+
+  // Carpet is passable, so the node stays walkable, but the box overlaps it.
+  World.set(4, 3, 5, world::Cell{PathType::OPEN, 1});
+  const auto Overlapped = World.load();
+  Evaluator.prepare(*Overlapped, Mob, Call);
+  EXPECT_FALSE(offers(neighborsOf(Evaluator, Call.Start), {4, 1, 5}));
+}
+
+TEST(WalkNodeEvaluator, SinkingThroughWaterStopsAboveTheWorldFloor) {
+  // Water from the floor of the world up to the mob's feet beside it. A mob
+  // that cannot float sinks to the lowest water cell above the floor, and the
+  // cell at the floor itself is never read.
+  DenseWorld World(32, 0, 16);
+  World.fill(0, 0, 0, 31, 4, 31, Stone);
+  World.fill(3, 0, 2, 3, 5, 2, Water);
+  const auto Area = World.load();
+  const Request Call = walk({2, 5, 2}, {8, 5, 2});
+  const Profile Mob;
+  WalkNodeEvaluator Evaluator;
+  Evaluator.prepare(*Area, Mob, Call);
+  const std::vector<Node> Neighbors = neighborsOf(Evaluator, Call.Start);
+  EXPECT_TRUE(offers(Neighbors, {3, 1, 2}));
+  EXPECT_FALSE(offers(Neighbors, {3, 0, 2}));
+  EXPECT_FALSE(offers(Neighbors, {3, 5, 2}));
+}
+
 TEST(WalkNodeEvaluator, AJumpNeedsHeadroomOverTheTakeOff) {
   DenseWorld World = flat();
   World.fill(5, 1, 0, 31, 1, 31, Stone);
@@ -425,6 +511,25 @@ TEST(WalkNodeEvaluator, ASmallMobInTheOpenIgnoresFreeTypesAboveIt) {
   EXPECT_EQ(Evaluator.getPathTypeOfMob(8, 2, 8), PathType::OPEN);
 }
 
+TEST(WalkNodeEvaluator, ASmallMobInTheOpenKeepsACostlyTypeAboveIt) {
+  DenseWorld World = flat();
+  World.set(8, 3, 8, Water);
+  World.set(10, 3, 8, world::Cell{PathType::COCOA, 12});
+  const auto Area = World.load();
+  const Request Call = walk({2, 1, 2}, {3, 1, 2});
+  WalkNodeEvaluator Evaluator;
+
+  const Profile Mob;
+  Evaluator.prepare(*Area, Mob, Call);
+  EXPECT_EQ(Evaluator.getPathTypeOfMob(8, 2, 8), PathType::WATER);
+
+  // Open air that costs more than the cocoa above it is the costliest type.
+  Profile Wary;
+  Wary.Malus[static_cast<int>(PathType::OPEN)] = 2.0F;
+  Evaluator.prepare(*Area, Wary, Call);
+  EXPECT_EQ(Evaluator.getPathTypeOfMob(10, 2, 8), PathType::OPEN);
+}
+
 TEST(WalkNodeEvaluator, FloorLevelFollowsTheCollisionHeightBelow) {
   DenseWorld World = flat();
   World.set(8, 0, 9, world::Cell{PathType::BLOCKED, 8});
@@ -472,12 +577,15 @@ TEST(Search, ARequestDecodesEveryField) {
 }
 
 TEST(Search, ARequestWithoutPositionsIsRefused) {
-  flatbuffers::FlatBufferBuilder Builder;
-  const fbs::Vec3s Start(1, 64, -1);
-  Builder.Finish(fbs::CreatePathRequest(Builder, 42, 3, &Start, nullptr));
-  const auto *Wire =
-      flatbuffers::GetRoot<fbs::PathRequest>(Builder.GetBufferPointer());
-  EXPECT_FALSE(Request::decode(*Wire).has_value());
+  const fbs::Vec3s Pos(1, 64, -1);
+  for (const bool HasStart : {true, false}) {
+    flatbuffers::FlatBufferBuilder Builder;
+    Builder.Finish(fbs::CreatePathRequest(
+        Builder, 42, 3, HasStart ? &Pos : nullptr, HasStart ? nullptr : &Pos));
+    const auto *Wire =
+        flatbuffers::GetRoot<fbs::PathRequest>(Builder.GetBufferPointer());
+    EXPECT_FALSE(Request::decode(*Wire).has_value()) << HasStart;
+  }
 }
 
 TEST(Search, AResultEncodesAsAResponseFrame) {

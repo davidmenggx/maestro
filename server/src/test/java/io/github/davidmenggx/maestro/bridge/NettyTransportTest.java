@@ -240,6 +240,23 @@ class NettyTransportTest {
   }
 
   @Test
+  void aListenerThatThrowsDoesNotKeepTheRestFromBeingHandedOver() throws Exception {
+    FakeNode node = fakeNode();
+    NettyTransport transport = transport(node.address(), NettyTransport.MAX_PENDING_BYTES);
+    FailsOnce listener = new FailsOnce();
+    transport.listen(listener);
+    Link link = up(transport, node, listener.heard);
+
+    writeFrame(link.control.getOutputStream(), new byte[] {1});
+    writeFrame(link.control.getOutputStream(), new byte[] {2});
+
+    awaitHeard(transport, () -> listener.heard.frames.size() == 1);
+    assertTrue(listener.failed);
+    assertArrayEquals(new byte[] {2}, listener.heard.frames.get(0));
+    assertEquals(0, listener.heard.disconnected);
+  }
+
+  @Test
   void theTransportRefusesToBeMisused() {
     FakeNode node = fakeNode();
     NettyTransport transport = transport(node.address(), NettyTransport.MAX_PENDING_BYTES);
@@ -331,6 +348,31 @@ class NettyTransportTest {
     @Override
     public void onDisconnected(NodeId node) {
       disconnected++;
+    }
+  }
+
+  /** Throws on the first frame it is handed, and records everything else. */
+  private static final class FailsOnce implements Transport.Listener {
+    final Recorder heard = new Recorder();
+    boolean failed;
+
+    @Override
+    public void onFrame(NodeId node, Channel channel, ByteBuffer frame, long arrivedNanos) {
+      if (!failed) {
+        failed = true;
+        throw new IllegalStateException("the listener failed");
+      }
+      heard.onFrame(node, channel, frame, arrivedNanos);
+    }
+
+    @Override
+    public void onConnected(NodeId node) {
+      heard.onConnected(node);
+    }
+
+    @Override
+    public void onDisconnected(NodeId node) {
+      heard.onDisconnected(node);
     }
   }
 

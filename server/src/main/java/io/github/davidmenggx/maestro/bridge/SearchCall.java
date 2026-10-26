@@ -25,11 +25,11 @@ public record SearchCall(
 
   /**
    * Reads the call and interns the mob's profile in {@code profiles}. {@code maxVisitedNodes} is
-   * the budget already scaled by its multiplier. {@code scratch} holds {@link PathTypes#count()}
-   * floats for the malus and is not kept. Returns null, so the search stays vanilla, if an input
-   * does not fit the wire or a {@link MobClass.Shape} (including a footprint over {@link
-   * MobClass.Shape#MAX_FOOTPRINT} cells), two nodes could share vanilla's hash ({@link
-   * NodeHashes}), or profile ids are exhausted.
+   * the budget already scaled by its multiplier, and {@code minY} is the world's floor. {@code
+   * scratch} holds {@link PathTypes#count()} floats for the malus and is not kept. Returns null, so
+   * the search stays vanilla, if an input does not fit the wire or a {@link MobClass.Shape}
+   * (including a footprint over {@link MobClass.Shape#MAX_FOOTPRINT} cells), two nodes could share
+   * vanilla's hash ({@link NodeHashes}), or profile ids are exhausted.
    */
   public static SearchCall read(
       Mob mob,
@@ -39,6 +39,7 @@ public record SearchCall(
       float maxPathLength,
       int reachRange,
       int maxVisitedNodes,
+      int minY,
       ProfileTable profiles,
       float[] scratch) {
     int maxFallDistance = mob.getMaxFallDistance();
@@ -53,7 +54,7 @@ public record SearchCall(
         maxFallDistance,
         mob.maxUpStep(),
         evaluator.canFloat(),
-        mob.level().getMinY())) {
+        minY)) {
       return null;
     }
 

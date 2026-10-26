@@ -1,0 +1,49 @@
+def coverageDir = new File(System.getProperty('maestro.coverage.dir', 'coverage'))
+
+allprojects {
+  apply plugin: 'jacoco'
+
+  jacoco {
+    toolVersion = '0.8.14'
+  }
+
+  afterEvaluate { project ->
+    // The unit suites `make test` runs. The seed sweeps are left out.
+    def suites = ['test', 'mixinTest'].findAll { it in project.tasks.names }
+
+    project.tasks.register('coverageReport', JacocoReport) {
+      // Runs every time, so the summary below is always printed.
+      outputs.upToDateWhen { false }
+      suites.each { suite ->
+        Task tests = project.tasks.named(suite).get()
+        dependsOn tests
+        executionData tests
+      }
+      sourceDirectories.from project.sourceSets.main.allJava.srcDirs
+      // Mixin code runs merged into the game's classes, where JaCoCo cannot attribute it, and the
+      // FlatBuffers bindings are generated.
+      classDirectories.from project.sourceSets.main.output.classesDirs.collect {
+        project.fileTree(it) { exclude '**/mixin/**', 'maestro/fbs/**' }
+      }
+      reports {
+        html.required = true
+        html.outputLocation = new File(coverageDir, project.name)
+        xml.required = true
+        xml.outputLocation = new File(coverageDir, "${project.name}.xml")
+      }
+
+      doLast {
+        def parser = new groovy.xml.XmlSlurper(false, false, true)
+        parser.setFeature('http://apache.org/xml/features/nonvalidating/load-external-dtd', false)
+        def counters = parser.parse(new File(coverageDir, "${project.name}.xml")).counter
+        def summary = ['LINE', 'BRANCH'].collect { type ->
+          def counter = counters.find { it.@type == type }
+          int covered = counter.@covered.toInteger()
+          int total = covered + counter.@missed.toInteger()
+          String.format('%s %d/%d (%.1f%%)', type.toLowerCase(), covered, total, 100.0 * covered / total)
+        }
+        println "coverage ${project.name}: ${summary.join(', ')}"
+      }
+    }
+  }
+}
