@@ -31,7 +31,6 @@ class MaestroConfigTest {
             dir,
             """
             {
-              "mode": "stateless",
               "subMode": "stream",
               "offload": "shadow",
               "nodes": [
@@ -47,7 +46,6 @@ class MaestroConfigTest {
 
     MaestroConfig config = MaestroConfig.load(path);
 
-    assertEquals(MaestroConfig.Mode.STATELESS, config.mode());
     assertEquals(MaestroConfig.SubMode.STREAM, config.subMode());
     assertEquals(MaestroConfig.Offload.SHADOW, config.offload());
     assertEquals(
@@ -84,10 +82,10 @@ class MaestroConfigTest {
             write(
                 dir,
                 """
-                {"mode": "stateless"}
+                {"subMode": "stream"}
                 """));
-    assertEquals(MaestroConfig.Mode.STATELESS, partial.mode());
-    assertEquals(MaestroConfig.DEFAULT.subMode(), partial.subMode());
+    assertEquals(MaestroConfig.SubMode.STREAM, partial.subMode());
+    assertEquals(MaestroConfig.DEFAULT.offload(), partial.offload());
     assertEquals(MaestroConfig.DEFAULT.otlpEndpoint(), partial.otlpEndpoint());
 
     assertEquals(MaestroConfig.DEFAULT, MaestroConfig.load(write(dir, "{}")));
@@ -100,18 +98,18 @@ class MaestroConfigTest {
             // Unknown enum value, null, wrong type, blank endpoint, truncated JSON, empty file,
             // non-object.
             """
-            {"mode": "sharded", "subMode": "batch", "otlpEndpoint": "http://localhost:4317"}
+            {"subMode": "sharded", "otlpEndpoint": "http://localhost:4317"}
             """,
             """
-            {"mode": null}
+            {"subMode": null}
             """,
             """
             {"subMode": ["batch"]}
             """,
             """
-            {"mode": "stateful", "subMode": "batch", "otlpEndpoint": "  "}
+            {"subMode": "batch", "otlpEndpoint": "  "}
             """,
-            "{\"mode\": ",
+            "{\"subMode\": ",
             "",
             "[]",
             // Unknown offload, no host, port out of range, capacity below one, empty list.
@@ -157,14 +155,13 @@ class MaestroConfigTest {
             {
               "mode": "stateful",
               "subMode": "batch",
-              "otlpEndpoint": "http://localhost:4317",
-              "devMode": true
+              "otlpEndpoint": "http://localhost:4317"
             }
             """);
 
     IllegalStateException thrown =
         assertThrows(IllegalStateException.class, () -> MaestroConfig.load(path));
-    assertTrue(thrown.getMessage().contains("devMode"), thrown.getMessage());
+    assertTrue(thrown.getMessage().contains("`mode`"), thrown.getMessage());
 
     // Inside a node too.
     Path node =

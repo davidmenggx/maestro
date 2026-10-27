@@ -129,7 +129,6 @@ if [[ "$FAULTS" == "split" || "$FAULTS" == "replica" ]]; then
 fi
 cat >"$CONFIG" <<EOF
 {
-  "mode": "stateful",
   "subMode": "$SUBMODE",
   "offload": "$OFFLOAD",
   "nodes": [$NODES],

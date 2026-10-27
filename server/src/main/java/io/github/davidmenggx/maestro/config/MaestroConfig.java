@@ -32,7 +32,6 @@ import java.util.stream.Collectors;
  * with no region, to take over a dead node's or relieve a hot one.
  */
 public record MaestroConfig(
-    Mode mode,
     SubMode subMode,
     Offload offload,
     List<NodeAddress> nodes,
@@ -41,15 +40,7 @@ public record MaestroConfig(
     int spares,
     String otlpEndpoint) {
 
-  /** How compute nodes hold world state. */
-  public enum Mode {
-    @SerializedName("stateful")
-    STATEFUL,
-    @SerializedName("stateless")
-    STATELESS
-  }
-
-  /** How pathfinding requests are dispatched to a stateful node. */
+  /** How pathfinding requests are dispatched to a node. */
   public enum SubMode {
     @SerializedName("batch")
     BATCH,
@@ -92,8 +83,7 @@ public record MaestroConfig(
   public static final String FILE_NAME = "maestro.json";
 
   public static final MaestroConfig DEFAULT =
-      new MaestroConfig(
-          Mode.STATEFUL, SubMode.BATCH, Offload.ON, List.of(), 100, 5, 1, "http://localhost:4317");
+      new MaestroConfig(SubMode.BATCH, Offload.ON, List.of(), 100, 5, 1, "http://localhost:4317");
 
   private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
@@ -102,7 +92,6 @@ public record MaestroConfig(
   private static final Set<String> NODE_SETTINGS = componentNames(NodeAddress.class);
 
   public MaestroConfig {
-    require(mode != null, "`mode` must be \"stateful\" or \"stateless\"");
     require(subMode != null, "`subMode` must be \"batch\" or \"stream\"");
     require(offload != null, "`offload` must be \"shadow\" or \"on\"");
     require(nodes != null, "`nodes` must be a list");

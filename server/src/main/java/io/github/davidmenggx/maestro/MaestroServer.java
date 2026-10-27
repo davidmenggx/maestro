@@ -28,9 +28,6 @@ public final class MaestroServer implements DedicatedServerModInitializer {
         loader.getModContainer(MOD_ID).orElseThrow().getMetadata().getVersion().getFriendlyString();
     MaestroConfig config =
         MaestroConfig.load(loader.getConfigDir().resolve(MaestroConfig.FILE_NAME));
-    if (config.mode() != MaestroConfig.Mode.STATEFUL) {
-      throw new IllegalStateException("Maestro supports only mode \"stateful\" so far");
-    }
     Telemetry.init(config, version);
 
     ServerClock clock = new ServerClock();
@@ -94,9 +91,8 @@ public final class MaestroServer implements DedicatedServerModInitializer {
     ServerLifecycleEvents.SERVER_STOPPED.register(server -> Telemetry.shutdown());
 
     LOG.info(
-        "Maestro {} initializing: mode={} subMode={} offload={} nodes={} otlp={}",
+        "Maestro {} initializing: subMode={} offload={} nodes={} otlp={}",
         version,
-        config.mode(),
         config.subMode(),
         config.offload(),
         config.nodes().size(),
