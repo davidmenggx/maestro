@@ -14,8 +14,11 @@ import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntLinkedOpenHashSet;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.IntFunction;
 import java.util.function.LongSupplier;
@@ -612,16 +615,23 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
     return failover;
   }
 
-  /** Counts of what became of the requests so far, and how late their answers were. */
+  /** What became of the requests so far, and how late their answers were. */
+  public OffloadStats stats() {
+    Map<String, Long> counts = new LinkedHashMap<>();
+    for (Outcome outcome : Outcome.values()) {
+      counts.put(outcome.name().toLowerCase(Locale.ROOT), outcomes.getOrDefault(outcome, 0L));
+    }
+    counts.putAll(failover.counts());
+    return new OffloadStats(counts, Arrays.stream(ticksLate).boxed().toList());
+  }
+
+  /** {@link #stats} as one line. */
   public String summary() {
     StringBuilder text = new StringBuilder();
-    for (Outcome outcome : Outcome.values()) {
-      text.append(outcome.name().toLowerCase())
-          .append('=')
-          .append(outcomes.getOrDefault(outcome, 0L))
-          .append(' ');
-    }
-    text.append(failover.summary()).append(" ticks_late=");
+    stats()
+        .counts()
+        .forEach((name, count) -> text.append(name).append('=').append(count).append(' '));
+    text.append("ticks_late=");
     String separator = "";
     for (int ticks = 0; ticks < ticksLate.length; ticks++) {
       if (ticksLate[ticks] > 0) {

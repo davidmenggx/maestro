@@ -25,6 +25,12 @@ sourceSets {
     compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
     runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
   }
+  // The load generator, a separate mod loaded beside the released one for experiments. It hooks
+  // nothing on the search path, so a run measures the released mod alone.
+  load {
+    compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+    runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
+  }
   // Tests that need the mixins applied. They run under Fabric's loader, which refuses block
   // tags no server bound, so plain tests stay on a bare JVM.
   mixinTest {
@@ -41,6 +47,9 @@ loom {
     "maestro-dev" {
       sourceSet sourceSets.dev
     }
+    "maestro-load" {
+      sourceSet sourceSets.load
+    }
   }
   runs {
     server {
@@ -51,6 +60,12 @@ loom {
       inherit server
       configName = "Release Server"
       source sourceSets.main
+    }
+    // The released mod with the load generator. The end-to-end test uses it.
+    loadServer {
+      inherit server
+      configName = "Load Server"
+      source sourceSets.load
     }
   }
 }
@@ -118,6 +133,10 @@ tasks.withType(JavaCompile).configureEach {
   options.release = 25
 }
 
+// The load mod's logic that needs no game runs with the plain unit tests.
+sourceSets.test.compileClasspath += sourceSets.load.output
+sourceSets.test.runtimeClasspath += sourceSets.load.output
+
 test {
   useJUnitPlatform()
 }
@@ -156,7 +175,7 @@ def devServerProperties = [
   "pause-when-empty-seconds": "0",
 ]
 
-tasks.matching { it.name in ["runServer", "runReleaseServer"] }.configureEach {
+tasks.matching { it.name in ["runServer", "runReleaseServer", "runLoadServer"] }.configureEach {
   doFirst {
     devRunDir.mkdirs()
     new File(devRunDir, "eula.txt").text = "eula=true\n"
@@ -216,4 +235,16 @@ jar {
       rename { "${it}_${project.base.archivesName.get()}" }
     }
   }
+}
+
+// The load mod's own jar, deployed beside the released one for live experiments.
+def loadJar = tasks.register('loadJar', Jar) {
+  archiveBaseName = "${project.base.archivesName.get()}-load"
+  from sourceSets.load.output
+  from(file("${projectDir}/../LICENSE")) {
+    rename { "${it}_${archiveBaseName.get()}" }
+  }
+}
+tasks.named('assemble') {
+  dependsOn loadJar
 }

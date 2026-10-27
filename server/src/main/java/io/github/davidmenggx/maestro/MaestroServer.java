@@ -21,13 +21,19 @@ public final class MaestroServer implements DedicatedServerModInitializer {
 
   private static final Logger LOG = LoggerFactory.getLogger(MOD_ID);
 
+  private static MaestroConfig config;
+
+  /** The config the mod loaded at startup, or null before it initializes. */
+  public static MaestroConfig config() {
+    return config;
+  }
+
   @Override
   public void onInitializeServer() {
     FabricLoader loader = FabricLoader.getInstance();
     String version =
         loader.getModContainer(MOD_ID).orElseThrow().getMetadata().getVersion().getFriendlyString();
-    MaestroConfig config =
-        MaestroConfig.load(loader.getConfigDir().resolve(MaestroConfig.FILE_NAME));
+    config = MaestroConfig.load(loader.getConfigDir().resolve(MaestroConfig.FILE_NAME));
     Telemetry.init(config, version);
 
     ServerClock clock = new ServerClock();

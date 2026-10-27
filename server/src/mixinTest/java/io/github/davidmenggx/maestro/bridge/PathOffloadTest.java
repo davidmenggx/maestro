@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.config.MaestroConfig.Offload;
+import io.github.davidmenggx.maestro.controller.core.RequestTracker;
 import io.github.davidmenggx.maestro.controller.env.Clock;
 import io.github.davidmenggx.maestro.controller.env.Metrics;
 import io.github.davidmenggx.maestro.controller.region.RegionLayout;
@@ -23,6 +24,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import net.minecraft.SharedConstants;
@@ -773,14 +775,46 @@ class PathOffloadTest {
   }
 
   @Test
-  void theFailoverSummaryNamesEachOutcome() {
+  void theFailoverCountsNameEachOutcomeInOrder() {
     controller.refuseWith = DropReason.UNAVAILABLE;
     search(START, TARGET);
 
     assertEquals(
-        "failover_recent=0 failover_full=1 failover_cheap=0 failover_later=0"
-            + " failover_moved_on=0",
-        offload.failover().summary());
+        "{failover_recent=0, failover_full=1, failover_cheap=0, failover_later=0,"
+            + " failover_moved_on=0}",
+        offload.failover().counts().toString());
+  }
+
+  @Test
+  void theStatsCountEachOutcomeAndHowLateEachAnswerWas() {
+    navigator.follow(search(START, TARGET), TARGET);
+    WorldOutput.PathResult answer = answer(START, TARGET, line(0, 6));
+    clock.tick += 2;
+    offload.pathComputed(answer);
+
+    OffloadStats stats = offload.stats();
+
+    assertEquals(1, stats.counts().get("requested"));
+    assertEquals(1, stats.counts().get("applied"));
+    assertEquals(0, stats.counts().get("failover_full"));
+    assertEquals(RequestTracker.MAX_TICKS_LATE + 1, stats.ticksLate().size());
+    assertEquals(1, stats.ticksLate().get(2));
+  }
+
+  @Test
+  void theStatsNamesDoNotDependOnTheDefaultLocale() {
+    Locale before = Locale.getDefault();
+    // Turkish lower-cases `I` to a dotless `ı`.
+    Locale.setDefault(Locale.forLanguageTag("tr-TR"));
+    try {
+      Set<String> names = offload.stats().counts().keySet();
+
+      assertTrue(names.contains("applied"), names.toString());
+      assertTrue(names.contains("shadow_differed"), names.toString());
+      names.forEach(name -> assertTrue(name.matches("[a-z_]+"), name));
+    } finally {
+      Locale.setDefault(before);
+    }
   }
 
   @Test

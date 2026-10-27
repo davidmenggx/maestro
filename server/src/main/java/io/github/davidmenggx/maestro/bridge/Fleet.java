@@ -319,6 +319,11 @@ public final class Fleet implements AutoCloseable {
     }
   }
 
+  /** What became of the offloaded requests so far. */
+  public OffloadStats stats() {
+    return paths.stats();
+  }
+
   /** Stops offloading. Searches are vanilla's from here on. */
   @Override
   public void close() {

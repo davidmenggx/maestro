@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Runs the released mod against a real `maestro-node` on loopback, lets husks
-# chase villagers near spawn, and checks the summary the mod logs on stop.
+# Runs the released mod against a real `maestro-node` on loopback, with the load
+# mod placing husks that chase villagers near the origin and a player by them,
+# and checks the summary the mod logs on stop and the load run's report.
 #
 # OFFLOAD=shadow (default) keeps vanilla's paths and requires every node answer
 # to match them. OFFLOAD=on lets answers move the mobs. Either way no admitted
@@ -74,7 +75,12 @@ SPLIT_LINE='Maestro: spare nodes []'
 SEARCHES_LINE='maestro-node: stopped after'
 # The node's line when it keeps the lower half of region 1 as region 2.
 KEPT_LINE='maestro-node: kept region 1 as region 2'
-MOB_TAG='maestro_e2e'
+# The load mod's lines for the run's scenario, and the tag on what it places.
+SCENARIO='e2e'
+MEASURING_LINE="Maestro load measuring: scenario=$SCENARIO\$"
+DONE_LINE="Maestro load done: scenario=$SCENARIO "
+LOAD_TAG='maestro_load'
+SCENARIO_FILE="$SERVER_DIR/run/maestro-load/scenarios/$SCENARIO.json"
 
 fail() {
   echo "e2e-test: FAIL: $*" >&2
@@ -159,7 +165,7 @@ mkfifo "$FIFO"
 exec 3<>"$FIFO"
 
 EXIT_FILE="$(mktemp)"
-setsid bash -c "cd '$SERVER_DIR' && ./gradlew runReleaseServer --console=plain; echo \$? >'$EXIT_FILE'" \
+setsid bash -c "cd '$SERVER_DIR' && ./gradlew runLoadServer --console=plain; echo \$? >'$EXIT_FILE'" \
   <"$FIFO" >>"$LOG" 2>&1 &
 GRADLE_PID=$!
 
@@ -238,17 +244,17 @@ failover_count() {
   echo $(($(count_in "$1" failover_recent) + $(count_in "$1" failover_full) + $(count_in "$1" failover_cheap)))
 }
 
-# Force load the spawn area so the mobs tick. Husks do not burn in daylight.
-# In a failover, split or replica run Resistance V keeps every mob from being
-# hurt, so the chases last through every phase, and an iron golem chases the
-# husks with an attack goal that never gives up. An invulnerable mob would not
-# be chased at all.
-MOB_DATA=""
+# Husks do not burn in daylight. In a failover, split or replica run Resistance
+# V keeps every mob from being hurt, so the chases last through every phase,
+# and an iron golem chases the husks with an attack goal that never gives up. An
+# invulnerable mob would not be chased at all.
+MOB_NBT=""
 if [[ "$FAULTS" == "failover" || -n "$SPARE_RUN" ]]; then
-  MOB_DATA=',active_effects:[{id:"minecraft:resistance",amplifier:4b,duration:-1,show_particles:0b}]'
+  MOB_NBT='active_effects:[{id:"minecraft:resistance",amplifier:4b,duration:-1,show_particles:0b}]'
 fi
-# Where mobs are summoned, as x offsets from spawn. A split run copies every mob
-# 256 blocks east: the region it runs on covers x and z from -128 to 383, so the
+HUSK_NBT="DeathLootTable:\"minecraft:empty\"${MOB_NBT:+,$MOB_NBT}"
+# Where the mobs gather, as x coordinates. A split run copies every group 256
+# blocks east: the region it runs on covers x and z from -128 to 383, so the
 # copies stand in the upper half along x, and both halves shed alike from the
 # start.
 ORIGINS="0"
@@ -256,62 +262,56 @@ if [[ "$FAULTS" == "split" ]]; then
   ORIGINS="0 256"
 fi
 
-# Loads the 5 by 5 chunks around `~$1 ~ ~0` and waits until they are.
-load_area() {
-  local x="$1"
-  run_command "forceload add ~$((x - 32)) ~-32 ~$((x + 32)) ~32" "force loaded|No chunks were marked"
-  for ((attempt = 0; ; attempt++)); do
-    run_command "execute if loaded ~$((x + 24)) ~ ~24" "Test (passed|failed)"
-    [[ "$(grep -oE 'Test (passed|failed)' "$LOG" | tail -n 1)" == "Test passed" ]] && break
-    ((attempt < 120)) || fail "the area at ~$x ~ ~0 did not load"
-    sleep 0.5
-  done
+# One scenario group: `$2` of `$1` within `$5` blocks of x `$3`, z `$4`, built
+# from SNBT compound `$6`.
+GROUPS_JSON=()
+ENTITIES=0
+group() {
+  GROUPS_JSON+=("$(jq -nc --arg entity "minecraft:$1" --argjson count "$2" --argjson x "$3" \
+    --argjson z "$4" --argjson spread "$5" --arg nbt "$6" \
+    '{entity: $entity, count: $count, x: $x, z: $z, spread: $spread, nbt: $nbt}')")
+  ENTITIES=$((ENTITIES + $2))
 }
 
-# Summons a `$1` at `~$2 ~ ~$3` from each origin, with extra NBT `$4`.
-summon() {
-  local origin
-  for origin in $ORIGINS; do
-    run_command "summon minecraft:$1 ~$((origin + $2)) ~ ~$3 {Tags:[\"$MOB_TAG\"]$4}" "Summoned new"
-  done
-}
-
-echo "e2e-test: server up, summoning husks and villagers"
-# A failed run may have left them force loaded.
+# A player by each gathering keeps its chunks loaded, as a player would.
+PLAYERS_JSON=()
 for origin in $ORIGINS; do
-  load_area "$origin"
+  PLAYERS_JSON+=("{\"x\": $origin, \"z\": 24}")
+  group villager 4 "$origin" 0 14 "{$MOB_NBT}"
+  group husk 8 "$origin" 0 6 "{$HUSK_NBT}"
+  if [[ "$FAULTS" == "failover" || -n "$SPARE_RUN" ]]; then
+    group iron_golem 1 $((origin - 10)) -10 0 "{$MOB_NBT}"
+  fi
+  # A crowd of villagers and husks, so the region sheds every second.
+  if [[ -n "$SPARE_RUN" ]]; then
+    group villager 8 "$origin" 0 12 "{$MOB_NBT}"
+    group husk 30 "$origin" 0 10 "{$HUSK_NBT}"
+  fi
 done
-# Leftover mobs would race the block changes below.
-run_command "kill @e[tag=$MOB_TAG]" "Killed|No entity was found"
+mkdir -p "$(dirname "$SCENARIO_FILE")"
+jq -n --argjson players "[$(IFS=,; echo "${PLAYERS_JSON[*]}")]" \
+  --argjson groups "[$(IFS=,; echo "${GROUPS_JSON[*]}")]" \
+  '{seed: 1, players: $players, groups: $groups}' >"$SCENARIO_FILE"
+
+echo "e2e-test: server up, making block changes"
+# The area of the block changes, which a failed run may have left force loaded.
+run_command "forceload add -32 -32 32 32" "force loaded|No chunks were marked"
+for ((attempt = 0; ; attempt++)); do
+  run_command "execute if loaded 24 ~ 24" "Test (passed|failed)"
+  [[ "$(grep -oE 'Test (passed|failed)' "$LOG" | tail -n 1)" == "Test passed" ]] && break
+  ((attempt < 120)) || fail "the area of the block changes did not load"
+  sleep 0.5
+done
+# Mobs a failed run left would race the block changes below.
+run_command "kill @e[tag=$LOAD_TAG]" "Killed|No entity was found"
 # Block changes that reach the node as deltas, made before any mob exists. The
 # dev world persists, so a block may already be in place.
-run_command "setblock ~2 ~ ~8 minecraft:oak_fence" "Changed the block|Could not set the block"
-run_command "setblock ~-8 ~ ~2 minecraft:cobblestone" "Changed the block|Could not set the block"
-HUSK_DATA=",DeathLootTable:\"minecraft:empty\"$MOB_DATA"
-for offset in "-12 -8" "10 -10" "-6 12" "14 6"; do
-  read -r dx dz <<<"$offset"
-  summon villager "$dx" "$dz" "$MOB_DATA"
-done
-for offset in "0 0" "3 3" "-3 3" "3 -3" "-3 -3" "6 0" "-6 0" "0 6"; do
-  read -r dx dz <<<"$offset"
-  summon husk "$dx" "$dz" "$HUSK_DATA"
-done
-if [[ "$FAULTS" == "failover" || -n "$SPARE_RUN" ]]; then
-  summon iron_golem -10 -10 "$MOB_DATA"
-fi
-# A crowd of villagers and husks, so the region sheds every second.
-if [[ -n "$SPARE_RUN" ]]; then
-  for dx in -12 12; do
-    for dz in -12 -4 4 12; do
-      summon villager "$dx" "$dz" "$MOB_DATA"
-    done
-  done
-  for dx in -10 -6 -2 2 6 10; do
-    for dz in -10 -5 0 5 10; do
-      summon husk "$dx" "$dz" "$HUSK_DATA"
-    done
-  done
-fi
+run_command "setblock 2 ~ 8 minecraft:oak_fence" "Changed the block|Could not set the block"
+run_command "setblock -8 ~ 2 minecraft:cobblestone" "Changed the block|Could not set the block"
+
+echo "e2e-test: placing $ENTITIES husks, villagers and golems"
+run_command "maestro load start $SCENARIO" "$MEASURING_LINE|Maestro load failed" 120
+grep -qE "$MEASURING_LINE" "$LOG" || fail "the load run did not start measuring"
 if [[ "$FAULTS" == "failover" ]]; then
   wait_state "linked and in service" 0 >/dev/null
 
@@ -359,10 +359,11 @@ else
 fi
 kill -0 "$NODE_PID" 2>/dev/null || fail "the node exited during the run"
 
-run_command "kill @e[tag=$MOB_TAG]" "Killed|No entity was found"
-for origin in $ORIGINS; do
-  run_command "forceload remove ~$((origin - 32)) ~-32 ~$((origin + 32)) ~32" "for force loading|no longer"
-done
+# Ending the run removes what it placed and writes its report.
+run_command "maestro load stop" "$DONE_LINE|Maestro load failed"
+REPORT="$(grep -F "$DONE_LINE" "$LOG" | tail -n 1 | sed 's/.* report=//')"
+[[ -n "$REPORT" && -f "$REPORT" ]] || fail "the load run wrote no report"
+run_command "forceload remove -32 -32 32 32" "for force loading|no longer"
 
 echo "e2e-test: stopping the server"
 echo "stop" >&3
@@ -373,7 +374,7 @@ done
 kill -0 "$GRADLE_PID" 2>/dev/null && fail "server did not stop within ${SHUTDOWN_TIMEOUT}s"
 wait "$GRADLE_PID" 2>/dev/null || true
 EXIT_CODE="$(cat "$EXIT_FILE" 2>/dev/null || echo 1)"
-[[ "$EXIT_CODE" == "0" ]] || fail "runReleaseServer exited with status $EXIT_CODE"
+[[ "$EXIT_CODE" == "0" ]] || fail "runLoadServer exited with status $EXIT_CODE"
 
 if grep -qE 'org\.spongepowered\.asm\.mixin\.([a-z]+\.)?throwables|Mixin [a-z]+ for mod .* failed|FAILED during|Critical injection failure' "$LOG"; then
   fail "mixin application reported errors"
@@ -391,6 +392,18 @@ count() {
 
 ANSWERED="$(count answered)"
 ((ANSWERED >= MIN_ANSWERS)) || fail "only $ANSWERED answers, expected at least $MIN_ANSWERS"
+
+# The report covers the run from when every entity stood, so its counts are part
+# of the summary's.
+echo "e2e-test: load report $REPORT: $(jq -c '{ticks: .ticks, entities: .entities, ticksLate: .ticksLate}' "$REPORT")"
+[[ "$(jq -r '.maestro.offloading' "$REPORT")" == "true" ]] || fail "the report saw no fleet"
+SPAWNED="$(jq '.entities.spawned' "$REPORT")"
+((SPAWNED == ENTITIES)) || fail "the load run placed $SPAWNED entities, not $ENTITIES"
+(($(jq '.players' "$REPORT") == $(wc -w <<<"$ORIGINS"))) || fail "the load run placed the wrong players"
+(($(jq '.ticks.measured' "$REPORT") > 0)) || fail "the load run measured no tick"
+REPORT_ANSWERED="$(jq '.requests.answered' "$REPORT")"
+((REPORT_ANSWERED > 0 && REPORT_ANSWERED <= ANSWERED)) ||
+  fail "the report counts $REPORT_ANSWERED answers, the summary $ANSWERED"
 if [[ "$FAULTS" == "failover" ]]; then
   # Requests in flight when the node fails are dropped, and their mobs ask again.
   for phase in PAUSED RESUMED KILLED RESTARTED; do

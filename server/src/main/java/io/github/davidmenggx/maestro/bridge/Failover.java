@@ -9,6 +9,7 @@ import java.util.EnumMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.IntFunction;
 import java.util.function.LongSupplier;
@@ -174,17 +175,13 @@ final class Failover {
     return outcomes.getOrDefault(outcome, 0L);
   }
 
-  /** Counts of what became of the calls and waits so far. */
-  String summary() {
-    StringBuilder text = new StringBuilder();
+  /** Counts of what became of the calls and waits so far, by name. */
+  Map<String, Long> counts() {
+    Map<String, Long> counts = new LinkedHashMap<>();
     for (Outcome outcome : Outcome.values()) {
-      text.append("failover_")
-          .append(outcome.name().toLowerCase())
-          .append('=')
-          .append(outcomes(outcome))
-          .append(' ');
+      counts.put("failover_" + outcome.name().toLowerCase(Locale.ROOT), outcomes(outcome));
     }
-    return text.toString().stripTrailing();
+    return counts;
   }
 
   /** The navigation keeps a path with the same nodes as the one it was handed. */

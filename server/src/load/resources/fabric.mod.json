@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "maestro-load",
+  "version": "${version}",
+  "name": "Maestro Load",
+  "description": "Reproducible load for Maestro experiments. Not part of the released mod.",
+  "authors": [
+    "David Meng"
+  ],
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": {
+    "server": [
+      "io.github.davidmenggx.maestro.load.LoadMod"
+    ]
+  },
+  "depends": {
+    "maestro": "*",
+    "fabricloader": ">=0.18.4",
+    "fabric-api": "*",
+    "minecraft": "26.1"
+  }
+}
