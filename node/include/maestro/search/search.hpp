@@ -53,12 +53,19 @@ struct Result {
   float Cost = 0.0F;
 };
 
+/// How long a request waited at the node for a worker, and how long its search
+/// took.
+struct Timing {
+  std::uint32_t WaitMicros = 0;
+  std::uint32_t SearchMicros = 0;
+};
+
 /// Encodes `Path` as a finished `ResponseFrame` of run `Run` in `Builder`,
 /// which is cleared first. Returns false if a position does not fit 16 bits.
 [[nodiscard]] bool encodeResponse(flatbuffers::FlatBufferBuilder &Builder,
                                   std::uint64_t Run, std::uint64_t RequestId,
                                   const Result &Path,
-                                  std::uint64_t WorldSequence);
+                                  std::uint64_t WorldSequence, Timing Took);
 
 /// Encodes the answer to a request naming a profile this node lacks, as a
 /// finished `ResponseFrame` of run `Run` in `Builder`, which is cleared first.

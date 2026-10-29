@@ -96,6 +96,15 @@ run_command "kill @e[tag=$MOB_TAG]" "Killed|No entity was found"
 run_command "tick sprint 40" "Sprint completed"
 run_command "forceload remove ~ ~" "for force loading"
 
+# The released mod creates no dimension but the overworld.
+for dimension in the_nether the_end; do
+  run_command "execute in minecraft:$dimension run say maestro-in-$dimension" \
+    "Unknown dimension|maestro-in-$dimension"
+  if grep -qF "[Server] maestro-in-$dimension" "$LOG"; then
+    fail "the server has a $dimension"
+  fi
+done
+
 echo "boot-smoke-test: stopping the server"
 echo "stop" >&3
 

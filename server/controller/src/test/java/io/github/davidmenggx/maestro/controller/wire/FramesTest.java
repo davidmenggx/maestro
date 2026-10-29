@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.MobClass;
@@ -18,6 +19,9 @@ import java.util.List;
 import java.util.function.IntPredicate;
 import maestro.fbs.ControlFrame;
 import maestro.fbs.ControlMsg;
+import maestro.fbs.ControlReplyFrame;
+import maestro.fbs.ControlReplyMsg;
+import maestro.fbs.Heartbeat;
 import maestro.fbs.Join;
 import maestro.fbs.PathCancel;
 import maestro.fbs.PathRequest;
@@ -28,6 +32,7 @@ import maestro.fbs.RegionAssignment;
 import maestro.fbs.RequestFrame;
 import maestro.fbs.RequestMsg;
 import maestro.fbs.ResponseFrame;
+import maestro.fbs.ResponseMsg;
 import maestro.fbs.WorldFrame;
 import maestro.fbs.WorldMsg;
 import org.junit.jupiter.api.Test;
@@ -160,6 +165,35 @@ class FramesTest {
     assertEquals(longest, read.nodes().size());
     assertEquals(nodes.get(longest - 1).pos(), read.nodes().get(longest - 1).pos());
     assertTrue(Frames.readResponse(ByteBuffer.wrap(answer), 1) instanceof Reply.Foreign);
+  }
+
+  @Test
+  void anAnswerIsReadWithHowLongItWaitedAndSearched() {
+    FlatBufferBuilder builder = new FlatBufferBuilder(64);
+    PathResponse.startNodesVector(builder, 0);
+    int nodes = builder.endVector();
+    int body =
+        PathResponse.createPathResponse(builder, 7, false, nodes, 0f, 12, 4_000_000_000L, 350);
+    builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, body, RUN));
+
+    Reply.Answer read =
+        (Reply.Answer) Frames.readResponse(ByteBuffer.wrap(builder.sizedByteArray()), RUN);
+    assertEquals(12, read.worldSequence());
+    // Unsigned on the wire.
+    assertEquals(4_000_000_000L, read.waitMicros());
+    assertEquals(350, read.searchMicros());
+  }
+
+  @Test
+  void aHeartbeatIsReadWithTheAreaHeld() {
+    FlatBufferBuilder builder = new FlatBufferBuilder(64);
+    int body = Heartbeat.createHeartbeat(builder, 3, 4, 500, 2, 6, 41);
+    builder.finish(
+        ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Heartbeat, body));
+
+    Reply.Beat read =
+        (Reply.Beat) Frames.readControlReply(ByteBuffer.wrap(builder.sizedByteArray()));
+    assertEquals(new Reply.Beat(3, 4, 500, 2, 6, 41), read);
   }
 
   @Test

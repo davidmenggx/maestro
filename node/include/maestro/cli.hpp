@@ -2,14 +2,12 @@
 
 #include <ostream>
 #include <span>
-#include <string>
 
 #include "maestro/net/server.hpp"
 
 namespace maestro::cli {
 
 struct Options {
-  std::string OtlpEndpoint = "localhost:4317"; // OTLP/gRPC
   net::ServerOptions Server;
 };
 

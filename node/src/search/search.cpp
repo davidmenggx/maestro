@@ -31,7 +31,7 @@ std::optional<Request> Request::decode(const fbs::PathRequest &Wire) {
 
 bool encodeResponse(flatbuffers::FlatBufferBuilder &Builder, std::uint64_t Run,
                     std::uint64_t RequestId, const Result &Path,
-                    std::uint64_t WorldSequence) {
+                    std::uint64_t WorldSequence, Timing Took) {
   Builder.Clear();
   for (const PathPoint &Point : Path.Nodes)
     if (!fitsWire(Point.Pos.X) || !fitsWire(Point.Pos.Y) ||
@@ -46,7 +46,8 @@ bool encodeResponse(flatbuffers::FlatBufferBuilder &Builder, std::uint64_t Run,
                                         static_cast<std::int16_t>(Point.Pos.Z)),
                              Point.Type);
   const auto Response = fbs::CreatePathResponse(
-      Builder, RequestId, Path.Reached, NodesVec, Path.Cost, WorldSequence);
+      Builder, RequestId, Path.Reached, NodesVec, Path.Cost, WorldSequence,
+      Took.WaitMicros, Took.SearchMicros);
   Builder.Finish(fbs::CreateResponseFrame(
       Builder, fbs::ResponseMsg::PathResponse, Response.Union(), Run));
   return true;

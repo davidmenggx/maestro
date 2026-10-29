@@ -62,8 +62,8 @@ struct Scratch {
 
 /// What `NodeCore::run` did with a job.
 struct Outcome {
-  /// False if the job waited past `MaxWait` and was dropped unsearched.
-  bool Searched = false;
+  /// True if the job waited past `MaxWait` and was dropped unsearched.
+  bool Expired = false;
   /// The answer to pass to `deliver`, or null if there is none to send.
   Answer Result = nullptr;
 };
@@ -88,7 +88,9 @@ struct Outcome {
 /// Otherwise it settles with no answer, and later copies are dropped.
 ///
 /// A heartbeat reports the searches finished since the timer last fired and
-/// the worker time they took, so the controller can tell the node's rate.
+/// the worker time they took, so the controller can tell the node's rate, and
+/// the area held for the link's run, so it can tell the node's lag. An answer
+/// carries how long its job waited for a worker and how long it searched.
 ///
 /// Every member but `queue`, `run`, `searches` and `searchKind` belongs to the
 /// event thread, which `Output` is also called on. Those are thread-safe.

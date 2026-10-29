@@ -48,6 +48,14 @@ const fbs::Join *joinIn(std::span<const std::uint8_t> Frame) {
   return Verified ? Verified->body_as_Join() : nullptr;
 }
 
+/// `Span` in whole microseconds, clamped to what a `uint` field holds.
+std::uint32_t wireMicros(Clock::duration Span) {
+  const auto Micros =
+      std::chrono::duration_cast<std::chrono::microseconds>(Span).count();
+  return static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+      Micros, 0, std::numeric_limits<std::uint32_t>::max()));
+}
+
 std::unique_ptr<search::Search> checkedSearch(fbs::Pathfinder Kind) {
   auto Made = search::makeSearch(Kind);
   if (!Made)
@@ -136,12 +144,21 @@ void NodeCore::onWorldFrame(std::span<const std::uint8_t> Frame) {
     Refused = describe(Status);
   }
   if (!Refused) {
-    if (const auto *Kept = Root->body_as_RegionAssignment();
-        Kept && Kept->from_region_id() != 0)
-      std::clog << "maestro-node: kept region " +
-                       std::to_string(Kept->from_region_id()) + " as region " +
-                       std::to_string(Kept->region_id()) + " at sequence " +
-                       std::to_string(Kept->sequence()) + "\n";
+    if (const auto *Assigned = Root->body_as_RegionAssignment()) {
+      const std::string Region = std::to_string(Assigned->region_id());
+      const std::string Sequence = std::to_string(Assigned->sequence());
+      if (Assigned->from_region_id() != 0)
+        std::clog << "maestro-node: kept region " +
+                         std::to_string(Assigned->from_region_id()) +
+                         " as region " + Region + " at sequence " + Sequence +
+                         "\n";
+      else if (Assigned->resume())
+        std::clog << "maestro-node: resumed region " + Region +
+                         " at sequence " + Sequence + "\n";
+      else
+        std::clog << "maestro-node: took region " + Region +
+                         " afresh at sequence " + Sequence + "\n";
+    }
     return;
   }
   Store.clear();
@@ -247,11 +264,14 @@ void NodeCore::heartbeat() {
   constexpr std::uint64_t MaxSearches =
       std::numeric_limits<std::uint32_t>::max();
   constexpr unsigned MaxWorkers = std::numeric_limits<std::uint16_t>::max();
+  const auto Held = Store.pin();
+  const bool Holds = Held && Held->run() == Current.Run;
   Builder.Clear();
   const auto Body = fbs::CreateHeartbeat(
       Builder, static_cast<std::uint32_t>(Queue.depth()),
       static_cast<std::uint32_t>(std::min(Finished, MaxSearches)), Micros,
-      static_cast<std::uint16_t>(std::min(Opts.Workers, MaxWorkers)));
+      static_cast<std::uint16_t>(std::min(Opts.Workers, MaxWorkers)),
+      Holds ? Held->regionId() : 0, Holds ? Held->sequence() : 0);
   Builder.Finish(fbs::CreateControlReplyFrame(
       Builder, fbs::ControlReplyMsg::Heartbeat, Body.Union()));
   Out.send(*joined(Port::Control),
@@ -275,7 +295,7 @@ Outcome NodeCore::run(const Job &Next, Scratch &With) {
   const Clock::time_point Taken = Now();
   if (Taken - Next.Admitted > Opts.MaxWait) {
     Queue.settle(Next, nullptr, Taken);
-    return {};
+    return {.Expired = true};
   }
   const auto Held = Store.pin();
   std::uint64_t Sequence = 0;
@@ -292,9 +312,12 @@ Outcome NodeCore::run(const Job &Next, Scratch &With) {
     With.Path.Reached = false;
     With.Path.Cost = 0.0F;
   }
+  const search::Timing Took{.WaitMicros = wireMicros(Taken - Next.Admitted),
+                            .SearchMicros =
+                                Searched ? wireMicros(Now() - Taken) : 0};
   Answer Result;
   if (search::encodeResponse(With.Builder, Next.Run, Next.RequestId, With.Path,
-                             Sequence)) {
+                             Sequence, Took)) {
     Result =
         answerOf({With.Builder.GetBufferPointer(), With.Builder.GetSize()});
     if (!Result)
@@ -307,15 +330,15 @@ Outcome NodeCore::run(const Job &Next, Scratch &With) {
   const Clock::time_point Settled = Now();
   const bool Deliver = Queue.settle(Next, Result, Settled);
   if (Searched) {
-    const auto Took =
+    const auto Worked =
         std::chrono::duration_cast<std::chrono::microseconds>(Settled - Taken);
     BeatMicros +=
-        static_cast<std::uint64_t>(std::max<std::int64_t>(0, Took.count()));
+        static_cast<std::uint64_t>(std::max<std::int64_t>(0, Worked.count()));
     ++BeatSearches;
   }
   if (!Deliver)
-    return {.Searched = true};
-  return {.Searched = true, .Result = std::move(Result)};
+    return {};
+  return {.Result = std::move(Result)};
 }
 
 void NodeCore::deliver(const Job &Finished, const Answer &Result) {

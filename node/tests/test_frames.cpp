@@ -97,7 +97,7 @@ std::size_t serveWaiting(serve::NodeCore &Core, serve::Scratch &With,
     if (!Next)
       break;
     const serve::Outcome Done = Core.run(*Next, With);
-    if (!Done.Searched)
+    if (Done.Expired)
       continue;
     ++Ran;
     if (Done.Result)

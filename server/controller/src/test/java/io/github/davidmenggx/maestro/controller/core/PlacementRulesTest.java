@@ -8,6 +8,7 @@ import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Offload;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
+import io.github.davidmenggx.maestro.controller.env.Tracing;
 import io.github.davidmenggx.maestro.controller.env.Transport;
 import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionLayout;
@@ -499,6 +500,7 @@ class PlacementRulesTest {
           @Override
           public void listen(Listener listener) {}
         };
-    return new ControllerEnv(clock, SeededRng.of(1), offload, transport, metrics, 1);
+    Tracing tracing = trace -> {};
+    return new ControllerEnv(clock, SeededRng.of(1), offload, transport, metrics, tracing, 1);
   }
 }

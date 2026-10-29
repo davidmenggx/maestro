@@ -8,7 +8,13 @@ import java.util.Objects;
  * whose seed may repeat.
  */
 public record ControllerEnv(
-    Clock clock, Rng rng, Offload offload, Transport transport, Metrics metrics, long run) {
+    Clock clock,
+    Rng rng,
+    Offload offload,
+    Transport transport,
+    Metrics metrics,
+    Tracing tracing,
+    long run) {
 
   public ControllerEnv {
     Objects.requireNonNull(clock, "clock");
@@ -16,6 +22,7 @@ public record ControllerEnv(
     Objects.requireNonNull(offload, "offload");
     Objects.requireNonNull(transport, "transport");
     Objects.requireNonNull(metrics, "metrics");
+    Objects.requireNonNull(tracing, "tracing");
     if (run == 0) {
       throw new IllegalArgumentException("run 0 means no run");
     }

@@ -40,7 +40,8 @@ class MaestroConfigTest {
               "nodeCapacity": 40,
               "areaCells": 9,
               "spares": 2,
-              "otlpEndpoint": "http://collector:4317"
+              "otlpEndpoint": "http://collector:4317",
+              "traceSampleRate": 0.25
             }
             """);
 
@@ -62,12 +63,18 @@ class MaestroConfigTest {
     assertEquals(9, config.areaCells());
     assertEquals(2, config.spares());
     assertEquals("http://collector:4317", config.otlpEndpoint());
+    assertEquals(0.25, config.traceSampleRate());
   }
 
   @Test
   void theDefaultCoversFiveCellsAroundTheOriginAndKeepsOneSpare() {
     assertEquals(5, MaestroConfig.DEFAULT.areaCells());
     assertEquals(1, MaestroConfig.DEFAULT.spares());
+  }
+
+  @Test
+  void theDefaultTracesOneRequestInAHundred() {
+    assertEquals(0.01, MaestroConfig.DEFAULT.traceSampleRate());
   }
 
   @Test
@@ -137,6 +144,13 @@ class MaestroConfigTest {
             """,
             """
             {"spares": -1}
+            """,
+            // A trace share past either end.
+            """
+            {"traceSampleRate": -0.5}
+            """,
+            """
+            {"traceSampleRate": 1.5}
             """);
 
     for (String json : unusable) {

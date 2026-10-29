@@ -34,7 +34,8 @@ enum EffectKind : ubyte {
   // A `Hello` on the control connection: `run`, `region_id`, and
   // `last_sequence` as `sequence`.
   Hello,
-  // A `Heartbeat` on the control connection, with `depth` and `searches`.
+  // A `Heartbeat` on the control connection, with `depth`, `searches`,
+  // `region_id`, and its `sequence`.
   Heartbeat,
   // A `PathResponse` datagram: `request_id`, the frame's `run`, and
   // `world_sequence` as `sequence`.

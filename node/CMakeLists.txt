@@ -9,7 +9,6 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
 
-option(MAESTRO_WITH_OTEL  "Build with the OpenTelemetry C++ SDK" ON)
 option(MAESTRO_BUILD_TESTS "Build the unit test suite" ON)
 
 include(cmake/Dependencies.cmake)
@@ -28,7 +27,6 @@ add_library(maestro_core
   src/cli.cpp
   src/net/framing.cpp
   src/net/server.cpp
-  src/obs.cpp
   src/search/binary_heap.cpp
   src/search/path_types.cpp
   src/search/profile.cpp
@@ -48,14 +46,6 @@ target_link_libraries(maestro_core PUBLIC
   asio::asio
   Threads::Threads
 )
-
-if(MAESTRO_WITH_OTEL)
-  target_compile_definitions(maestro_core PUBLIC MAESTRO_WITH_OTEL=1)
-  target_link_libraries(maestro_core PUBLIC
-    opentelemetry_trace
-    opentelemetry_exporter_otlp_grpc
-  )
-endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(maestro_core PRIVATE -Wall -Wextra)
@@ -92,7 +82,6 @@ if(MAESTRO_BUILD_TESTS)
     tests/test_framing.cpp
     tests/test_java_math.cpp
     tests/test_node_core.cpp
-    tests/test_obs.cpp
     tests/test_parity.cpp
     tests/test_path_types.cpp
     tests/test_request_queue.cpp

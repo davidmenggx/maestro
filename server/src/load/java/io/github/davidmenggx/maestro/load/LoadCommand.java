@@ -5,6 +5,7 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import io.github.davidmenggx.maestro.MaestroServer;
+import io.github.davidmenggx.maestro.bridge.Fleet;
 import java.io.IOException;
 import java.io.Writer;
 import java.nio.file.Files;
@@ -22,8 +23,9 @@ import org.slf4j.LoggerFactory;
 /**
  * {@code /maestro load start <scenario>} runs the scenario in `<game
  * dir>/maestro-load/scenarios/<scenario>.json` on the overworld, and {@code /maestro load stop}
- * ends it. A run that ends while measuring writes its report to `<game dir>/maestro-load/reports/`.
- * One run goes at a time, and the server stopping ends it.
+ * ends it. {@code /maestro load mark} logs the fleet's counts so far. A run that ends while
+ * measuring writes its report to `<game dir>/maestro-load/reports/`. One run goes at a time, and
+ * the server stopping ends it.
  */
 final class LoadCommand {
 
@@ -35,6 +37,8 @@ final class LoadCommand {
   static final String DONE = "Maestro load done";
 
   static final String FAILED = "Maestro load failed";
+
+  static final String MARK = "Maestro load mark";
 
   private static final Logger LOG = LoggerFactory.getLogger("maestro");
 
@@ -57,7 +61,8 @@ final class LoadCommand {
                             .then(
                                 Commands.argument("scenario", StringArgumentType.word())
                                     .executes(LoadCommand::start)))
-                    .then(Commands.literal("stop").executes(LoadCommand::stop))));
+                    .then(Commands.literal("stop").executes(LoadCommand::stop))
+                    .then(Commands.literal("mark").executes(LoadCommand::mark))));
   }
 
   private static Path directory() {
@@ -109,6 +114,22 @@ final class LoadCommand {
       context.getSource().sendFailure(Component.literal(message));
       return 0;
     }
+    context.getSource().sendSuccess(() -> Component.literal(message), false);
+    return 1;
+  }
+
+  /** Logs what became of the offloaded requests so far, so a script can compare two points. */
+  private static int mark(CommandContext<CommandSourceStack> context) {
+    Fleet fleet = Fleet.active();
+    StringBuilder counts = new StringBuilder(MARK + ":");
+    if (fleet != null) {
+      fleet
+          .stats()
+          .counts()
+          .forEach((name, count) -> counts.append(' ').append(name).append('=').append(count));
+    }
+    String message = counts.toString();
+    LOG.info(message);
     context.getSource().sendSuccess(() -> Component.literal(message), false);
     return 1;
   }

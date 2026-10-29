@@ -446,7 +446,7 @@ public final class ModeledNode {
         return;
       }
       running++;
-      settle(job, answerBuilder(job), searches(job), host.now());
+      settle(job, answerBuilder(job, 0), searches(job), host.now());
     }
   }
 
@@ -458,9 +458,17 @@ public final class ModeledNode {
     beatSearches = 0;
     beatMicros = 0;
     if (live && controlJoined) {
+      boolean holds = holdsArea && run == linkRun;
       FlatBufferBuilder builder = new FlatBufferBuilder(64);
       int heartbeat =
-          Heartbeat.createHeartbeat(builder, depth(), searches, micros, service.workers());
+          Heartbeat.createHeartbeat(
+              builder,
+              depth(),
+              searches,
+              micros,
+              service.workers(),
+              holds ? regionId : 0,
+              holds ? lastSequence : 0);
       builder.finish(
           ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Heartbeat, heartbeat));
       host.send(Channel.CONTROL, builder.sizedByteArray());
@@ -741,16 +749,16 @@ public final class ModeledNode {
         return;
       }
       running++;
-      // The area is pinned when the job starts, as a worker pins the current version.
-      byte[] answer = answerBuilder(job);
-      boolean searched = searches(job);
-      long taken = host.now();
-      long process = this.process;
       int cost =
           job.probe()
               ? 1
               : service.minCostSteps()
                   + rng.nextInt(service.maxCostSteps() - service.minCostSteps() + 1);
+      // The area is pinned when the job starts, as a worker pins the current version.
+      byte[] answer = answerBuilder(job, cost);
+      boolean searched = searches(job);
+      long taken = host.now();
+      long process = this.process;
       host.schedule(cost, "served:" + id, () -> completed(process, job, answer, searched, taken));
     }
     backlogged |= waitingCount > 0;
@@ -817,10 +825,11 @@ public final class ModeledNode {
   }
 
   /**
-   * The answer to a job against the area held now. With no area, or another run's or region's, it
-   * is no path at sequence 0, which the controller reads as a search that ran too early.
+   * The answer to a job taken now that searches for {@code costSteps}, against the area held now.
+   * With no area, or another run's or region's, it is no path at sequence 0, not searched, which
+   * the controller reads as a search that ran too early.
    */
-  private byte[] answerBuilder(Job job) {
+  private byte[] answerBuilder(Job job, int costSteps) {
     boolean matches = searches(job);
     List<Pos> path = matches ? straightLine(job.start(), job.target()) : List.of();
     boolean reached = !path.isEmpty() && path.get(path.size() - 1).equals(job.target());
@@ -842,6 +851,8 @@ public final class ModeledNode {
     PathResponse.addCost(
         builder, !matches || overAir(job.start()) ? SEARCHED_OVER_AIR : path.size());
     PathResponse.addWorldSequence(builder, matches ? lastSequence : 0);
+    PathResponse.addWaitMicros(builder, (host.now() - job.admitted()) * MICROS_PER_STEP);
+    PathResponse.addSearchMicros(builder, matches ? costSteps * MICROS_PER_STEP : 0);
     int response = PathResponse.endPathResponse(builder);
 
     builder.finish(

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.core.NodeHealth;
 import io.github.davidmenggx.maestro.controller.core.NodeLinks;
 import io.github.davidmenggx.maestro.controller.core.WorldStreams;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
@@ -16,6 +17,7 @@ import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
@@ -467,6 +469,20 @@ class SimulationTest {
                             .percentile("node.queue.reported", 1.0, "node", node.toString())
                         > 0),
         run.describe());
+    long searched = 0;
+    for (ModeledNode node : run.sim.nodes()) {
+      String label = node.id().toString();
+      // Each heartbeat sets the node's depth gauge to the depth it reported.
+      assertEquals(
+          run.sim.metrics().recorded("node.queue.reported", "node", label),
+          run.sim.metrics().gaugeValues("node.queue.depth", "node", label),
+          label);
+      // Heartbeats count the searches finished since the last, so none is counted twice.
+      long searches = run.sim.metrics().counter("node.searches", "node", label);
+      assertTrue(searches <= node.servedRequests(), label + " " + run.describe());
+      searched += searches;
+    }
+    assertTrue(searched > 0, run.describe());
   }
 
   @Test
@@ -514,6 +530,10 @@ class SimulationTest {
     assertEquals(0, opened(run, victim), run.describe());
     assertEquals(1, run.sim.metrics().gauge("node.in_service", "node", victim.toString()));
     assertTrue(Invariants.caughtUp(run.controller, run.sim.node(victim)), run.describe());
+    // Its phi crossed the threshold while paused and fell back once it resumed.
+    List<Double> phi = run.sim.metrics().gaugeValues("node.phi", "node", victim.toString());
+    assertTrue(Collections.max(phi) >= NodeHealth.PHI_THRESHOLD, run.describe());
+    assertTrue(phi.get(phi.size() - 1) < NodeHealth.PHI_THRESHOLD, run.describe());
   }
 
   @Test

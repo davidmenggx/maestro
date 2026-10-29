@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.core.Dispatch;
+import io.github.davidmenggx.maestro.controller.env.RequestTrace;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
@@ -192,6 +193,10 @@ class FuzzTest {
     long failOpenJudged = 0;
     long checkpoints = 0;
     long deferredReads = 0;
+    long lateSends = 0;
+    long partlyTraced = 0;
+    long tracedResends = 0;
+    long tracedBehind = 0;
 
     // Uses its own size: a few seeds miss outcomes, and a very large sweep only repeats them.
     int seeds = Math.clamp(SimRun.runCount(), MIN_COVERAGE_SEEDS, MAX_COVERAGE_SEEDS);
@@ -232,6 +237,14 @@ class FuzzTest {
       if (run.scenario.dispatch() == Dispatch.STREAM) {
         streamedRuns++;
         streamedAnswered += run.out.answered();
+        lateSends += run.sim.metrics().total("offload.late");
+      }
+      List<RequestTrace> traces = run.sim.tracing().traces();
+      partlyTraced += run.traceSampleRate < 1 && !traces.isEmpty() ? 1 : 0;
+      for (RequestTrace trace : traces) {
+        tracedResends += trace.resentNanos().isEmpty() ? 0 : 1;
+        tracedBehind +=
+            trace.answer() != null && !trace.outcome().equals(RequestTrace.ANSWERED) ? 1 : 0;
       }
       shedNearAPlayer +=
           run.out.dropped(DropReason.SHED) > 0 && run.scenario.counts().get(Count.PLAYERS) > 0
@@ -338,6 +351,10 @@ class FuzzTest {
     assertTrue(failOpenJudged > 0, "no node that could not answer was sent enough to judge");
     assertTrue(checkpoints > 0, "no node ever reached a mid-run checkpoint");
     assertTrue(deferredReads > 0, "chunk reads never ran past one tick's budget");
+    assertTrue(lateSends > 0, "no streamed request's send was ever handed over late");
+    assertTrue(partlyTraced > 0, "no run traced only a share of its requests");
+    assertTrue(tracedResends > 0, "no traced request was ever sent again");
+    assertTrue(tracedBehind > 0, "no traced answer was ever turned down for its world sequence");
     System.out.println(
         "coverage: "
             + heldToTheSlo

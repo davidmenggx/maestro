@@ -6,6 +6,6 @@ public interface Clock {
   /** Server tick currently being handled. Increases by one per tick and never decreases. */
   long tick();
 
-  /** Monotonic nanoseconds (not wall clock). */
+  /** Monotonic nanoseconds (not wall clock). Also read by offload work, to stamp a send. */
   long nowNanos();
 }

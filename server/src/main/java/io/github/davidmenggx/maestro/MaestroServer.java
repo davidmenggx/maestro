@@ -3,7 +3,9 @@ package io.github.davidmenggx.maestro;
 import io.github.davidmenggx.maestro.bridge.Fleet;
 import io.github.davidmenggx.maestro.bridge.ServerClock;
 import io.github.davidmenggx.maestro.config.MaestroConfig;
+import io.github.davidmenggx.maestro.obs.OtelMetrics;
 import io.github.davidmenggx.maestro.obs.Telemetry;
+import io.github.davidmenggx.maestro.obs.TickTimer;
 import net.fabricmc.api.DedicatedServerModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
@@ -35,6 +37,7 @@ public final class MaestroServer implements DedicatedServerModInitializer {
         loader.getModContainer(MOD_ID).orElseThrow().getMetadata().getVersion().getFriendlyString();
     config = MaestroConfig.load(loader.getConfigDir().resolve(MaestroConfig.FILE_NAME));
     Telemetry.init(config, version);
+    TickTimer ticks = new TickTimer(new OtelMetrics(), System::nanoTime);
 
     ServerClock clock = new ServerClock();
     ServerLevelEvents.LOAD.register(
@@ -45,6 +48,7 @@ public final class MaestroServer implements DedicatedServerModInitializer {
         });
     ServerTickEvents.START_SERVER_TICK.register(
         server -> {
+          ticks.tickStarted();
           Fleet fleet = Fleet.active();
           if (fleet != null) {
             fleet.tickStarted();
@@ -58,6 +62,8 @@ public final class MaestroServer implements DedicatedServerModInitializer {
             fleet.tickEnding();
           }
           clock.advance();
+          // The whole tick, Maestro's hand-overs included, with or without a fleet.
+          ticks.tickEnded();
         });
     ServerChunkEvents.CHUNK_LOAD.register(
         (level, chunk, generated) -> {

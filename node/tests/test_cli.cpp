@@ -32,7 +32,6 @@ TEST(Cli, NoArgumentsKeepTheDefaults) {
   Options Opts;
   ASSERT_EQ(parse({}, Opts), ArgsResult::Parsed);
   const Options Defaults;
-  EXPECT_EQ(Opts.OtlpEndpoint, Defaults.OtlpEndpoint);
   EXPECT_EQ(Opts.Server.Bind, Defaults.Server.Bind);
   EXPECT_EQ(Opts.Server.WorldPort, Defaults.Server.WorldPort);
   EXPECT_EQ(Opts.Server.ControlPort, Defaults.Server.ControlPort);
@@ -44,8 +43,7 @@ TEST(Cli, NoArgumentsKeepTheDefaults) {
 TEST(Cli, EveryFlagSetsItsOption) {
   Options Opts;
   ASSERT_EQ(parse({"--bind", "127.0.0.1", "--world-port", "1", "--control-port",
-                   "65535", "--request-port", "30000", "--workers", "1024",
-                   "--otlp", "collector:4317"},
+                   "65535", "--request-port", "30000", "--workers", "1024"},
                   Opts),
             ArgsResult::Parsed);
   EXPECT_EQ(Opts.Server.Bind, "127.0.0.1");
@@ -53,7 +51,6 @@ TEST(Cli, EveryFlagSetsItsOption) {
   EXPECT_EQ(Opts.Server.ControlPort, 65535);
   EXPECT_EQ(Opts.Server.RequestPort, 30000);
   EXPECT_EQ(Opts.Server.Node.Workers, 1024u);
-  EXPECT_EQ(Opts.OtlpEndpoint, "collector:4317");
 }
 
 TEST(Cli, ARepeatedFlagKeepsItsLastValue) {
@@ -72,7 +69,7 @@ TEST(Cli, HelpWinsWhereverItStands) {
 
 TEST(Cli, AFlagWithoutItsValueIsAnError) {
   for (const char *Flag : {"--bind", "--world-port", "--control-port",
-                           "--request-port", "--workers", "--otlp"})
+                           "--request-port", "--workers"})
     EXPECT_EQ(parse({Flag}), ArgsResult::Error) << Flag;
 }
 
@@ -100,10 +97,9 @@ TEST(Cli, TheUsageNamesEveryFlagAndDefault) {
   printUsage(Usage);
   const std::string Text = Usage.str();
   for (const char *Flag : {"--bind", "--world-port", "--control-port",
-                           "--request-port", "--workers", "--otlp", "--help"})
+                           "--request-port", "--workers", "--help"})
     EXPECT_NE(Text.find(Flag), std::string::npos) << Flag;
   const Options Defaults;
-  EXPECT_NE(Text.find(Defaults.OtlpEndpoint), std::string::npos);
   EXPECT_NE(Text.find(std::to_string(Defaults.Server.WorldPort)),
             std::string::npos);
   EXPECT_NE(Text.find(std::to_string(Defaults.Server.ControlPort)),

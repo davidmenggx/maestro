@@ -13,15 +13,12 @@ FLATC := $(BUILD)/tools/bin/flatc
 # Minecraft 26.1 needs JDK 25, selected by the Gradle `java.toolchain` blocks.
 GRADLE := ./gradlew
 
-# The OpenTelemetry C++ SDK is heavy to build.
-MAESTRO_WITH_OTEL ?= ON
-
 # e.g. `address,undefined` or `thread`.
 MAESTRO_SANITIZE ?=
 
 .PHONY: all help flatc schema schema-cpp schema-java \
         node node-configure node-test \
-        server server-test fuzz test test-boot test-e2e capture conformance run-node run-server \
+        server server-test fuzz test test-boot test-game test-e2e capture conformance run-node run-server \
         coverage clean distclean
 
 all: node server ## Build the C++ node and the Java mod
@@ -57,7 +54,6 @@ schema-java: $(FLATC) ## Generate Java bindings into server/controller/src/gener
 # ---------------------------------------------------------------------------
 node-configure: schema-cpp
 	cmake -S node -B $(BUILD)/node -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-		-DMAESTRO_WITH_OTEL=$(MAESTRO_WITH_OTEL) \
 		-DMAESTRO_SANITIZE=$(MAESTRO_SANITIZE)
 
 node: node-configure ## Configure and build the C++ compute node
@@ -89,10 +85,13 @@ run-server: schema-java ## Boot a dev server (WORLD=<name> loads worlds/<name>)
 test-boot: schema-java ## Boot the released mod and assert the mixins applied
 	tools/boot-smoke-test.sh
 
-# Each run is `offload-submode[-faults]`.
-E2E_RUNS := $(if $(OFFLOAD),$(OFFLOAD)-$(or $(SUBMODE),batch)-$(FAULTS),shadow-batch on-batch on-batch-failover on-stream on-stream-failover on-batch-split on-batch-replica)
+test-game: schema-java ## Run the game tests, which need a running server, headless
+	cd server && $(GRADLE) runGameTest --console=plain
 
-test-e2e: node schema-java ## Run the released mod against real nodes (OFFLOAD=shadow|on SUBMODE=batch|stream FAULTS=failover|split|replica pick one run; all by default)
+# Each run is `offload-submode[-faults]`.
+E2E_RUNS := $(if $(OFFLOAD),$(OFFLOAD)-$(or $(SUBMODE),batch)-$(FAULTS),shadow-batch shadow-stream on-batch on-batch-failover on-stream on-stream-failover on-batch-split on-batch-replica on-stream-split on-stream-replica shadow-batch-blocks shadow-batch-net shadow-batch-topology)
+
+test-e2e: node schema-java ## Run the released mod against real nodes (OFFLOAD=shadow|on SUBMODE=batch|stream FAULTS=failover|split|replica|blocks|net|topology pick one run; all by default)
 	$(foreach run,$(E2E_RUNS),OFFLOAD=$(word 1,$(subst -, ,$(run))) SUBMODE=$(word 2,$(subst -, ,$(run))) FAULTS=$(word 3,$(subst -, ,$(run))) tools/e2e-test.sh &&) true
 
 capture: schema-java ## Record parity fixtures into fixtures/parity (SEED="1 2" N=cases)
@@ -117,7 +116,7 @@ coverage: schema ## Measure the unit suites' line and branch coverage into build
 	cd server && $(GRADLE) --init-script $(ROOT)/tools/jacoco.init.gradle \
 		-Dmaestro.coverage.dir=$(COVERAGE)/java coverageReport
 	cmake -S node -B $(NODE_COVERAGE) -DCMAKE_BUILD_TYPE=Debug \
-		-DCMAKE_CXX_COMPILER=$(COVERAGE_CXX) -DMAESTRO_WITH_OTEL=OFF \
+		-DCMAKE_CXX_COMPILER=$(COVERAGE_CXX) \
 		-DCMAKE_CXX_FLAGS="-fprofile-instr-generate -fcoverage-mapping"
 	cmake --build $(NODE_COVERAGE) -j
 	rm -rf $(NODE_COVERAGE)/profiles

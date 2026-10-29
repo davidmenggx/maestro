@@ -9,7 +9,6 @@
 
 #include "maestro/cli.hpp"
 #include "maestro/net/server.hpp"
-#include "maestro/obs.hpp"
 
 int main(int Argc, char **Argv) {
   using maestro::cli::ArgsResult;
@@ -26,8 +25,6 @@ int main(int Argc, char **Argv) {
     break;
   }
 
-  maestro::obs::init("maestro-node", Opts.OtlpEndpoint);
-  int Status = 0;
   try {
     asio::io_context Io;
     maestro::net::Server Node(Io, Opts.Server);
@@ -42,8 +39,7 @@ int main(int Argc, char **Argv) {
               << " searches\n";
   } catch (const std::exception &Error) {
     std::cerr << "maestro-node: " << Error.what() << '\n';
-    Status = 1;
+    return 1;
   }
-  maestro::obs::shutdown();
-  return Status;
+  return 0;
 }

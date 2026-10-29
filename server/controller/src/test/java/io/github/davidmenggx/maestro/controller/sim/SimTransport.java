@@ -76,6 +76,9 @@ public final class SimTransport {
 
   private Session session;
 
+  /** Frames the controller has sent, on any channel. */
+  private long sentToNodes;
+
   SimTransport(Simulation sim, FaultPlan faults, Rng rng, Map<NodeId, ModeledNode> nodes) {
     this.sim = sim;
     this.faults = faults;
@@ -101,6 +104,7 @@ public final class SimTransport {
     @Override
     public void send(NodeId node, Channel channel, ByteBuffer frame) {
       if (session == this) {
+        sentToNodes++;
         transmit(node, channel, frame, Direction.TO_NODE);
       }
     }
@@ -169,6 +173,11 @@ public final class SimTransport {
     }
     session = new Session();
     return session;
+  }
+
+  /** Frames the current and earlier controller processes have sent, on any channel. */
+  long sentToNodes() {
+    return sentToNodes;
   }
 
   /** The host each modeled node acts through. */

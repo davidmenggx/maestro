@@ -19,7 +19,8 @@ import java.util.Map;
  * thread only.
  *
  * <p>Histograms use the default buckets unless their name has its own below. Ticks late get one
- * bucket per tick, so the 3-tick SLO can be read off; sizes double per bucket.
+ * bucket per tick, so the 3-tick SLO can be read off; sizes and node times double per bucket; tick
+ * times are finest around the 50 ms budget.
  */
 public final class OtelMetrics implements Metrics {
 
@@ -28,7 +29,12 @@ public final class OtelMetrics implements Metrics {
       Map.of(
           "path.latency.ticks", steps(0, 10),
           "frame.bytes", doublings(64, 1 << 22),
-          "node.queue.reported", doublings(1, 1 << 16));
+          "node.queue.reported", doublings(1, 1 << 16),
+          "node.wait.micros", doublings(16, 1 << 20),
+          "node.search.micros", doublings(16, 1 << 20),
+          "server.tick.millis",
+              List.of(
+                  1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 80.0, 100.0, 200.0, 500.0));
 
   private final Meter meter;
   private final Map<String, LongCounter> counters = new HashMap<>();

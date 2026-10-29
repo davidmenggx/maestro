@@ -82,6 +82,7 @@ public final class Simulation {
   private final SeededRng rng;
   private final Rng serverRng;
   private final Rng offloadRng;
+  private final Rng lateRng;
   private final Rng runRng;
   private final Rng controllerRng;
   private final PriorityQueue<Scheduled> queue = new PriorityQueue<>();
@@ -91,6 +92,12 @@ public final class Simulation {
 
   /** Offload work by the step it finishes, run at the first hand-over at or after it. */
   private final PriorityQueue<Scheduled> finishedWork = new PriorityQueue<>();
+
+  /** Finished offload work that misses the first hand-over at or after it, by finishing step. */
+  private final PriorityQueue<Scheduled> lateWork = new PriorityQueue<>();
+
+  /** Late work that missed the last hand-over, in the order it finished. */
+  private List<Scheduled> missedWork = new ArrayList<>();
 
   private final Map<NodeId, ModeledNode> nodes = new LinkedHashMap<>();
   private final Map<Long, List<FaultPlan.Fault>> faultsByTick = new LinkedHashMap<>();
@@ -110,6 +117,7 @@ public final class Simulation {
   private final List<String> streamViolations = new ArrayList<>();
   private final FailOpenCheck failOpen = new FailOpenCheck();
   private final SimMetrics metrics = new SimMetrics();
+  private final SimTracing tracing = new SimTracing();
   private final Digest digest = new Digest();
   private final SimTransport transport;
   private final SimClock clock = new SimClock();
@@ -130,6 +138,9 @@ public final class Simulation {
   /** The chance that a tick's work runs past its time. */
   private double slowTickChance;
 
+  /** The chance that offload work that sent hands its completion over a hand-over late. */
+  private double lateCompletionChance;
+
   /** Steps the current tick's work takes at least, from a stall in the fault plan. */
   private long stallSteps;
 
@@ -143,6 +154,7 @@ public final class Simulation {
     this.rng = SeededRng.of(seed);
     this.serverRng = rng.derive("server");
     this.offloadRng = rng.derive("offload");
+    this.lateRng = rng.derive("late-completions");
     this.runRng = rng.derive("run");
     this.controllerRng = rng.derive("controller");
     this.transport = new SimTransport(this, faults, rng.derive("transport"), nodes);
@@ -164,6 +176,11 @@ public final class Simulation {
 
   public SimMetrics metrics() {
     return metrics;
+  }
+
+  /** The traces of every controller process so far. */
+  public SimTracing tracing() {
+    return tracing;
   }
 
   public Digest digest() {
@@ -210,6 +227,18 @@ public final class Simulation {
     slowTickChance = chance;
   }
 
+  /**
+   * The chance that offload work that sent through the transport hands its completion over one
+   * hand-over late, as a worker queues it only after its sends, so the answers to them can be
+   * handed over first.
+   */
+  public void lateCompletions(double chance) {
+    if (!(chance >= 0 && chance <= 1)) {
+      throw new IllegalArgumentException("a chance is in [0, 1]: " + chance);
+    }
+    lateCompletionChance = chance;
+  }
+
   /** Queues a transport callback for the controller thread, run at the next hand-over. */
   void toController(String name, Runnable action) {
     inbox.add(new Scheduled(now, order++, name, action));
@@ -234,6 +263,7 @@ public final class Simulation {
             new SimOffload(incarnation),
             transport.restart(),
             metrics,
+            tracing,
             run);
     failOpen.restarted(run, tick);
   }
@@ -477,7 +507,10 @@ public final class Simulation {
     controller.accept(event);
   }
 
-  /** Runs queued transport callbacks in arrival order, then offload work finished by now. */
+  /**
+   * Runs queued transport callbacks in arrival order, then offload work that missed the last
+   * hand-over, then offload work finished by now. Late work finished by now misses this one.
+   */
   private void handOver() {
     for (int i = 0; i < inbox.size(); i++) {
       Scheduled next = inbox.get(i);
@@ -485,6 +518,15 @@ public final class Simulation {
       next.action().run();
     }
     inbox.clear();
+    List<Scheduled> missed = missedWork;
+    missedWork = new ArrayList<>();
+    for (Scheduled next : missed) {
+      digest.mix(now).mix(next.name());
+      next.action().run();
+    }
+    while (!lateWork.isEmpty() && lateWork.peek().time() <= now) {
+      missedWork.add(lateWork.poll());
+    }
     while (!finishedWork.isEmpty() && finishedWork.peek().time() <= now) {
       Scheduled next = finishedWork.poll();
       digest.mix(now).mix(next.name());
@@ -518,8 +560,9 @@ public final class Simulation {
   /**
    * A job's work runs on its worker when it finishes, between hand-overs, so a job that sends does
    * so then. Its completion runs at the next hand-over, so a result never reaches the controller
-   * inside the submitting call. Failures report at the same point. Jobs of a restarted process
-   * neither run nor report. The lane is ignored.
+   * inside the submitting call, or, by {@link #lateCompletions}, one later if the job sent.
+   * Failures report at the same point. Jobs of a restarted process neither run nor report. The lane
+   * is ignored.
    */
   private final class SimOffload implements Offload {
 
@@ -556,6 +599,7 @@ public final class Simulation {
                 if (process != incarnation) {
                   return;
                 }
+                long sentBefore = transport.sentToNodes();
                 T result;
                 try {
                   result = work.get();
@@ -565,12 +609,21 @@ public final class Simulation {
                       new Scheduled(now, order++, "offload-threw:" + name, () -> live(failure)));
                   return;
                 }
-                finishedWork.add(
+                Scheduled done =
                     new Scheduled(
                         now,
                         order++,
                         "offload:" + name,
-                        () -> live(() -> completion.accept(result))));
+                        () -> live(() -> completion.accept(result)));
+                // Drawn only if late completions are possible, so other runs replay unchanged.
+                if (transport.sentToNodes() != sentBefore
+                    && lateCompletionChance > 0
+                    && lateRng.nextDouble() < lateCompletionChance) {
+                  metrics.count("offload.late", 1, "job", name);
+                  lateWork.add(done);
+                } else {
+                  finishedWork.add(done);
+                }
               }));
     }
 

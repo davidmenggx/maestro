@@ -21,6 +21,23 @@
 # FAULTS=replica (with OFFLOAD=on) is the same with one crowd, which no cut can
 # divide, so the spare becomes a replica and must search for some of its mobs.
 #
+# FAULTS=blocks (with OFFLOAD=shadow) changes blocks among the mobs while they
+# run: a wall, a door, water, falling sand and a sticky piston, and unloads and
+# reloads a second crowd's chunks. Answers may differ from vanilla's while the
+# world changes; once it has settled every answer must match. What it built is
+# removed at the end, as the dev world persists.
+#
+# FAULTS=net (with OFFLOAD=shadow) puts tools/fault-proxy.py between the mod and
+# the node, losing, duplicating and reordering datagrams, and cuts the link's
+# TCP connections mid-run with the node still up. The node must resume its
+# region rather than take it afresh, and every answer must still match.
+#
+# FAULTS=topology (with OFFLOAD=shadow) runs two nodes, each holding one region
+# of a square of two by two cells, with a crowd on the corner the regions share
+# and one outside the square. The server then restarts while the nodes run on.
+# Both nodes must search, every answer must match, and both must come back
+# into service after the restart.
+#
 # SUBMODE=stream sends each request as soon as it is encoded instead of
 # batching a tick's requests (SUBMODE=batch, the default).
 
@@ -36,6 +53,7 @@ NAME="$OFFLOAD-$SUBMODE${FAULTS:+-$FAULTS}"
 LOG="$SERVER_DIR/build/e2e-test-$NAME.log"
 NODE_LOG="$SERVER_DIR/build/e2e-node-$NAME.log"
 SPARE_LOG="$SERVER_DIR/build/e2e-spare-$NAME.log"
+PROXY_LOG="$SERVER_DIR/build/e2e-proxy-$NAME.log"
 CONFIG="$SERVER_DIR/run/config/maestro.json"
 
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-300}"
@@ -58,29 +76,50 @@ AFTER_SECONDS="${AFTER_SECONDS:-10}"
 STATE_TIMEOUT="${STATE_TIMEOUT:-40}"
 # Seconds the region may take to be halved: 10 s of shedding, and the warm-up.
 SPLIT_TIMEOUT="${SPLIT_TIMEOUT:-120}"
+# Seconds the blocks change for, and the world then takes to settle: water to
+# drain and the node to apply the last changes.
+CHANGE_SECONDS="${CHANGE_SECONDS:-12}"
+SETTLE_SECONDS="${SETTLE_SECONDS:-5}"
 
 WORLD_PORT=25710
 CONTROL_PORT=25711
 REQUEST_PORT=25712
+# The second node: a spare in a split or replica run, a holder in a topology run.
 SPARE_WORLD_PORT=25713
 SPARE_CONTROL_PORT=25714
 SPARE_REQUEST_PORT=25715
+# Where the fault proxy listens for the node's three ports.
+PROXY_WORLD_PORT=25720
+PROXY_CONTROL_PORT=25721
+PROXY_REQUEST_PORT=25722
 READY_LINE='Done ('
 SUMMARY_LINE='Maestro fleet stopped:'
-STATE_LINE='Maestro: node-0 is'
+# Logged with a node's name when its link or service changes.
+STATE_LINE='Maestro: %s is'
 # Logged once no node is spare, which in a split or replica run means the
 # region took the spare.
 SPLIT_LINE='Maestro: spare nodes []'
-# The spare node's last line, with the searches it ran.
+# A node's last line, with the searches it ran.
 SEARCHES_LINE='maestro-node: stopped after'
 # The node's line when it keeps the lower half of region 1 as region 2.
 KEPT_LINE='maestro-node: kept region 1 as region 2'
+# The node's lines when an assignment resumes the stream it holds, or starts
+# its region afresh.
+RESUMED_LINE='maestro-node: resumed region'
+AFRESH_LINE='maestro-node: took region [0-9]+ afresh'
 # The load mod's lines for the run's scenario, and the tag on what it places.
 SCENARIO='e2e'
 MEASURING_LINE="Maestro load measuring: scenario=$SCENARIO\$"
 DONE_LINE="Maestro load done: scenario=$SCENARIO "
+MARK_LINE='Maestro load mark:'
 LOAD_TAG='maestro_load'
 SCENARIO_FILE="$SERVER_DIR/run/maestro-load/scenarios/$SCENARIO.json"
+# Where the blocks run's second crowd stands, in chunks it loads and unloads
+# with no player near.
+CHURN_X=200
+CHURN_AREA="$((CHURN_X - 16)) -16 $((CHURN_X + 16)) 16"
+# Set when the run starts a second node.
+SECOND_NODE=""
 
 fail() {
   echo "e2e-test: FAIL: $*" >&2
@@ -88,9 +127,13 @@ fail() {
   tail -n 40 "$LOG" >&2 || true
   echo "--- last 20 node log lines ---" >&2
   tail -n 20 "$NODE_LOG" >&2 || true
-  if [[ "$FAULTS" == "split" || "$FAULTS" == "replica" ]]; then
-    echo "--- last 20 spare node log lines ---" >&2
+  if [[ -n "$SECOND_NODE" ]]; then
+    echo "--- last 20 second node log lines ---" >&2
     tail -n 20 "$SPARE_LOG" >&2 || true
+  fi
+  if [[ "$FAULTS" == "net" ]]; then
+    echo "--- fault proxy log ---" >&2
+    cat "$PROXY_LOG" >&2 || true
   fi
   exit 1
 }
@@ -106,7 +149,8 @@ esac
 case "$FAULTS" in
 "") ;;
 failover | split | replica) [[ "$OFFLOAD" == "on" ]] || fail "FAULTS=$FAULTS needs OFFLOAD=on" ;;
-*) fail "FAULTS must be empty, failover, split or replica, not '$FAULTS'" ;;
+blocks | net | topology) [[ "$OFFLOAD" == "shadow" ]] || fail "FAULTS=$FAULTS needs OFFLOAD=shadow" ;;
+*) fail "FAULTS must be empty, failover, split, replica, blocks, net or topology, not '$FAULTS'" ;;
 esac
 [[ -x "$NODE_BIN" ]] || fail "no node binary at $NODE_BIN (run 'make node')"
 
@@ -114,6 +158,7 @@ mkdir -p "$(dirname "$LOG")" "$(dirname "$CONFIG")"
 : >"$LOG"
 : >"$NODE_LOG"
 : >"$SPARE_LOG"
+: >"$PROXY_LOG"
 
 # An existing config is restored afterwards.
 BACKUP=""
@@ -121,17 +166,33 @@ if [[ -f "$CONFIG" ]]; then
   BACKUP="$(mktemp)"
   cp "$CONFIG" "$BACKUP"
 fi
-NODES="{\"host\": \"127.0.0.1\", \"worldPort\": $WORLD_PORT, \"controlPort\": $CONTROL_PORT, \"requestPort\": $REQUEST_PORT}"
+node_address() {
+  echo "{\"host\": \"127.0.0.1\", \"worldPort\": $1, \"controlPort\": $2, \"requestPort\": $3}"
+}
+NODES="$(node_address $WORLD_PORT $CONTROL_PORT $REQUEST_PORT)"
 NODE_CAPACITY=100
 AREA_CELLS=5
+SPARES=1
 # A split or replica run has a spare, one request a tick so the region sheds, and
 # one region of two by two cells.
 SPARE_RUN=""
 if [[ "$FAULTS" == "split" || "$FAULTS" == "replica" ]]; then
   SPARE_RUN=1
-  NODES="$NODES, {\"host\": \"127.0.0.1\", \"worldPort\": $SPARE_WORLD_PORT, \"controlPort\": $SPARE_CONTROL_PORT, \"requestPort\": $SPARE_REQUEST_PORT}"
+  SECOND_NODE=1
+  NODES="$NODES, $(node_address $SPARE_WORLD_PORT $SPARE_CONTROL_PORT $SPARE_REQUEST_PORT)"
   NODE_CAPACITY=1
   AREA_CELLS=2
+fi
+# A topology run halves the same square between two nodes and keeps no spare.
+if [[ "$FAULTS" == "topology" ]]; then
+  SECOND_NODE=1
+  NODES="$NODES, $(node_address $SPARE_WORLD_PORT $SPARE_CONTROL_PORT $SPARE_REQUEST_PORT)"
+  AREA_CELLS=2
+  SPARES=0
+fi
+# A net run reaches the node through the fault proxy.
+if [[ "$FAULTS" == "net" ]]; then
+  NODES="$(node_address $PROXY_WORLD_PORT $PROXY_CONTROL_PORT $PROXY_REQUEST_PORT)"
 fi
 cat >"$CONFIG" <<EOF
 {
@@ -140,7 +201,7 @@ cat >"$CONFIG" <<EOF
   "nodes": [$NODES],
   "nodeCapacity": $NODE_CAPACITY,
   "areaCells": $AREA_CELLS,
-  "spares": 1,
+  "spares": $SPARES,
   "otlpEndpoint": "http://localhost:4317"
 }
 EOF
@@ -152,30 +213,32 @@ start_node() {
 }
 start_node
 SPARE_PID=""
-if [[ -n "$SPARE_RUN" ]]; then
+if [[ -n "$SECOND_NODE" ]]; then
   "$NODE_BIN" --bind 127.0.0.1 --world-port "$SPARE_WORLD_PORT" --control-port "$SPARE_CONTROL_PORT" \
     --request-port "$SPARE_REQUEST_PORT" --workers 2 >>"$SPARE_LOG" 2>&1 &
   SPARE_PID=$!
 fi
+PROXY_PID=""
+if [[ "$FAULTS" == "net" ]]; then
+  python3 -I "$ROOT/tools/fault-proxy.py" \
+    --tcp "$PROXY_WORLD_PORT:$WORLD_PORT" --tcp "$PROXY_CONTROL_PORT:$CONTROL_PORT" \
+    --udp "$PROXY_REQUEST_PORT:$REQUEST_PORT" \
+    --loss 0.03 --duplicate 0.05 --reorder 0.05 --seed 1 >>"$PROXY_LOG" 2>&1 &
+  PROXY_PID=$!
+fi
 
-FIFO="$(mktemp -u)"
-mkfifo "$FIFO"
-# Read-write open: a write-only FIFO open blocks until a reader attaches, and
-# keeps the server's console reader from seeing EOF.
-exec 3<>"$FIFO"
-
-EXIT_FILE="$(mktemp)"
-setsid bash -c "cd '$SERVER_DIR' && ./gradlew runLoadServer --console=plain; echo \$? >'$EXIT_FILE'" \
-  <"$FIFO" >>"$LOG" 2>&1 &
-GRADLE_PID=$!
+FIFO=""
+EXIT_FILE=""
+GRADLE_PID=""
 
 cleanup() {
   exec 3>&- || true
-  kill -TERM -"$GRADLE_PID" 2>/dev/null || true
+  [[ -z "$GRADLE_PID" ]] || kill -TERM -"$GRADLE_PID" 2>/dev/null || true
   # A paused node handles the signal only once it runs again.
   kill -CONT "$NODE_PID" 2>/dev/null || true
   kill -TERM "$NODE_PID" 2>/dev/null || true
   [[ -z "$SPARE_PID" ]] || kill -TERM "$SPARE_PID" 2>/dev/null || true
+  [[ -z "$PROXY_PID" ]] || kill -TERM "$PROXY_PID" 2>/dev/null || true
   rm -f "$FIFO" "$EXIT_FILE"
   if [[ -n "$BACKUP" ]]; then
     mv "$BACKUP" "$CONFIG"
@@ -185,16 +248,49 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "e2e-test: offload=$OFFLOAD faults=${FAULTS:-none}, waiting up to ${STARTUP_TIMEOUT}s for the server to start"
-for ((i = 0; i < STARTUP_TIMEOUT; i++)); do
-  if grep -qF "$READY_LINE" "$LOG"; then
-    break
-  fi
-  kill -0 "$GRADLE_PID" 2>/dev/null || fail "server exited before it finished starting"
-  kill -0 "$NODE_PID" 2>/dev/null || fail "the node exited"
-  sleep 1
-done
-grep -qF "$READY_LINE" "$LOG" || fail "server did not start within ${STARTUP_TIMEOUT}s"
+# Starts the server and waits until it is ready.
+start_server() {
+  local before i
+  before="$(grep -cF "$READY_LINE" "$LOG" || true)"
+  FIFO="$(mktemp -u)"
+  mkfifo "$FIFO"
+  # Read-write open: a write-only FIFO open blocks until a reader attaches, and
+  # keeps the server's console reader from seeing EOF.
+  exec 3<>"$FIFO"
+  EXIT_FILE="$(mktemp)"
+  setsid bash -c "cd '$SERVER_DIR' && ./gradlew runLoadServer --console=plain; echo \$? >'$EXIT_FILE'" \
+    <"$FIFO" >>"$LOG" 2>&1 &
+  GRADLE_PID=$!
+
+  echo "e2e-test: offload=$OFFLOAD faults=${FAULTS:-none}, waiting up to ${STARTUP_TIMEOUT}s for the server to start"
+  for ((i = 0; i < STARTUP_TIMEOUT; i++)); do
+    if (("$(grep -cF "$READY_LINE" "$LOG" || true)" > before)); then
+      return 0
+    fi
+    kill -0 "$GRADLE_PID" 2>/dev/null || fail "server exited before it finished starting"
+    kill -0 "$NODE_PID" 2>/dev/null || fail "the node exited"
+    sleep 1
+  done
+  fail "server did not start within ${STARTUP_TIMEOUT}s"
+}
+
+# Stops the server and checks it exited cleanly.
+stop_server() {
+  local i exit_code
+  echo "e2e-test: stopping the server"
+  echo "stop" >&3
+  for ((i = 0; i < SHUTDOWN_TIMEOUT; i++)); do
+    kill -0 "$GRADLE_PID" 2>/dev/null || break
+    sleep 1
+  done
+  kill -0 "$GRADLE_PID" 2>/dev/null && fail "server did not stop within ${SHUTDOWN_TIMEOUT}s"
+  wait "$GRADLE_PID" 2>/dev/null || true
+  GRADLE_PID=""
+  exec 3>&-
+  exit_code="$(cat "$EXIT_FILE" 2>/dev/null || echo 1)"
+  rm -f "$FIFO" "$EXIT_FILE"
+  [[ "$exit_code" == "0" ]] || fail "runLoadServer exited with status $exit_code"
+}
 
 # Sends console command $1, waits up to $3 s (default 60) for a new log line
 # matching regex $2.
@@ -212,24 +308,41 @@ run_command() {
   fail "no '$expected' within ${timeout}s of '$command'"
 }
 
-# How many times the node was logged as in state $1.
-state_count() {
-  grep -cF -- "$STATE_LINE $1;" "$LOG" || true
+# Sends console command $1 without waiting for its answer.
+send_command() {
+  echo "$1" >&3
 }
 
-# Waits up to STATE_TIMEOUT s for the node to be logged in state $1 more than
-# $2 times, and prints that log line.
+# The state line of node $1 (default node-0).
+state_line() {
+  # shellcheck disable=SC2059
+  printf "$STATE_LINE" "${1:-node-0}"
+}
+
+# How many times node $2 (default node-0) was logged as in state $1.
+state_count() {
+  grep -cF -- "$(state_line "${2:-node-0}") $1;" "$LOG" || true
+}
+
+# Waits up to STATE_TIMEOUT s for node $3 (default node-0) to be logged in
+# state $1 more than $2 times, and prints that log line.
 wait_state() {
-  local state="$1" before="$2" i
+  local state="$1" before="$2" node="${3:-node-0}" i
   for ((i = 0; i < STATE_TIMEOUT * 5; i++)); do
-    if (("$(state_count "$state")" > before)); then
-      grep -F -- "$STATE_LINE $state;" "$LOG" | tail -n 1
+    if (("$(state_count "$state" "$node")" > before)); then
+      grep -F -- "$(state_line "$node") $state;" "$LOG" | tail -n 1
       return 0
     fi
-    kill -0 "$GRADLE_PID" 2>/dev/null || fail "server exited while waiting for the node to be $state"
+    kill -0 "$GRADLE_PID" 2>/dev/null || fail "server exited while waiting for $node to be $state"
     sleep 0.2
   done
-  fail "the node was not logged as $state within ${STATE_TIMEOUT}s"
+  fail "$node was not logged as $state within ${STATE_TIMEOUT}s"
+}
+
+# Logs the fleet's counts so far and prints that line.
+mark() {
+  run_command "maestro load mark" "$MARK_LINE"
+  grep -F -- "$MARK_LINE" "$LOG" | tail -n 1
 }
 
 # The count named $2 in summary text $1, or 0.
@@ -242,6 +355,24 @@ count_in() {
 # Mobs served by the failover so far, by summary text $1.
 failover_count() {
   echo $(($(count_in "$1" failover_recent) + $(count_in "$1" failover_full) + $(count_in "$1" failover_cheap)))
+}
+
+# Fails unless every answer in summary text $1 matched vanilla's, and prints the
+# counts. $2 names what the summary covers.
+require_matches() {
+  local matched differed
+  matched="$(count_in "$1" shadow_matched)"
+  differed="$(count_in "$1" shadow_differed)"
+  if ((matched * 100 < (matched + differed) * MIN_MATCH_PERCENT)); then
+    grep -F "Maestro shadow mismatch" "$LOG" >&2 || true
+    fail "$2: $matched of $((matched + differed)) answers matched vanilla, below ${MIN_MATCH_PERCENT}%"
+  fi
+  echo "e2e-test: $2: $matched of $((matched + differed)) answers matched vanilla"
+}
+
+# The searches the node logging to $1 ran, once it has stopped.
+searches_in() {
+  grep -F "$SEARCHES_LINE" "$1" | tail -n 1 | grep -oE '[0-9]+ searches' | grep -oE '[0-9]+' || echo 0
 }
 
 # Husks do not burn in daylight. In a failover, split or replica run Resistance
@@ -288,30 +419,108 @@ for origin in $ORIGINS; do
     group husk 30 "$origin" 0 10 "{$HUSK_NBT}"
   fi
 done
+# A second crowd in chunks the script loads and unloads, with no player near.
+if [[ "$FAULTS" == "blocks" ]]; then
+  group villager 4 "$CHURN_X" 0 6 "{}"
+  group husk 6 "$CHURN_X" 0 4 "{$HUSK_NBT}"
+fi
+# A crowd on the corner where the regions meet, whose searches read into the
+# other regions' areas, and one outside the square, which stays vanilla.
+if [[ "$FAULTS" == "topology" ]]; then
+  PLAYERS_JSON+=("{\"x\": 128, \"z\": 152}" "{\"x\": -300, \"z\": 24}")
+  group villager 4 128 128 10 "{}"
+  group husk 8 128 128 6 "{$HUSK_NBT}"
+  group villager 2 -300 0 6 "{}"
+  group husk 4 -300 0 4 "{$HUSK_NBT}"
+fi
 mkdir -p "$(dirname "$SCENARIO_FILE")"
 jq -n --argjson players "[$(IFS=,; echo "${PLAYERS_JSON[*]}")]" \
   --argjson groups "[$(IFS=,; echo "${GROUPS_JSON[*]}")]" \
   '{seed: 1, players: $players, groups: $groups}' >"$SCENARIO_FILE"
 
+# Force loads the area of x1 z1 x2 z2 $1 and waits until block x $2, z $3 is
+# loaded.
+force_load() {
+  local attempt
+  run_command "forceload add $1" "force loaded|No chunks were marked"
+  for ((attempt = 0; ; attempt++)); do
+    run_command "execute if loaded $2 ~ $3" "Test (passed|failed)"
+    [[ "$(grep -oE 'Test (passed|failed)' "$LOG" | tail -n 1)" == "Test passed" ]] && break
+    ((attempt < 120)) || fail "the area $1 did not load"
+    sleep 0.5
+  done
+}
+
+# Places the load run's entities and waits until it measures.
+start_load() {
+  echo "e2e-test: placing $ENTITIES husks, villagers and golems"
+  run_command "maestro load start $SCENARIO" "$MEASURING_LINE|Maestro load failed" 120
+  grep -qE "$MEASURING_LINE" "$LOG" || fail "the load run did not start measuring"
+}
+
+# Ends the load run, which removes what it placed and writes its report, and
+# sets REPORT.
+stop_load() {
+  run_command "maestro load stop" "$DONE_LINE|Maestro load failed"
+  REPORT="$(grep -F "$DONE_LINE" "$LOG" | tail -n 1 | sed 's/.* report=//')"
+  [[ -n "$REPORT" && -f "$REPORT" ]] || fail "the load run wrote no report"
+}
+
+# One step of the blocks run's changes among the mobs, by step number $1: a
+# wall rises and falls, power opens and shuts a door (its upper half follows its
+# lower one), water flows from a source and drains, sand falls, and power makes
+# a sticky piston push and pull a block.
+change_blocks() {
+  local step="$1"
+  if ((step % 2 == 0)); then
+    send_command "fill -6 ~ -3 6 ~1 -3 minecraft:stone"
+    send_command "setblock 5 ~ 4 minecraft:redstone_block"
+    send_command "setblock 8 ~ 0 minecraft:water"
+    send_command "setblock -5 ~ 8 minecraft:redstone_block"
+  else
+    send_command "fill -6 ~ -3 6 ~1 -3 minecraft:air"
+    send_command "setblock 5 ~ 4 minecraft:air"
+    send_command "setblock 8 ~ 0 minecraft:air"
+    send_command "setblock -5 ~ 8 minecraft:air"
+  fi
+  send_command "fill -8 ~ 4 -8 ~6 4 minecraft:air"
+  send_command "setblock -8 ~5 4 minecraft:sand"
+}
+
+# Removes what the blocks run built, which the dev world would otherwise keep
+# for later runs: the door and its power, the piston with its power and its
+# block wherever it stands, and the sand.
+clear_blocks() {
+  local at
+  for at in "5 ~ 4" "4 ~1 4" "4 ~ 4" "-5 ~ 8" "-4 ~ 8" "-3 ~ 8" "-2 ~ 8"; do
+    run_command "setblock $at minecraft:air" "Changed the block|Could not set the block"
+  done
+  run_command "fill -8 ~ 4 -8 ~6 4 minecraft:air" "Successfully filled|No blocks were filled"
+}
+
+start_server
+
 echo "e2e-test: server up, making block changes"
 # The area of the block changes, which a failed run may have left force loaded.
-run_command "forceload add -32 -32 32 32" "force loaded|No chunks were marked"
-for ((attempt = 0; ; attempt++)); do
-  run_command "execute if loaded 24 ~ 24" "Test (passed|failed)"
-  [[ "$(grep -oE 'Test (passed|failed)' "$LOG" | tail -n 1)" == "Test passed" ]] && break
-  ((attempt < 120)) || fail "the area of the block changes did not load"
-  sleep 0.5
-done
+force_load "-32 -32 32 32" 24 24
 # Mobs a failed run left would race the block changes below.
 run_command "kill @e[tag=$LOAD_TAG]" "Killed|No entity was found"
 # Block changes that reach the node as deltas, made before any mob exists. The
 # dev world persists, so a block may already be in place.
 run_command "setblock 2 ~ 8 minecraft:oak_fence" "Changed the block|Could not set the block"
 run_command "setblock -8 ~ 2 minecraft:cobblestone" "Changed the block|Could not set the block"
+if [[ "$FAULTS" == "blocks" ]]; then
+  # The door changed below, placed half by half as is, and the piston that
+  # pushes the stone east of it. Iron, which villagers can neither open nor
+  # close, so only power changes it.
+  run_command "setblock 4 ~ 4 minecraft:iron_door[half=lower] strict" "Changed the block|Could not set the block"
+  run_command "setblock 4 ~1 4 minecraft:iron_door[half=upper] strict" "Changed the block|Could not set the block"
+  run_command "setblock -4 ~ 8 minecraft:sticky_piston[facing=east]" "Changed the block|Could not set the block"
+  run_command "setblock -3 ~ 8 minecraft:stone" "Changed the block|Could not set the block"
+  force_load "$CHURN_AREA" "$CHURN_X" 0
+fi
 
-echo "e2e-test: placing $ENTITIES husks, villagers and golems"
-run_command "maestro load start $SCENARIO" "$MEASURING_LINE|Maestro load failed" 120
-grep -qE "$MEASURING_LINE" "$LOG" || fail "the load run did not start measuring"
+start_load
 if [[ "$FAULTS" == "failover" ]]; then
   wait_state "linked and in service" 0 >/dev/null
 
@@ -353,28 +562,85 @@ elif [[ -n "$SPARE_RUN" ]]; then
   echo "e2e-test: letting the mobs run for ${AFTER_SECONDS}s"
   sleep "$AFTER_SECONDS"
   kill -0 "$SPARE_PID" 2>/dev/null || fail "the spare node exited during the run"
+elif [[ "$FAULTS" == "blocks" ]]; then
+  wait_state "linked and in service" 0 >/dev/null
+  echo "e2e-test: changing blocks among the mobs for ${CHANGE_SECONDS}s"
+  for ((step = 0; step < CHANGE_SECONDS * 2; step++)); do
+    change_blocks "$step"
+    # Halfway, the second crowd's chunks unload, and load again a little later.
+    if ((step == CHANGE_SECONDS / 2)); then
+      echo "e2e-test: unloading the second crowd's chunks"
+      run_command "forceload remove $CHURN_AREA" "for force loading|No chunks were removed"
+      for ((attempt = 0; ; attempt++)); do
+        run_command "execute if loaded $CHURN_X ~ 0" "Test (passed|failed)"
+        [[ "$(grep -oE 'Test (passed|failed)' "$LOG" | tail -n 1)" == "Test failed" ]] && break
+        ((attempt < 120)) || fail "the second crowd's chunks did not unload"
+        sleep 0.5
+      done
+      force_load "$CHURN_AREA" "$CHURN_X" 0
+    fi
+    sleep 0.5
+  done
+  # The world is left still: the door open, the water and the wall gone.
+  change_blocks 1
+  run_command "setblock 5 ~ 4 minecraft:redstone_block" "Changed the block|Could not set the block"
+  echo "e2e-test: letting the world settle for ${SETTLE_SECONDS}s"
+  sleep "$SETTLE_SECONDS"
+  SETTLED="$(mark)"
+  echo "e2e-test: letting the mobs run for ${AFTER_SECONDS}s"
+  sleep "$AFTER_SECONDS"
+  ENDED="$(mark)"
+elif [[ "$FAULTS" == "net" ]]; then
+  wait_state "linked and in service" 0 >/dev/null
+  echo "e2e-test: letting the mobs run for ${WARM_SECONDS}s"
+  sleep "$WARM_SECONDS"
+  echo "e2e-test: cutting the node's TCP connections"
+  before="$(state_count "not linked")"
+  kill -USR1 "$PROXY_PID"
+  wait_state "not linked" "$before" >/dev/null
+  before="$(state_count "linked and in service")"
+  wait_state "linked and in service" "$before" >/dev/null
+  CUT="$(mark)"
+  echo "e2e-test: letting the mobs run for ${AFTER_SECONDS}s"
+  sleep "$AFTER_SECONDS"
 else
+  if [[ "$FAULTS" == "topology" ]]; then
+    wait_state "linked and in service" 0 node-0 >/dev/null
+    wait_state "linked and in service" 0 node-1 >/dev/null
+  fi
   echo "e2e-test: letting the mobs run for ${RUN_SECONDS}s"
   sleep "$RUN_SECONDS"
 fi
 kill -0 "$NODE_PID" 2>/dev/null || fail "the node exited during the run"
 
-# Ending the run removes what it placed and writes its report.
-run_command "maestro load stop" "$DONE_LINE|Maestro load failed"
-REPORT="$(grep -F "$DONE_LINE" "$LOG" | tail -n 1 | sed 's/.* report=//')"
-[[ -n "$REPORT" && -f "$REPORT" ]] || fail "the load run wrote no report"
+stop_load
+if [[ "$FAULTS" == "blocks" ]]; then
+  # Mobs reloaded with their chunks are not the ones the run placed.
+  run_command "kill @e[tag=$LOAD_TAG]" "Killed|No entity was found"
+  run_command "forceload remove $CHURN_AREA" "for force loading|No chunks were removed"
+  clear_blocks
+fi
 run_command "forceload remove -32 -32 32 32" "for force loading|no longer"
+stop_server
 
-echo "e2e-test: stopping the server"
-echo "stop" >&3
-for ((i = 0; i < SHUTDOWN_TIMEOUT; i++)); do
-  kill -0 "$GRADLE_PID" 2>/dev/null || break
-  sleep 1
-done
-kill -0 "$GRADLE_PID" 2>/dev/null && fail "server did not stop within ${SHUTDOWN_TIMEOUT}s"
-wait "$GRADLE_PID" 2>/dev/null || true
-EXIT_CODE="$(cat "$EXIT_FILE" 2>/dev/null || echo 1)"
-[[ "$EXIT_CODE" == "0" ]] || fail "runLoadServer exited with status $EXIT_CODE"
+# The server starts again while the nodes run on, and offloads to them anew.
+if [[ "$FAULTS" == "topology" ]]; then
+  FIRST_SUMMARY="$(grep -F "$SUMMARY_LINE" "$LOG" | tail -n 1)"
+  [[ -n "$FIRST_SUMMARY" ]] || fail "the fleet logged no summary before the restart"
+  echo "e2e-test: restarting the server with the nodes still up"
+  before0="$(state_count "linked and in service" node-0)"
+  before1="$(state_count "linked and in service" node-1)"
+  start_server
+  wait_state "linked and in service" "$before0" node-0 >/dev/null
+  wait_state "linked and in service" "$before1" node-1 >/dev/null
+  force_load "-32 -32 32 32" 24 24
+  start_load
+  echo "e2e-test: letting the mobs run for ${RUN_SECONDS}s"
+  sleep "$RUN_SECONDS"
+  stop_load
+  run_command "forceload remove -32 -32 32 32" "for force loading|no longer"
+  stop_server
+fi
 
 if grep -qE 'org\.spongepowered\.asm\.mixin\.([a-z]+\.)?throwables|Mixin [a-z]+ for mod .* failed|FAILED during|Critical injection failure' "$LOG"; then
   fail "mixin application reported errors"
@@ -399,7 +665,7 @@ echo "e2e-test: load report $REPORT: $(jq -c '{ticks: .ticks, entities: .entitie
 [[ "$(jq -r '.maestro.offloading' "$REPORT")" == "true" ]] || fail "the report saw no fleet"
 SPAWNED="$(jq '.entities.spawned' "$REPORT")"
 ((SPAWNED == ENTITIES)) || fail "the load run placed $SPAWNED entities, not $ENTITIES"
-(($(jq '.players' "$REPORT") == $(wc -w <<<"$ORIGINS"))) || fail "the load run placed the wrong players"
+(($(jq '.players' "$REPORT") == ${#PLAYERS_JSON[@]})) || fail "the load run placed the wrong players"
 (($(jq '.ticks.measured' "$REPORT") > 0)) || fail "the load run measured no tick"
 REPORT_ANSWERED="$(jq '.requests.answered' "$REPORT")"
 ((REPORT_ANSWERED > 0 && REPORT_ANSWERED <= ANSWERED)) ||
@@ -442,25 +708,79 @@ elif [[ -n "$SPARE_RUN" ]]; then
   kill -TERM "$SPARE_PID" 2>/dev/null || true
   wait "$SPARE_PID" 2>/dev/null || true
   SPARE_PID=""
-  SEARCHES="$(grep -F "$SEARCHES_LINE" "$SPARE_LOG" | tail -n 1 | grep -oE '[0-9]+ searches' | grep -oE '[0-9]+' || echo 0)"
+  SEARCHES="$(searches_in "$SPARE_LOG")"
   ((SEARCHES > 0)) || fail "the spare ran no search for the mobs it took"
   echo "e2e-test: SPARE TAKEN: ${SPLIT#*"; so far "}"
   APPLIED_AFTER=$(($(count applied) - $(count_in "$SPLIT" applied)))
   ((APPLIED_AFTER > 0)) || fail "no answer moved a mob after the spare was taken"
   echo "e2e-test: $(count shed) calls shed; the spare ran $SEARCHES searches;" \
     "answers moved $APPLIED_AFTER mobs after it was taken"
+elif [[ "$FAULTS" == "blocks" ]]; then
+  # Answers that raced a change may differ; once the world settled none may.
+  MATCHED_AFTER=$(($(count_in "$ENDED" shadow_matched) - $(count_in "$SETTLED" shadow_matched)))
+  DIFFERED_AFTER=$(($(count_in "$ENDED" shadow_differed) - $(count_in "$SETTLED" shadow_differed)))
+  echo "e2e-test: while blocks changed $(count_in "$SETTLED" shadow_differed) answers differed;" \
+    "after the world settled $MATCHED_AFTER matched and $DIFFERED_AFTER differed"
+  if ((DIFFERED_AFTER > 0)); then
+    grep -F "Maestro shadow mismatch" "$LOG" >&2 || true
+    fail "$DIFFERED_AFTER answers differed from vanilla's after the world settled"
+  fi
+  ((MATCHED_AFTER >= MIN_ANSWERS)) ||
+    fail "only $MATCHED_AFTER answers after the world settled, expected at least $MIN_ANSWERS"
+  if grep -F "refused a world frame" "$NODE_LOG" >&2; then
+    fail "the node refused a world frame"
+  fi
+elif [[ "$FAULTS" == "net" ]]; then
+  require_matches "$SUMMARY" "the run"
+  APPLIED_AFTER=$(($(count answered) - $(count_in "$CUT" answered)))
+  ((APPLIED_AFTER > 0)) || fail "no answer came after the TCP connections were cut"
+  # The node kept its world through the cut, so its stream resumed.
+  (($(grep -cE "$AFRESH_LINE" "$NODE_LOG" || true) == 1)) ||
+    fail "the node took its region afresh after the cut instead of resuming it"
+  grep -qF "$RESUMED_LINE" "$NODE_LOG" || fail "the node did not resume its region after the cut"
+  if grep -F "refused a world frame" "$NODE_LOG" >&2; then
+    fail "the node refused a world frame"
+  fi
+  kill -TERM "$PROXY_PID" 2>/dev/null || true
+  wait "$PROXY_PID" 2>/dev/null || true
+  PROXY_PID=""
+  FAULTED="$(grep -F "fault-proxy: datagrams=" "$PROXY_LOG" | tail -n 1)"
+  echo "e2e-test: ${FAULTED#fault-proxy: }; $(count dropped) admitted requests dropped"
+  for fault in lost duplicated reordered; do
+    (($(count_in "$FAULTED" "$fault") > 0)) || fail "the proxy injected no $fault datagram"
+  done
+  (($(count_in "$FAULTED" cuts) == 1)) || fail "the proxy did not cut the connections once"
+elif [[ "$FAULTS" == "topology" ]]; then
+  require_matches "$FIRST_SUMMARY" "before the restart"
+  require_matches "$SUMMARY" "after the restart"
+  (($(count_in "$FIRST_SUMMARY" answered) >= MIN_ANSWERS)) ||
+    fail "only $(count_in "$FIRST_SUMMARY" answered) answers before the restart"
+  # Each run of the server cut the square in two, one region to each node.
+  for node in node-0 node-1; do
+    grep -qE "Maestro: region [0-9]+ at .* is held by \[$node " "$LOG" ||
+      fail "$node held no region"
+  done
+  for log in "$NODE_LOG" "$SPARE_LOG"; do
+    (($(grep -cE "$AFRESH_LINE" "$log" || true) >= 2)) ||
+      fail "a node was not given its region once by each run of the server ($log)"
+    if grep -F "refused a world frame" "$log" >&2; then
+      fail "a node refused a world frame"
+    fi
+  done
+  kill -TERM "$NODE_PID" "$SPARE_PID" 2>/dev/null || true
+  wait "$NODE_PID" "$SPARE_PID" 2>/dev/null || true
+  SPARE_PID=""
+  SEARCHES0="$(searches_in "$NODE_LOG")"
+  SEARCHES1="$(searches_in "$SPARE_LOG")"
+  echo "e2e-test: node-0 ran $SEARCHES0 searches and node-1 $SEARCHES1"
+  ((SEARCHES0 > 0 && SEARCHES1 > 0)) || fail "a node ran no search"
 else
   DROPPED="$(count dropped)"
   ((DROPPED == 0)) || fail "$DROPPED admitted requests were dropped instead of answered"
 fi
-if [[ "$OFFLOAD" == "shadow" ]]; then
-  MATCHED="$(count shadow_matched)"
-  DIFFERED="$(count shadow_differed)"
-  if ((MATCHED * 100 < (MATCHED + DIFFERED) * MIN_MATCH_PERCENT)); then
-    grep -F "Maestro shadow mismatch" "$LOG" >&2 || true
-    fail "$MATCHED of $((MATCHED + DIFFERED)) answers matched vanilla, below ${MIN_MATCH_PERCENT}%"
-  fi
-else
+if [[ "$OFFLOAD" == "shadow" && -z "$FAULTS" ]]; then
+  require_matches "$SUMMARY" "the run"
+elif [[ "$OFFLOAD" == "on" ]]; then
   APPLIED="$(count applied)"
   # An answer goes unapplied only if its mob stopped waiting that tick.
   ((APPLIED * 2 >= ANSWERED)) || fail "only $APPLIED of $ANSWERED answers moved a mob"

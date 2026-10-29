@@ -71,6 +71,33 @@ class NodeHealthTest {
   }
 
   @Test
+  void eachHeardNodesPhiIsReportedEveryTickAndCrossesTheThresholdWhenItsHeartbeatsStop() {
+    String label = NODE.toString();
+    health.greeted(NODE, nanos());
+    for (int beat = 0; beat < 10; beat++) {
+      ticks(HEARTBEAT_TICKS);
+      health.heartbeat(NODE, nanos());
+    }
+    // One value per tick judged, and none for a node never heard from.
+    assertEquals(10 * HEARTBEAT_TICKS, metrics.gaugeValues("node.phi", "node", label).size());
+    assertEquals(List.of(), metrics.gaugeValues("node.phi", "node", OTHER.toString()));
+    assertTrue(metrics.gauge("node.phi", "node", label) < NodeHealth.PHI_THRESHOLD);
+
+    ticks(4 * HEARTBEAT_TICKS);
+    assertTrue(metrics.gauge("node.phi", "node", label) >= NodeHealth.PHI_THRESHOLD);
+
+    health.heartbeat(NODE, nanos());
+    ticks(1);
+    assertTrue(metrics.gauge("node.phi", "node", label) < NodeHealth.PHI_THRESHOLD);
+
+    // A node with no link is not judged, so its phi is not reported.
+    int reported = metrics.gaugeValues("node.phi", "node", label).size();
+    health.disconnected(NODE);
+    ticks(HEARTBEAT_TICKS);
+    assertEquals(reported, metrics.gaugeValues("node.phi", "node", label).size());
+  }
+
+  @Test
   void aNodeJustGreetedIsGivenTheAssumedIntervalBeforeItIsSuspected() {
     health.greeted(NODE, nanos());
     assertEquals(List.of(), ticks(2 * HEARTBEAT_TICKS));

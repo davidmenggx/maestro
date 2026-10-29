@@ -7,8 +7,10 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <sstream>
 #include <string>
@@ -143,6 +145,14 @@ struct Tally {
   int ExactChangedByDelta = 0;
   int ExactBudgetBound = 0;
   int ExactHighJump = 0;
+  /// Exact cases by entity, and by each node type on vanilla's path, once a
+  /// case.
+  std::map<std::string, int> ExactByEntity;
+  std::map<fbs::PathType, int> ExactByType;
+  /// Entities of any case, and node types on any of vanilla's paths, exact or
+  /// not.
+  std::set<std::string> EntitiesSeen;
+  std::set<fbs::PathType> TypesSeen;
   int Approximated = 0;
   int ApproximatedMatched = 0;
   /// How far the node's approximated answers land from vanilla's: the node's
@@ -220,8 +230,16 @@ void replay(const std::filesystem::path &Path, Tally &Count) {
 
     Search->find(*Area, *Profile, *Call, Result);
     const std::string Diff = difference(Result, *Vanilla);
+    std::set<fbs::PathType> Types;
+    for (const search::PathPoint &Point : Vanilla->Nodes)
+      Types.insert(Point.Type);
+    Count.EntitiesSeen.insert(Entity);
+    Count.TypesSeen.insert(Types.begin(), Types.end());
     if (Case->exact()) {
       ++Count.Exact;
+      ++Count.ExactByEntity[Entity];
+      for (const fbs::PathType Type : Types)
+        ++Count.ExactByType[Type];
       Count.ExactLong += Vanilla->Nodes.size() > 40 ? 1 : 0;
       Count.ExactHighJump += climbsTwo(Vanilla->Nodes) ? 1 : 0;
       if (BeforeDeltas) {
@@ -253,6 +271,11 @@ void replay(const std::filesystem::path &Path, Tally &Count) {
   }
 }
 
+/// Floors on what the exact cases cover, so a capture that loses coverage
+/// fails.
+constexpr int MinExactPercent = 95;
+constexpr int MinExactPerEntity = 50;
+
 } // namespace
 
 TEST(Parity, ReproducesEveryExactVanillaSearch) {
@@ -270,6 +293,20 @@ TEST(Parity, ReproducesEveryExactVanillaSearch) {
   EXPECT_GT(Count.ExactBudgetBound, 0)
       << "the visit budget decided no exact case";
   EXPECT_GT(Count.ExactHighJump, 0) << "no exact path climbs two blocks";
+  EXPECT_GE(Count.Exact * 100,
+            (Count.Exact + Count.Approximated) * MinExactPercent)
+      << Count.Exact << " exact of " << Count.Exact + Count.Approximated;
+  // The capture picks each case's mob at random, so every kind it places has
+  // cases.
+  for (const std::string &Entity : Count.EntitiesSeen)
+    EXPECT_GE(Count.ExactByEntity[Entity], MinExactPerEntity)
+        << "too few exact cases of " << Entity;
+  for (const fbs::PathType Type : Count.TypesSeen)
+    // Leaving a closed door sweeps the mob's box from where it stands, which
+    // the node does not know, so those cases are approximated by design.
+    if (Type != fbs::PathType::DOOR_WOOD_CLOSED)
+      EXPECT_GT(Count.ExactByType[Type], 0)
+          << "no exact path crosses " << fbs::EnumNamePathType(Type);
   // Approximated cases may differ by design: measured, not asserted. Recorded
   // as test properties to track across runs.
   const int Approximated = std::max(Count.Approximated, 1);
@@ -290,6 +327,14 @@ TEST(Parity, ReproducesEveryExactVanillaSearch) {
             << Count.LargestCostDifference << "), nodes " << MeanLength
             << " on average (largest " << Count.LargestLengthDifference
             << ")\n";
+  std::cout << "[ parity   ] exact cases by entity:";
+  for (const auto &[Entity, Cases] : Count.ExactByEntity)
+    std::cout << " " << Entity << "=" << Cases;
+  std::cout << "\n[ parity   ] exact cases by node type on the path:";
+  for (const fbs::PathType Type : Count.TypesSeen)
+    std::cout << " " << fbs::EnumNamePathType(Type) << "="
+              << Count.ExactByType[Type];
+  std::cout << "\n";
   RecordProperty("exact", Count.Exact);
   RecordProperty("approximated", Count.Approximated);
   RecordProperty("approximated_matched", Count.ApproximatedMatched);

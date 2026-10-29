@@ -2,12 +2,15 @@ package io.github.davidmenggx.maestro.controller.sim;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.core.Priority;
 import io.github.davidmenggx.maestro.controller.core.RequestTracker;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
+import io.github.davidmenggx.maestro.controller.env.RequestTrace;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionLayout;
@@ -22,6 +25,7 @@ import java.util.ArrayList;
 import java.util.List;
 import maestro.fbs.ControlReplyFrame;
 import maestro.fbs.ControlReplyMsg;
+import maestro.fbs.Heartbeat;
 import maestro.fbs.PathNode;
 import maestro.fbs.PathResponse;
 import maestro.fbs.PathType;
@@ -446,6 +450,28 @@ class WorldBoundaryTest {
     assertEquals(1, run.out.dropped(DropReason.NO_NODE), run.describe());
   }
 
+  /** An answer at sequence 0 did not search: its wait counts, but it adds no search time. */
+  @Test
+  void anAnswerNotSearchedCountsItsWaitButNoSearchTime() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH, true));
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 3, script).go();
+    NodeId owner = holders(run, HERE).get(0);
+
+    run.controller.onFrame(
+        owner,
+        Channel.REQUEST,
+        answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE, 0, 700, 5),
+        run.sim.env().clock().nowNanos());
+
+    String label = owner.toString();
+    assertEquals(700.0, run.sim.metrics().percentile("node.wait.micros", 1, "node", label));
+    assertTrue(
+        Double.isNaN(run.sim.metrics().percentile("node.search.micros", 1, "node", label)),
+        run.describe());
+  }
+
   /** The mob asks again while the first batch is in flight. It still counts against the node. */
   @Test
   void aSupersededRequestCountsAgainstItsNodeUntilItIsAnswered() {
@@ -693,6 +719,12 @@ class WorldBoundaryTest {
     assertEquals(RequestTracker.MAX_RESENDS, run.sim.metrics().total("path.resent"));
     assertEquals(1, run.out.dropped(DropReason.TIMEOUT), run.describe());
     assertEquals(0, run.out.answered(), run.describe());
+    // The expiry and its drop show in the request metrics.
+    assertEquals(1, run.sim.metrics().total("path.expired"), run.describe());
+    assertEquals(
+        1,
+        run.sim.metrics().counter("path.dropped", "reason", DropReason.TIMEOUT.name()),
+        run.describe());
   }
 
   /**
@@ -833,6 +865,247 @@ class WorldBoundaryTest {
     assertTrue(run.controller.inService(OWNER), run.describe());
   }
 
+  @Test
+  void anAnsweredRequestIsTracedThroughEveryStageInEitherSubMode() {
+    for (int stream : List.of(0, 1)) {
+      List<WorldEvent> script = prelude();
+      script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+      script.add(new WorldEvent.PathRequested(4, MOB, MOB_CLASS, HERE, THERE, SEARCH, true));
+      Scenario scenario = QUICK.with(Scenario.Count.STREAM, stream);
+
+      SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), TICKS, scenario, script).go();
+
+      assertEquals(List.of(), run.violations(), run.describe());
+      assertEquals(1, run.sim.tracing().traces().size(), run.describe());
+      RequestTrace trace = run.sim.tracing().traces().get(0);
+      assertEquals(FIRST_REQUEST, trace.requestId(), run.describe());
+      assertEquals(MOB, trace.mobId(), run.describe());
+      assertEquals(OWNER, trace.node(), run.describe());
+      assertEquals(RequestTrace.ANSWERED, trace.outcome(), run.describe());
+      assertEquals(4, trace.askedTick(), run.describe());
+      assertNotEquals(RequestTrace.NEVER, trace.encodingNanos(), run.describe());
+      assertNotEquals(RequestTrace.NEVER, trace.sentNanos(), run.describe());
+      assertEquals(List.of(), trace.resentNanos(), run.describe());
+      assertNotNull(trace.answer(), run.describe());
+      assertTrue(trace.answer().searchMicros() > 0, run.describe());
+      String owner = OWNER.toString();
+      assertEquals(
+          List.of((double) trace.answer().searchMicros()),
+          List.of(run.sim.metrics().percentile("node.search.micros", 1, "node", owner)),
+          run.describe());
+    }
+  }
+
+  @Test
+  void aResentRequestIsTracedWithEachResend() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(4, MOB, MOB_CLASS, HERE, THERE, SEARCH, true));
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(
+                new FaultPlan.Partitioned(4, OWNER, true),
+                new FaultPlan.Partitioned(20, OWNER, false));
+
+    SimRun run = SimRun.scripted(1L, plan, TICKS, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    RequestTrace trace = run.sim.tracing().traces().get(0);
+    assertEquals(DropReason.TIMEOUT.name(), trace.outcome(), run.describe());
+    assertEquals(RequestTracker.MAX_RESENDS, trace.resentNanos().size(), run.describe());
+    assertEquals(null, trace.answer(), run.describe());
+  }
+
+  @Test
+  void aHolderWhoseStreamStalledReportsItsLagUntilItCatchesUp() {
+    List<WorldEvent> script = prelude();
+    // A delta a tick while the owner's ordered channels stall, heartbeats included. The stall
+    // starts once the owner has reported its area, as a node beats every 20 ticks.
+    for (int tick = 27; tick < 47; tick++) {
+      Pos changed = new Pos(HERE.x() + tick % 4, HERE.y(), HERE.z());
+      script.add(
+          new WorldEvent.BlockChanged(
+              tick, changed, (byte) (tick % 2 == 0 ? PathType.WATER : PathType.OPEN), 0));
+    }
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(new FaultPlan.Stalled(25, OWNER, true), new FaultPlan.Stalled(60, OWNER, false));
+
+    SimRun run = SimRun.scripted(1L, plan, 110, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    List<Double> lags = run.sim.metrics().gaugeValues("world.lag", "node", OWNER.toString());
+    // Read each tick, so it grows while the owner is silent, a frame a tick.
+    long lagging = lags.stream().filter(lag -> lag > 0).count();
+    assertTrue(lagging >= 20, lags + " " + run.describe());
+    assertTrue(lags.stream().anyMatch(lag -> lag >= 20), lags + " " + run.describe());
+    assertEquals(0.0, lags.get(lags.size() - 1), lags + " " + run.describe());
+    // A spare holds no region, so it lags nothing.
+    for (NodeId node : run.fleet) {
+      if (run.regions().regionOf(node) == Regions.NONE) {
+        assertEquals(
+            List.of(0.0),
+            run.sim.metrics().gaugeValues("world.lag", "node", node.toString()).stream()
+                .distinct()
+                .toList(),
+            run.describe());
+      }
+    }
+  }
+
+  /**
+   * A dead holder's last report is kept, so its lag grows until its region goes to a spare, and is
+   * 0 once it holds none. The spare catches up.
+   */
+  @Test
+  void aDeadHoldersLagGrowsUntilItsRegionIsHandedOff() {
+    List<WorldEvent> script = prelude();
+    for (int tick = 27; tick < 80; tick++) {
+      Pos changed = new Pos(HERE.x() + tick % 4, HERE.y(), HERE.z());
+      script.add(
+          new WorldEvent.BlockChanged(
+              tick, changed, (byte) (tick % 2 == 0 ? PathType.WATER : PathType.OPEN), 0));
+    }
+    // After the owner's first heartbeat, as a node beats every 20 ticks.
+    FaultPlan plan = FaultPlan.reliable().with(new FaultPlan.NodeDied(25, OWNER));
+
+    SimRun run = SimRun.scripted(1L, plan, 250, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(Regions.NONE, run.regions().regionOf(OWNER), run.describe());
+    List<Double> lags = run.sim.metrics().gaugeValues("world.lag", "node", OWNER.toString());
+    assertTrue(lags.stream().anyMatch(lag -> lag >= 40), lags + " " + run.describe());
+    assertEquals(0.0, lags.get(lags.size() - 1), lags + " " + run.describe());
+    NodeId heir = holders(run, HERE).get(0);
+    assertNotEquals(OWNER, heir, run.describe());
+    List<Double> heirLags = run.sim.metrics().gaugeValues("world.lag", "node", heir.toString());
+    assertEquals(0.0, heirLags.get(heirLags.size() - 1), heirLags + " " + run.describe());
+  }
+
+  /**
+   * A holder whose heartbeat names none of its region, as one that lost its area or has yet to
+   * apply its assignment, lags every frame produced since that assignment.
+   */
+  @Test
+  void aHolderReportingNoAreaOfItsRegionLagsFromItsAssignment() {
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 60, prelude()).go();
+    NodeId owner = holders(run, HERE).get(0);
+    String label = owner.toString();
+    long produced = run.controller.heldSequence(owner);
+    assertTrue(produced > 0, run.describe());
+    assertEquals(0.0, run.sim.metrics().gauge("world.lag", "node", label), run.describe());
+    long tick = run.sim.env().clock().tick();
+
+    run.controller.onFrame(
+        owner, Channel.CONTROL, heartbeat(0, 0), run.sim.env().clock().nowNanos());
+    run.controller.accept(new WorldEvent.TickBegan(tick + 1));
+    // Its assignment named sequence 0, as no chunk is read before a holder greets.
+    assertEquals(
+        (double) produced, run.sim.metrics().gauge("world.lag", "node", label), run.describe());
+
+    run.controller.onFrame(
+        owner,
+        Channel.CONTROL,
+        heartbeat(run.regions().regionOf(owner), produced),
+        run.sim.env().clock().nowNanos());
+    run.controller.accept(new WorldEvent.TickBegan(tick + 2));
+    assertEquals(0.0, run.sim.metrics().gauge("world.lag", "node", label), run.describe());
+  }
+
+  /**
+   * A streamed request's send is handed over after its answer, as when its worker queues the send
+   * late. Its trace still holds the send.
+   */
+  @Test
+  void aStreamedSendHandedOverAfterItsAnswerStillLandsInItsTrace() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(4, MOB, MOB_CLASS, HERE, THERE, SEARCH, true));
+    Scenario scenario = QUICK.with(Scenario.Count.STREAM, 1);
+
+    SimRun run =
+        SimRun.scripted(1L, FaultPlan.reliable(), TICKS, scenario, script).lateCompletions(1).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(run.sim.metrics().total("offload.late") > 0, run.describe());
+    assertEquals(1, run.sim.tracing().traces().size(), run.describe());
+    RequestTrace trace = run.sim.tracing().traces().get(0);
+    assertEquals(RequestTrace.ANSWERED, trace.outcome(), run.describe());
+    assertNotNull(trace.answer(), run.describe());
+    assertNotEquals(RequestTrace.NEVER, trace.sentNanos(), run.describe());
+    assertTrue(trace.sentNanos() < trace.answer().arrivedNanos(), trace + " " + run.describe());
+  }
+
+  /** A trace held back for its send when the controller restarts is lost, and counted so. */
+  @Test
+  void aTraceHeldBackWhenTheControllerRestartsIsCountedLost() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.PathRequested(4, MOB, MOB_CLASS, HERE, THERE, SEARCH, true));
+    Scenario scenario = QUICK.with(Scenario.Count.STREAM, 1);
+    // The answer is handed over as tick 4 ends, its send only once tick 5 starts.
+    FaultPlan plan = FaultPlan.reliable().with(new FaultPlan.ControllerRestarted(5));
+
+    SimRun run = SimRun.scripted(1L, plan, TICKS, scenario, script).lateCompletions(1).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, run.out.answered(), run.describe());
+    assertEquals(1, run.tracesLostToRestart(), run.describe());
+    assertEquals(List.of(), run.sim.tracing().traces(), run.describe());
+  }
+
+  /**
+   * Each request's node times count once: a later copy of its answer adds nothing, and an abandoned
+   * request's answer counts, as its node did the work. A probe's answer never counts.
+   */
+  @Test
+  void aNodeTimeCountsOncePerRequestAndNeverForAProbe() {
+    List<WorldEvent> script = prelude();
+    script.add(new WorldEvent.MobSpawned(0, MOB, HERE));
+    script.add(new WorldEvent.MobSpawned(0, OTHER_MOB, HERE));
+    script.add(new WorldEvent.PathRequested(2, MOB, MOB_CLASS, HERE, THERE, SEARCH, true));
+    script.add(new WorldEvent.PathRequested(2, OTHER_MOB, MOB_CLASS, HERE, THERE, SEARCH, true));
+    // Ends while both requests' batch encodes, before the node serves either.
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 3, script).go();
+    NodeId owner = holders(run, HERE).get(0);
+    long nanos = run.sim.env().clock().nowNanos();
+    for (int copy = 0; copy < 2; copy++) {
+      run.controller.onFrame(
+          owner,
+          Channel.REQUEST,
+          answer(run.controller.run(), FIRST_REQUEST, PathType.WALKABLE, 1, 700, 50),
+          nanos);
+    }
+    // Its copy has left, so the mob giving up abandons it, and the node still answers it.
+    run.controller.accept(new WorldEvent.PathCanceled(2, OTHER_MOB));
+    run.controller.onFrame(
+        owner,
+        Channel.REQUEST,
+        answer(run.controller.run(), FIRST_REQUEST + 1, PathType.WALKABLE, 1, 900, 60),
+        nanos);
+
+    String label = owner.toString();
+    assertEquals(1, run.out.answered(), run.describe());
+    assertEquals(1, run.sim.metrics().total("path.response.stale"), run.describe());
+    assertEquals(1, run.sim.metrics().total("path.response.abandoned"), run.describe());
+    assertEquals(
+        List.of(700.0, 900.0), run.sim.metrics().recorded("node.wait.micros", "node", label));
+    assertEquals(
+        List.of(50.0, 60.0), run.sim.metrics().recorded("node.search.micros", "node", label));
+
+    // A spare serves only probes.
+    SimRun longer = SimRun.scripted(1L, FaultPlan.reliable(), 60, prelude()).go();
+    for (NodeId node : longer.fleet) {
+      if (longer.regions().regionOf(node) == Regions.NONE) {
+        String spare = node.toString();
+        assertTrue(
+            longer.sim.metrics().counter("node.probe.answered", "node", spare) > 0,
+            longer.describe());
+        assertEquals(List.of(), longer.sim.metrics().recorded("node.wait.micros", "node", spare));
+      }
+    }
+  }
+
   /** Loads the world and registers {@code MOB_CLASS}, which costs one request per script. */
   private static List<WorldEvent> prelude() {
     return prelude(2);
@@ -850,6 +1123,15 @@ class WorldBoundaryTest {
     return script;
   }
 
+  /** A heartbeat with nothing queued or searched, holding {@code regionId} at {@code sequence}. */
+  private static ByteBuffer heartbeat(long regionId, long sequence) {
+    FlatBufferBuilder builder = new FlatBufferBuilder(64);
+    int beat = Heartbeat.createHeartbeat(builder, 0, 0, 0, 1, regionId, sequence);
+    builder.finish(
+        ControlReplyFrame.createControlReplyFrame(builder, ControlReplyMsg.Heartbeat, beat));
+    return ByteBuffer.wrap(builder.sizedByteArray());
+  }
+
   /** An answer to {@code requestId} whose one node has the type {@code type}. */
   private static ByteBuffer answer(long run, long requestId, int type) {
     return answer(run, requestId, type, 1);
@@ -857,6 +1139,12 @@ class WorldBoundaryTest {
 
   /** As above, searched at {@code worldSequence}. A script's first frame is sequence 1. */
   private static ByteBuffer answer(long run, long requestId, int type, long worldSequence) {
+    return answer(run, requestId, type, worldSequence, 0, 0);
+  }
+
+  /** As above, having waited {@code waitMicros} for a worker and searched {@code searchMicros}. */
+  private static ByteBuffer answer(
+      long run, long requestId, int type, long worldSequence, long waitMicros, long searchMicros) {
     FlatBufferBuilder builder = new FlatBufferBuilder(128);
     PathResponse.startNodesVector(builder, 1);
     // Positions on the wire are relative to the area, a halo below the region.
@@ -868,7 +1156,8 @@ class WorldBoundaryTest {
         type);
     int nodes = builder.endVector();
     int body =
-        PathResponse.createPathResponse(builder, requestId, true, nodes, 1.0f, worldSequence);
+        PathResponse.createPathResponse(
+            builder, requestId, true, nodes, 1.0f, worldSequence, waitMicros, searchMicros);
     builder.finish(ResponseFrame.createResponseFrame(builder, ResponseMsg.PathResponse, body, run));
     return ByteBuffer.wrap(builder.sizedByteArray());
   }

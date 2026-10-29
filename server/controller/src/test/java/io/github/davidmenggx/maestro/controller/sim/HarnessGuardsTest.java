@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.google.flatbuffers.FlatBufferBuilder;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Offload;
+import io.github.davidmenggx.maestro.controller.env.RequestTrace;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.env.Transport;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
@@ -864,6 +865,9 @@ class HarnessGuardsTest {
     assertThrows(IllegalArgumentException.class, () -> sim.schedule(0, "now", () -> {}));
     assertThrows(
         IllegalArgumentException.class, () -> sim.run(event -> {}, (tick, input) -> {}, 0));
+    assertThrows(IllegalArgumentException.class, () -> sim.lateCompletions(-0.1));
+    assertThrows(IllegalArgumentException.class, () -> sim.lateCompletions(1.5));
+    assertThrows(IllegalArgumentException.class, () -> sim.lateCompletions(Double.NaN));
   }
 
   @Test
@@ -1044,6 +1048,97 @@ class HarnessGuardsTest {
     }
   }
 
+  /** Work that sent hands its completion over a hand-over late; other work is not held back. */
+  @Test
+  void aWorkerThatSentHandsItsCompletionOverAHandOverLate() {
+    int busySteps = 300;
+    Simulation sim = new Simulation(1L, FaultPlan.reliable());
+    sim.serverBusySteps(busySteps);
+    sim.lateCompletions(1);
+    NodeId id = NodeId.of(0);
+    sim.addNode(id, ModeledNode.Service.MANUAL);
+    Transport transport = sim.env().transport();
+    transport.listen(new NoopListener());
+    Map<String, Long> doneAt = new LinkedHashMap<>();
+    sim.run(
+        event -> {
+          if (event instanceof WorldEvent.TickBegan began && began.tick() == 0) {
+            for (String name : List.of("quiet", "sends")) {
+              sim.env()
+                  .offload()
+                  .submit(
+                      name,
+                      Offload.Lane.REQUESTS,
+                      () -> {
+                        if (name.equals("sends")) {
+                          transport.send(
+                              id, Channel.REQUEST, ByteBuffer.wrap(Frames.probe(RUN, 1)));
+                        }
+                        return 0;
+                      },
+                      done -> doneAt.put(name, sim.now()),
+                      () -> {});
+            }
+          }
+        },
+        (tick, input) -> {},
+        3);
+
+    // Both finish within the first tick's work: one is heard as it ends, the other as the next
+    // starts.
+    assertEquals(
+        Map.of("quiet", (long) busySteps, "sends", (long) Simulation.STEPS_PER_TICK), doneAt);
+    assertEquals(1, sim.metrics().total("offload.late"));
+  }
+
+  /** A trace must be reported once, keep its stages in order, and match what its mob was told. */
+  @Test
+  void aTraceThatDisagreesWithTheRunIsReported() {
+    Simulation sim = new Simulation(1L, FaultPlan.reliable());
+    RecordingOutput out = recorder(sim, new SimWorld(Topology.DEFAULT, 1, SeededRng.of(1)));
+    // Outcomes are told at the tick the simulation stands at, before it runs.
+    long tick = sim.env().clock().tick();
+    WorldEvent.PathRequested asked = request(1, 0, FAR);
+    out.issued(asked);
+    out.pathComputed(answer(asked));
+    out.issued(request(2, 0, FAR));
+    out.pathDropped(2, DropReason.TIMEOUT);
+    RequestTrace.Answer heard = new RequestTrace.Answer(400, 10, 20, 1);
+    RequestTrace answered = trace(1, 1, tick, 200, 300, heard, 500, RequestTrace.ANSWERED);
+    RequestTrace timedOut = trace(2, 2, tick, 200, 300, null, 500, "TIMEOUT");
+    assertEquals(List.of(), traced(answered, timedOut).check(out, true, 0));
+    // One traced at a lower rate need not cover every answer, nor one a restart lost.
+    assertEquals(List.of(), traced(timedOut).check(out, false, 0));
+    assertEquals(List.of(), traced(timedOut).check(out, true, 1));
+
+    assertFlags(traced(timedOut).check(out, true, 0), "answered requests were traced");
+    assertFlags(traced(answered, timedOut).check(out, true, 1), "answered requests were traced");
+    assertFlags(traced(answered, answered).check(out, false, 0), "was traced twice");
+    assertFlags(
+        traced(trace(1, 1, tick, 300, 200, heard, 500, RequestTrace.ANSWERED)).check(out, false, 0),
+        "has stages out of order");
+    assertFlags(
+        traced(trace(1, 1, tick, RequestTrace.NEVER, 300, heard, 500, RequestTrace.ANSWERED))
+            .check(out, false, 0),
+        "was sent without being encoded");
+    assertFlags(
+        traced(trace(1, 1, tick, 200, 300, new RequestTrace.Answer(600, 10, 20, 1), 500, "x"))
+            .check(out, false, 0),
+        "has an answer that arrived outside its send and end");
+    assertFlags(
+        traced(trace(1, 1, tick, 200, 300, null, 500, RequestTrace.ANSWERED)).check(out, false, 0),
+        "ended ANSWERED with answer null");
+    assertFlags(
+        traced(trace(2, 2, tick, 200, 300, heard, 500, "TIMEOUT")).check(out, false, 0),
+        "ended TIMEOUT with answer");
+    assertFlags(
+        traced(trace(2, 2, tick, 200, 300, null, 500, "SHED")).check(out, false, 0),
+        "was not told then");
+    assertFlags(
+        traced(trace(2, 2, tick + 1, 200, 300, null, 500, "TIMEOUT")).check(out, false, 0),
+        "was not told then");
+  }
+
   @Test
   void overlappingFaultsOfOneKindEndOnlyWhenEveryIntervalHas() {
     Simulation sim = new Simulation(1L, FaultPlan.reliable());
@@ -1161,10 +1256,56 @@ class HarnessGuardsTest {
 
   /** A recorder for a run of the default topology over {@code world}. */
   private static RecordingOutput recorder(SimWorld world) {
+    return recorder(new Simulation(1L, FaultPlan.reliable()), world);
+  }
+
+  private static RecordingOutput recorder(Simulation sim, SimWorld world) {
     Topology topology = Topology.DEFAULT;
     List<NodeId> fleet = IntStream.range(0, topology.nodeCount()).mapToObj(NodeId::of).toList();
     RegionMap regions = topology.layout().initial(fleet, topology.spares());
-    return new RecordingOutput(new Simulation(1L, FaultPlan.reliable()), world, () -> regions);
+    return new RecordingOutput(sim, world, () -> regions);
+  }
+
+  /** A trace of {@code mob}'s request asked at 100 that ended at {@code tick}. */
+  private static RequestTrace trace(
+      long requestId,
+      int mob,
+      long tick,
+      long encoding,
+      long sent,
+      RequestTrace.Answer answer,
+      long ended,
+      String outcome) {
+    return new RequestTrace(
+        RUN,
+        requestId,
+        mob,
+        (short) 1,
+        NodeId.of(0),
+        1,
+        true,
+        tick,
+        tick,
+        100,
+        encoding,
+        sent,
+        List.of(),
+        answer,
+        ended,
+        outcome);
+  }
+
+  private static SimTracing traced(RequestTrace... traces) {
+    SimTracing tracing = new SimTracing();
+    for (RequestTrace trace : traces) {
+      tracing.finished(trace);
+    }
+    return tracing;
+  }
+
+  /** {@code found} holds a violation naming {@code phrase}. */
+  private static void assertFlags(List<String> found, String phrase) {
+    assertTrue(found.stream().anyMatch(violation -> violation.contains(phrase)), found.toString());
   }
 
   private static ByteBuffer requests(Frames.Request... batch) {

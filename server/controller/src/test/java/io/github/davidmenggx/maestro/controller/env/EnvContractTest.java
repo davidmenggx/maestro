@@ -74,23 +74,28 @@ class EnvContractTest {
   @Test
   void anEnvironmentHasEverySeamAndARun() {
     Rng rng = SeededRng.of(1L);
-    new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, 1);
+    Tracing tracing = trace -> {};
+    new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, tracing, 1);
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(null, rng, OFFLOAD, TRANSPORT, METRICS, 1));
+        () -> new ControllerEnv(null, rng, OFFLOAD, TRANSPORT, METRICS, tracing, 1));
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(CLOCK, null, OFFLOAD, TRANSPORT, METRICS, 1));
+        () -> new ControllerEnv(CLOCK, null, OFFLOAD, TRANSPORT, METRICS, tracing, 1));
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(CLOCK, rng, null, TRANSPORT, METRICS, 1));
-    assertThrows(
-        NullPointerException.class, () -> new ControllerEnv(CLOCK, rng, OFFLOAD, null, METRICS, 1));
+        () -> new ControllerEnv(CLOCK, rng, null, TRANSPORT, METRICS, tracing, 1));
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, null, 1));
+        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, null, METRICS, tracing, 1));
+    assertThrows(
+        NullPointerException.class,
+        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, null, tracing, 1));
+    assertThrows(
+        NullPointerException.class,
+        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, null, 1));
     assertThrows(
         IllegalArgumentException.class,
-        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, 0));
+        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, tracing, 0));
   }
 }

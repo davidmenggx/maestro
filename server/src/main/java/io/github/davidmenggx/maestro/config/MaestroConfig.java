@@ -29,7 +29,9 @@ import java.util.stream.Collectors;
  * is the requests a node serves per tick, as admission assumes until the node's heartbeats show it
  * serves fewer; it is never taken to serve more. {@code areaCells} is the side, in 256-block cells,
  * of the square around the origin whose mobs are offloaded. {@code spares} is how many nodes start
- * with no region, to take over a dead node's or relieve a hot one.
+ * with no region, to take over a dead node's or relieve a hot one. {@code traceSampleRate} is the
+ * share of offloaded requests traced, 0 to 1. Each trace is five spans built on the server thread,
+ * and spans past the export queue are dropped, so a high rate suits short trials only.
  */
 public record MaestroConfig(
     SubMode subMode,
@@ -38,7 +40,8 @@ public record MaestroConfig(
     int nodeCapacity,
     int areaCells,
     int spares,
-    String otlpEndpoint) {
+    String otlpEndpoint,
+    double traceSampleRate) {
 
   /** How pathfinding requests are dispatched to a node. */
   public enum SubMode {
@@ -83,7 +86,8 @@ public record MaestroConfig(
   public static final String FILE_NAME = "maestro.json";
 
   public static final MaestroConfig DEFAULT =
-      new MaestroConfig(SubMode.BATCH, Offload.ON, List.of(), 100, 5, 1, "http://localhost:4317");
+      new MaestroConfig(
+          SubMode.BATCH, Offload.ON, List.of(), 100, 5, 1, "http://localhost:4317", 0.01);
 
   private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
@@ -105,6 +109,7 @@ public record MaestroConfig(
         "`areaCells` must be 1 to " + RegionLayout.MAX_CELLS);
     require(spares >= 0, "`spares` must not be negative");
     require(otlpEndpoint != null && !otlpEndpoint.isBlank(), "`otlpEndpoint` must not be empty");
+    require(traceSampleRate >= 0 && traceSampleRate <= 1, "`traceSampleRate` must be 0 to 1");
   }
 
   public static MaestroConfig load(Path path) {

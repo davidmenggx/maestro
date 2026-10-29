@@ -5,7 +5,6 @@ find_package(Threads REQUIRED)
 set(FLATBUFFERS_TAG "v25.2.10"    CACHE STRING "FlatBuffers git tag")
 set(ASIO_TAG        "asio-1-34-2" CACHE STRING "Asio git tag")
 set(GOOGLETEST_TAG  "v1.16.0"     CACHE STRING "GoogleTest git tag")
-set(OTEL_CPP_TAG    "v1.19.0"     CACHE STRING "opentelemetry-cpp git tag")
 
 # ---- FlatBuffers (runtime library only, flatc is built under tools/) --------
 set(FLATBUFFERS_BUILD_FLATC   OFF CACHE BOOL "" FORCE)
@@ -50,28 +49,4 @@ endif()
 # FlatBuffers' namespaced alias is not always defined in a subdirectory build.
 if(NOT TARGET flatbuffers::flatbuffers)
   add_library(flatbuffers::flatbuffers ALIAS flatbuffers)
-endif()
-
-# ---- OpenTelemetry C++ SDK --------------------------------------------------
-# Exports over OTLP/gRPC using the system gRPC + protobuf (both have dev headers
-# here, and the distro built gRPC against the same abseil, so they're ABI
-# consistent). This avoids needing libcurl-dev, which the OTLP/HTTP exporter
-# would require.
-if(MAESTRO_WITH_OTEL)
-  set(WITH_OTLP_GRPC   ON  CACHE BOOL "" FORCE)
-  set(WITH_OTLP_HTTP   OFF CACHE BOOL "" FORCE)
-  set(WITH_ABSEIL      OFF CACHE BOOL "" FORCE)
-  set(WITH_EXAMPLES    OFF CACHE BOOL "" FORCE)
-  set(WITH_FUNC_TESTS  OFF CACHE BOOL "" FORCE)
-  set(WITH_BENCHMARK   OFF CACHE BOOL "" FORCE)
-  set(BUILD_TESTING    OFF CACHE BOOL "" FORCE)
-  set(OPENTELEMETRY_INSTALL OFF CACHE BOOL "" FORCE)
-  # Submodules (opentelemetry-proto, nlohmann-json) are required for OTLP, so
-  # this fetch is intentionally not shallow.
-  FetchContent_Declare(
-    opentelemetry-cpp
-    GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
-    GIT_TAG        ${OTEL_CPP_TAG}
-  )
-  FetchContent_MakeAvailable(opentelemetry-cpp)
 endif()

@@ -37,9 +37,11 @@ std::string hello(std::uint64_t Run, std::uint32_t RegionId,
          ")";
 }
 
-std::string heartbeat(std::uint32_t Depth, std::uint32_t Searches) {
+std::string heartbeat(std::uint32_t Depth, std::uint32_t Searches,
+                      std::uint32_t RegionId, std::uint64_t Sequence) {
   return "Heartbeat(depth " + std::to_string(Depth) + ", searches " +
-         std::to_string(Searches) + ")";
+         std::to_string(Searches) + ", region " + std::to_string(RegionId) +
+         ", sequence " + std::to_string(Sequence) + ")";
 }
 
 std::string answer(std::uint64_t RequestId, std::uint64_t Run,
@@ -59,7 +61,8 @@ std::string expected(const fbs::Effect &Wire) {
   case fbs::EffectKind::Hello:
     return hello(Wire.run(), Wire.region_id(), Wire.sequence());
   case fbs::EffectKind::Heartbeat:
-    return heartbeat(Wire.depth(), Wire.searches());
+    return heartbeat(Wire.depth(), Wire.searches(), Wire.region_id(),
+                     Wire.sequence());
   case fbs::EffectKind::Answer:
     return answer(Wire.request_id(), Wire.run(), Wire.sequence());
   case fbs::EffectKind::UnknownProfile:
@@ -174,7 +177,8 @@ private:
       Effects.push_back(
           hello(Body->run(), Body->region_id(), Body->last_sequence()) + Where);
     else if (const auto *Beat = Reply ? Reply->body_as_Heartbeat() : nullptr)
-      Effects.push_back(heartbeat(Beat->queue_depth(), Beat->searches()) +
+      Effects.push_back(heartbeat(Beat->queue_depth(), Beat->searches(),
+                                  Beat->region_id(), Beat->sequence()) +
                         Where);
     else
       Effects.push_back("an unreadable frame" + Where);
@@ -360,7 +364,10 @@ TEST(Conformance, TheReplayChecksEveryKindOfStepAndEffect) {
       .step(StepKind::Datagram, LinkPort::World, requestFrame({2, 3, 4}))
       .step(StepKind::Datagram, LinkPort::World, cancelFrame({2}))
       .step(StepKind::Heartbeat, LinkPort::World, {},
-            {{.Kind = EffectKind::Heartbeat, .Depth = 2}})
+            {{.Kind = EffectKind::Heartbeat,
+              .RegionId = TestRegion,
+              .Sequence = 4,
+              .Depth = 2}})
       // 2 was canceled, so it is skipped and not counted.
       .step(StepKind::Serve, LinkPort::World, {}, {Answered(3)}, 0, 1)
       .step(StepKind::Advance, LinkPort::World, {}, {}, 999)
@@ -373,7 +380,11 @@ TEST(Conformance, TheReplayChecksEveryKindOfStepAndEffect) {
       .step(StepKind::Datagram, LinkPort::World, requestFrame({4}))
       // 3 and 5 were searched since the last heartbeat.
       .step(StepKind::Heartbeat, LinkPort::World, {},
-            {{.Kind = EffectKind::Heartbeat, .Depth = 0, .Searches = 2}})
+            {{.Kind = EffectKind::Heartbeat,
+              .RegionId = TestRegion,
+              .Sequence = 4,
+              .Depth = 0,
+              .Searches = 2}})
       .step(StepKind::Connect, LinkPort::Control,
             joinFrame(Port::Control, TestRun, 1), {{EffectKind::Refused}})
       // The refused connection never became the port's.

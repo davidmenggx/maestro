@@ -65,13 +65,18 @@ struct PathNode {
 
 // Empty `nodes` means no path. `reached` mirrors `Path.reached`. `cost` is the
 // malus-weighted A* cost of the end node. `world_sequence` is the stream
-// position the answer was computed against.
+// position the answer was computed against. `wait_micros` is how long the
+// request waited at the node for a worker, and `search_micros` how long its
+// search took, 0 if it did not search; a later copy repeats the bytes, so both
+// describe the first.
 table PathResponse {
   request_id:ulong;
   reached:bool;
   nodes:[PathNode];
   cost:float;
   world_sequence:ulong;
+  wait_micros:uint;
+  search_micros:uint;
 }
 
 // The request named a `class_id` the node lacks. A TCP retransmit can delay

@@ -36,6 +36,10 @@ public final class Invariants {
     violations.addAll(run.retiredViolations());
     violations.addAll(run.controller.selfCheck());
 
+    // Each traced request matches what its mob was told.
+    violations.addAll(
+        run.sim.tracing().check(run.out, run.traceSampleRate == 1, run.tracesLostToRestart()));
+
     // A node is sent each profile at most once per link, so the controller forgets none it sent.
     int classes = run.scenario.counts().get(Scenario.Count.MOB_CLASSES);
     for (ModeledNode node : run.sim.nodes()) {
@@ -139,6 +143,25 @@ public final class Invariants {
 
     // Every request is answered or explicitly dropped, exactly once.
     violations.addAll(run.out.ledgerViolations());
+
+    // Every outcome shows in the request metrics: an answer once, a drop once under its reason.
+    long answersCounted = run.sim.metrics().total("path.answered");
+    if (answersCounted != run.out.answered()) {
+      violations.add(
+          answersCounted + " answers were counted, but " + run.out.answered() + " were given");
+    }
+    for (DropReason reason : DropReason.values()) {
+      long dropsCounted = run.sim.metrics().counter("path.dropped", "reason", reason.name());
+      if (dropsCounted != run.out.dropped(reason)) {
+        violations.add(
+            dropsCounted
+                + " "
+                + reason
+                + " drops were counted, but "
+                + run.out.dropped(reason)
+                + " were told");
+      }
+    }
 
     // An answer is accepted only if its node held the chunk the search starts in.
     if (run.out.answeredOverAir() > 0) {

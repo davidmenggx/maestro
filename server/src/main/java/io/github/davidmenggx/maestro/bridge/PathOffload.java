@@ -79,7 +79,7 @@ public final class PathOffload implements Searches.Interceptor, WorldOutput {
   }
 
   /** A mob's navigation. */
-  private record MobNavigator(Mob mob) implements Navigator {
+  record MobNavigator(Mob mob) implements Navigator {
 
     @Override
     public Path path() {

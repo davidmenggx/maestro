@@ -31,7 +31,8 @@ class ReportTest {
           40,
           3,
           1,
-          "http://localhost:4317");
+          "http://localhost:4317",
+          0.01);
 
   @Test
   void nearestRankPercentilesOfSortedValues() {

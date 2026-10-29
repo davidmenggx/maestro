@@ -1,6 +1,7 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.core.WorldStreams;
+import io.github.davidmenggx.maestro.controller.env.RequestTrace;
 import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.Regions;
 import io.github.davidmenggx.maestro.controller.world.Chunks;
@@ -38,6 +39,9 @@ public final class RecordingOutput implements WorldOutput {
   /** One request with no outcome yet. {@code loadedSince} is when its start chunk loaded. */
   private record Open(long tick, Pos start, Pos target, boolean servable, long loadedSince) {}
 
+  /** An outcome a mob was told, named as a trace names it. */
+  public record Told(long tick, int mobId, String outcome) {}
+
   /** Ticks after which a loaded chunk is resident on its holders: greet, read, and margin. */
   private static final int SETTLE_TICKS = 4;
 
@@ -45,6 +49,7 @@ public final class RecordingOutput implements WorldOutput {
   private final SimWorld world;
   private final Supplier<Regions> regions;
   private final List<PathResult> results = new ArrayList<>();
+  private final List<Told> told = new ArrayList<>();
   private final List<Double> latencies = new ArrayList<>();
   private final Map<DropReason, Integer> drops = new EnumMap<>(DropReason.class);
 
@@ -143,6 +148,7 @@ public final class RecordingOutput implements WorldOutput {
   public void pathComputed(PathResult result) {
     sim.digest().mix(sim.now()).mix(result.toString());
     results.add(result);
+    told.add(new Told(sim.env().clock().tick(), result.mobId(), RequestTrace.ANSWERED));
     if (result.cost() == ModeledNode.SEARCHED_OVER_AIR) {
       answeredOverAir++;
     }
@@ -177,6 +183,7 @@ public final class RecordingOutput implements WorldOutput {
   public void pathDropped(int mobId, DropReason reason) {
     sim.digest().mix(sim.now()).mix("drop").mix(mobId).mix(reason.name());
     drops.merge(reason, 1, Integer::sum);
+    told.add(new Told(sim.env().clock().tick(), mobId, reason.name()));
     Open request = close(mobId, reason);
     if ((reason == DropReason.NO_NODE || reason == DropReason.UNAVAILABLE)
         && request != null
@@ -227,6 +234,11 @@ public final class RecordingOutput implements WorldOutput {
 
   public List<PathResult> results() {
     return List.copyOf(results);
+  }
+
+  /** Every outcome, answers and drops, in the order told. */
+  public List<Told> told() {
+    return List.copyOf(told);
   }
 
   /** Ticks from each answered request to its answer, in answer order. */

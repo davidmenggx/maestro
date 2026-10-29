@@ -43,8 +43,6 @@ void printUsage(std::ostream &OS) {
      << Defaults.Server.RequestPort << ")\n"
      << "  --workers <n>          search threads (default " << defaultWorkers()
      << ", one per core)\n"
-     << "  --otlp <host:port>     OTLP/gRPC collector endpoint (default "
-     << Defaults.OtlpEndpoint << ")\n"
      << "  --help                 show this message\n";
 }
 
@@ -66,12 +64,7 @@ ArgsResult parseArgs(std::span<char *const> Args, Options &Opts) {
       return ArgsResult::Help;
 
     bool Valid = true;
-    if (Arg == "--otlp") {
-      const char *Value = takeValue();
-      Valid = Value != nullptr;
-      if (Valid)
-        Opts.OtlpEndpoint = Value;
-    } else if (Arg == "--bind") {
+    if (Arg == "--bind") {
       const char *Value = takeValue();
       Valid = Value != nullptr;
       if (Valid)

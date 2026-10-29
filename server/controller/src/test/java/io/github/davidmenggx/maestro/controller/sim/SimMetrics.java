@@ -13,6 +13,7 @@ public final class SimMetrics implements Metrics {
   private final Map<String, Long> counters = new TreeMap<>();
   private final Map<String, List<Double>> distributions = new TreeMap<>();
   private final Map<String, Double> gauges = new TreeMap<>();
+  private final Map<String, List<Double>> gaugeHistory = new TreeMap<>();
 
   @Override
   public void count(String name, long delta, String... labels) {
@@ -27,11 +28,22 @@ public final class SimMetrics implements Metrics {
   @Override
   public void gauge(String name, double value, String... labels) {
     gauges.put(key(name, labels), value);
+    gaugeHistory.computeIfAbsent(key(name, labels), k -> new ArrayList<>()).add(value);
   }
 
   /** The last value the gauge was set to, or 0 if it never was. */
   public double gauge(String name, String... labels) {
     return gauges.getOrDefault(key(name, labels), 0.0);
+  }
+
+  /** Every value recorded in the distribution, in order. */
+  public List<Double> recorded(String name, String... labels) {
+    return List.copyOf(distributions.getOrDefault(key(name, labels), List.of()));
+  }
+
+  /** Every value the gauge was set to, in order. */
+  public List<Double> gaugeValues(String name, String... labels) {
+    return List.copyOf(gaugeHistory.getOrDefault(key(name, labels), List.of()));
   }
 
   public long counter(String name, String... labels) {

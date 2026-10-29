@@ -97,7 +97,7 @@ class ConformanceTest {
     return switch (effect.kind()) {
       case EffectKind.Hello -> hello(effect.run(), effect.regionId(), effect.sequence());
       case EffectKind.Heartbeat ->
-          "heartbeat depth=" + effect.depth() + " searches=" + effect.searches();
+          heartbeat(effect.depth(), effect.searches(), effect.regionId(), effect.sequence());
       case EffectKind.Answer -> answer(effect.requestId(), effect.run(), effect.sequence());
       case EffectKind.UnknownProfile -> unknownProfile(effect.requestId(), effect.run());
       case EffectKind.LinkDropped -> "link dropped";
@@ -108,6 +108,17 @@ class ConformanceTest {
 
   private static String hello(long run, long region, long sequence) {
     return "hello run=" + run + " region=" + region + " sequence=" + sequence;
+  }
+
+  private static String heartbeat(long depth, long searches, long region, long sequence) {
+    return "heartbeat depth="
+        + depth
+        + " searches="
+        + searches
+        + " region="
+        + region
+        + " sequence="
+        + sequence;
   }
 
   private static String answer(long requestId, long run, long sequence) {
@@ -138,9 +149,9 @@ class ConformanceTest {
           Hello hello = (Hello) reply.body(new Hello());
           effects.add(hello(hello.run(), hello.regionId(), hello.lastSequence()));
         } else {
-          Heartbeat heartbeat = (Heartbeat) reply.body(new Heartbeat());
+          Heartbeat beat = (Heartbeat) reply.body(new Heartbeat());
           effects.add(
-              "heartbeat depth=" + heartbeat.queueDepth() + " searches=" + heartbeat.searches());
+              heartbeat(beat.queueDepth(), beat.searches(), beat.regionId(), beat.sequence()));
         }
         return;
       }

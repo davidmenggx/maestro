@@ -53,6 +53,16 @@ public final class WorldStreams {
     private long nextToSend = NOT_STARTED;
 
     /**
+     * The sequence the last assignment the holder was sent names, or where the log stood when it
+     * became a holder, if it has been sent none.
+     */
+    private long assignedAt;
+
+    private Holder(long assignedAt) {
+      this.assignedAt = assignedAt;
+    }
+
+    /**
      * Chunks the holder has resident, with the sequence of the frame each came from. A cleared
      * chunk is absent (air).
      */
@@ -143,7 +153,7 @@ public final class WorldStreams {
     for (Region region : regions.regions()) {
       Log log = addLog(region);
       for (NodeId node : regions.holders(region.id())) {
-        log.holders.put(node, new Holder());
+        log.holders.put(node, new Holder(log.lastSequence));
       }
     }
   }
@@ -187,7 +197,7 @@ public final class WorldStreams {
     for (Map.Entry<NodeId, Holder> entry : old.holders.entrySet()) {
       NodeId node = entry.getKey();
       Holder was = entry.getValue();
-      Holder holder = new Holder();
+      Holder holder = new Holder(kept.lastSequence);
       kept.holders.put(node, holder);
       if (!links.greeted(node)) {
         // It starts over when it greets, since it reports holding the parent.
@@ -233,7 +243,7 @@ public final class WorldStreams {
    */
   void holderAdded(int regionId, NodeId node) {
     Log log = logs.get(regionId);
-    Holder holder = new Holder();
+    Holder holder = new Holder(log.lastSequence);
     log.holders.put(node, holder);
     env.metrics().count("world.resnapshot", 1, "node", node.toString());
     startOver(log, holder);
@@ -253,6 +263,16 @@ public final class WorldStreams {
   long heldSequence(NodeId node) {
     int region = regions.regionOf(node);
     return region == Regions.NONE ? 0 : logs.get(region).lastSequence;
+  }
+
+  /**
+   * The sequence the last assignment of its region the node was sent names, which it stands at once
+   * it applies it, or where the log stood when it became a holder, if it has been sent none. 0 if
+   * it holds no region.
+   */
+  long assignedSequence(NodeId node) {
+    int region = regions.regionOf(node);
+    return region == Regions.NONE ? 0 : logs.get(region).holders.get(node).assignedAt;
   }
 
   /**
@@ -572,6 +592,7 @@ public final class WorldStreams {
    * the log stands, so the node refuses a first frame that does not follow.
    */
   private void sendAssignment(Log log, NodeId node, long sequence, boolean resume) {
+    log.holders.get(node).assignedAt = sequence;
     links.send(
         node,
         Channel.WORLD,

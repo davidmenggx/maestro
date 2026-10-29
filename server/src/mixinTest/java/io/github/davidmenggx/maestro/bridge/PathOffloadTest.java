@@ -57,6 +57,7 @@ class PathOffloadTest {
   private static final long SEARCH_NANOS = 400_000;
 
   private final TestClock clock = new TestClock();
+  private final RecordedMetrics metrics = new RecordedMetrics();
   private final FakeController controller = new FakeController();
   private final Map<Integer, FakeNavigator> navigators = new LinkedHashMap<>();
   private final FakeNavigator navigator = new FakeNavigator(MOB);
@@ -802,6 +803,36 @@ class PathOffloadTest {
   }
 
   @Test
+  void eachOutcomeAndEachDropIsCountedByName() {
+    navigator.follow(search(START, TARGET), TARGET);
+    offload.pathDropped(MOB, DropReason.TIMEOUT);
+
+    assertEquals(1, metrics.counter("path.offload{outcome=REQUESTED}"));
+    assertEquals(1, metrics.counter("path.offload{outcome=DROPPED}"));
+    assertEquals(1, metrics.counter("path.offload.dropped{reason=TIMEOUT}"));
+  }
+
+  @Test
+  void theFailoverCountsEachOutcomeAndGaugesTheMobsWaitingForAFullSearch() {
+    controller.refuseWith = DropReason.UNAVAILABLE;
+    int searches = (int) (Failover.BUDGET_NANOS / SEARCH_NANOS) + 1;
+    for (int mob = 0; mob < searches; mob++) {
+      search(mob, navigator(mob), START, TARGET);
+    }
+    navigator(searches).follow(search(searches, navigator(searches), START, TARGET), TARGET);
+
+    offload.tickEnding();
+    assertEquals(searches, metrics.counter("path.failover{outcome=FULL}"));
+    assertEquals(1, metrics.counter("path.failover{outcome=CHEAP}"));
+    assertEquals(1.0, metrics.gauges.get("failover.waiting"));
+
+    clock.tick++;
+    offload.tickEnding();
+    assertEquals(1, metrics.counter("path.failover{outcome=LATER}"));
+    assertEquals(0.0, metrics.gauges.get("failover.waiting"));
+  }
+
+  @Test
   void theStatsNamesDoNotDependOnTheDefaultLocale() {
     Locale before = Locale.getDefault();
     // Turkish lower-cases `I` to a dotless `ı`.
@@ -861,7 +892,7 @@ class PathOffloadTest {
             clock,
             () -> nanos,
             () -> players,
-            new NoMetrics(),
+            metrics,
             new ProfileTable(),
             mode);
     built.bind(controller);
@@ -1039,15 +1070,35 @@ class PathOffloadTest {
     }
   }
 
-  private static final class NoMetrics implements Metrics {
+  /** Counter sums and each gauge's last value, by name and labels, such as {@code a{k=v}}. */
+  private static final class RecordedMetrics implements Metrics {
+    final Map<String, Long> counters = new LinkedHashMap<>();
+    final Map<String, Double> gauges = new LinkedHashMap<>();
+
     @Override
-    public void count(String name, long delta, String... labels) {}
+    public void count(String name, long delta, String... labels) {
+      counters.merge(key(name, labels), delta, Long::sum);
+    }
 
     @Override
     public void record(String name, double value, String... labels) {}
 
     @Override
-    public void gauge(String name, double value, String... labels) {}
+    public void gauge(String name, double value, String... labels) {
+      gauges.put(key(name, labels), value);
+    }
+
+    long counter(String key) {
+      return counters.getOrDefault(key, 0L);
+    }
+
+    private static String key(String name, String... labels) {
+      StringBuilder key = new StringBuilder(name);
+      for (int i = 0; i + 1 < labels.length; i += 2) {
+        key.append(i == 0 ? "{" : ",").append(labels[i]).append('=').append(labels[i + 1]);
+      }
+      return labels.length == 0 ? key.toString() : key.append('}').toString();
+    }
   }
 
   private static final class TestClock implements Clock {

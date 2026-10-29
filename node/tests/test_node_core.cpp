@@ -353,8 +353,8 @@ TEST_F(NodeCoreTest, HeartbeatsNeedALiveLinkWithItsControlConnection) {
 TEST_F(NodeCoreTest, AHeartbeatReportsTheSearchesFinishedSinceTheLastOne) {
   startLink();
   ASSERT_EQ(heartbeat().size(), 1u);
-  // Each read of the clock moves it, so a search takes one millisecond from
-  // being taken to being settled.
+  // Each read of the clock moves it a millisecond: a job reads it when taken,
+  // after its search, and when settled, so a search takes two.
   Step = milliseconds(1);
   ASSERT_TRUE(datagram(requestFrame({1, 2})).empty());
   // Neither a probe nor a request for another region runs a search.
@@ -368,13 +368,39 @@ TEST_F(NodeCoreTest, AHeartbeatReportsTheSearchesFinishedSinceTheLastOne) {
   const auto *Body = heartbeatIn(Beat[0]);
   ASSERT_NE(Body, nullptr);
   EXPECT_EQ(Body->searches(), 2u);
-  EXPECT_EQ(Body->search_micros(), 2000u);
+  EXPECT_EQ(Body->worker_micros(), 4000u);
   EXPECT_EQ(Body->workers(), serve::NodeOptions{}.Workers);
 
   const auto Next = heartbeat();
   ASSERT_EQ(Next.size(), 1u);
   EXPECT_EQ(heartbeatIn(Next[0])->searches(), 0u);
-  EXPECT_EQ(heartbeatIn(Next[0])->search_micros(), 0u);
+  EXPECT_EQ(heartbeatIn(Next[0])->worker_micros(), 0u);
+}
+
+TEST_F(NodeCoreTest, AHeartbeatReportsTheAreaHeldForTheLinksRun) {
+  ASSERT_TRUE(join(Port::World, WorldId).empty());
+  ASSERT_EQ(join(Port::Control, ControlId).size(), 1u);
+  auto Beat = heartbeat();
+  ASSERT_EQ(Beat.size(), 1u);
+  EXPECT_EQ(heartbeatIn(Beat[0])->region_id(), 0u);
+  EXPECT_EQ(heartbeatIn(Beat[0])->sequence(), 0u);
+
+  DenseWorld Flat(32, 0, 24);
+  ASSERT_TRUE(
+      receive(WorldId, Flat.assignment(false, TestRun, TestRegion)).empty());
+  ASSERT_TRUE(receive(WorldId, Flat.chunk(1, 0, 0)).empty());
+  ASSERT_TRUE(receive(WorldId, Flat.chunk(2, 1, 0)).empty());
+  Beat = heartbeat();
+  ASSERT_EQ(Beat.size(), 1u);
+  EXPECT_EQ(heartbeatIn(Beat[0])->region_id(), TestRegion);
+  EXPECT_EQ(heartbeatIn(Beat[0])->sequence(), 2u);
+
+  // The area of an earlier run, held into a link of a new one.
+  ASSERT_TRUE(drops(join(Port::Control, 10, 1, TestRun + 1)));
+  Beat = heartbeat();
+  ASSERT_EQ(Beat.size(), 1u);
+  EXPECT_EQ(heartbeatIn(Beat[0])->region_id(), 0u);
+  EXPECT_EQ(heartbeatIn(Beat[0])->sequence(), 0u);
 }
 
 TEST_F(NodeCoreTest, ABeatWithNoLinkStillEndsItsInterval) {
@@ -459,6 +485,31 @@ TEST_F(NodeCoreTest, AnAnswerNamesTheRequestsRunAndTheSequenceSearched) {
   EXPECT_EQ(Answer->request_id(), 1u);
   EXPECT_EQ(Answer->world_sequence(), 4u);
   EXPECT_TRUE(Answer->reached());
+}
+
+TEST_F(NodeCoreTest, AnAnswerCarriesHowLongItWaitedAndSearched) {
+  startLink();
+  ASSERT_TRUE(datagram(requestFrame({1})).empty());
+  Time += milliseconds(30);
+  // Each read of the clock moves it: taken at 31 ms, searched by 32 ms.
+  Step = milliseconds(1);
+  Answers = serve();
+  ASSERT_EQ(Answers.size(), 1u);
+  const auto *Answer = responseIn(Answers[0])->body_as_PathResponse();
+  ASSERT_NE(Answer, nullptr);
+  EXPECT_EQ(Answer->wait_micros(), 31000u);
+  EXPECT_EQ(Answer->search_micros(), 1000u);
+
+  // A request for another area waits but does not search.
+  ASSERT_TRUE(
+      datagram(requestFrame({2}, TestClass, TestRun, TestRegion + 1)).empty());
+  Answers = serve();
+  ASSERT_EQ(Answers.size(), 1u);
+  Answer = responseIn(Answers[0])->body_as_PathResponse();
+  ASSERT_NE(Answer, nullptr);
+  EXPECT_EQ(Answer->world_sequence(), 0u);
+  EXPECT_GT(Answer->wait_micros(), 0u);
+  EXPECT_EQ(Answer->search_micros(), 0u);
 }
 
 TEST_F(NodeCoreTest, ARequestForAnotherAreaIsAnsweredAsIfNoneWereHeld) {
@@ -673,10 +724,22 @@ TEST_F(NodeCoreTest, RunReportsAJobDroppedUnsearched) {
   const std::optional<serve::Job> Next = Core.queue().tryTake();
   ASSERT_TRUE(Next);
   const serve::Outcome Done = Core.run(*Next, With);
-  EXPECT_FALSE(Done.Searched);
+  EXPECT_TRUE(Done.Expired);
   EXPECT_EQ(Done.Result, nullptr);
   EXPECT_EQ(Core.queue().depth(), 0u);
   EXPECT_TRUE(Out.take().empty());
+}
+
+TEST_F(NodeCoreTest, AJobTakenInTimeIsNotExpiredEvenIfItDoesNotSearch) {
+  startLink();
+  ASSERT_TRUE(
+      datagram(requestFrame({1}, TestClass, TestRun, TestRegion + 1)).empty());
+  const std::optional<serve::Job> Next = Core.queue().tryTake();
+  ASSERT_TRUE(Next);
+  const serve::Outcome Done = Core.run(*Next, With);
+  EXPECT_FALSE(Done.Expired);
+  ASSERT_NE(Done.Result, nullptr);
+  EXPECT_EQ(Core.searches(), 0u);
 }
 
 TEST(NodeCore, AnAnswerLargerThanADatagramIsNotSent) {

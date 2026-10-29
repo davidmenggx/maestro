@@ -37,6 +37,12 @@ sourceSets {
     compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
     runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
   }
+  // Tests that need a running server: the overworld, its chunks and its mobs. A separate mod run
+  // headless by `runGameTest`.
+  gametest {
+    compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+    runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
+  }
 }
 
 loom {
@@ -49,6 +55,9 @@ loom {
     }
     "maestro-load" {
       sourceSet sourceSets.load
+    }
+    "maestro-gametest" {
+      sourceSet sourceSets.gametest
     }
   }
   runs {
@@ -66,6 +75,15 @@ loom {
       inherit server
       configName = "Load Server"
       source sourceSets.load
+    }
+    // The game tests, on a server of their own that exits with the number that failed.
+    gameTest {
+      inherit server
+      configName = "Game Test"
+      source sourceSets.gametest
+      runDir "run/gametest"
+      vmArg "-Dfabric-api.gametest"
+      vmArg "-Dfabric-api.gametest.report-file=${project.layout.buildDirectory.file('gametest/TEST-gametest.xml').get().asFile}"
     }
   }
 }
@@ -218,6 +236,26 @@ tasks.matching { it.name in ["runServer", "runReleaseServer", "runLoadServer"] }
     // Always written, so a previous `-Pworld=` run's `level-name` cannot redirect the next boot.
     properties.setProperty("level-name", levelName)
     propertiesFile.withOutputStream { properties.store(it, "Written by the server run tasks") }
+  }
+}
+
+// The game tests start from a fresh world, with a fleet whose one node never answers: the fleet
+// watches the overworld as it would in production, while shadow mode keeps every search vanilla's.
+def gameTestRunDir = file("${projectDir}/run/gametest")
+def gameTestConfig = [
+  subMode: "batch",
+  offload: "shadow",
+  nodes: [[host: "127.0.0.1", worldPort: 25797, controlPort: 25798, requestPort: 25799]],
+  areaCells: 5,
+  spares: 0,
+]
+
+tasks.matching { it.name == "runGameTest" }.configureEach {
+  doFirst {
+    project.delete(new File(gameTestRunDir, "world"))
+    def config = new File(gameTestRunDir, "config/maestro.json")
+    config.parentFile.mkdirs()
+    config.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(gameTestConfig))
   }
 }
 

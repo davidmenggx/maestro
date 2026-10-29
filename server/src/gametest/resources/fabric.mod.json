@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "maestro-gametest",
+  "version": "${version}",
+  "name": "Maestro Game Tests",
+  "description": "Tests of Maestro that need a running server.",
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": {
+    "fabric-gametest": [
+      "io.github.davidmenggx.maestro.bridge.FleetGameTest",
+      "io.github.davidmenggx.maestro.bridge.NavigationGameTest",
+      "io.github.davidmenggx.maestro.gametest.OverworldOnlyGameTest"
+    ]
+  },
+  "mixins": [
+    "maestro-gametest.mixins.json"
+  ],
+  "depends": {
+    "maestro": "*",
+    "fabric-gametest-api-v1": "*"
+  }
+}

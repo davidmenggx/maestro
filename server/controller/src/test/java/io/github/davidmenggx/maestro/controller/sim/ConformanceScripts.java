@@ -114,10 +114,10 @@ final class ConformanceScripts {
         held("a request is answered once and a copy gets the same answer")
             .datagram(requests(RUN, REGION, 10))
             .datagram(requests(RUN, REGION, 10))
-            .heartbeat(heartbeat(1, 0))
+            .heartbeat(heartbeat(1, 0, REGION, 1))
             .serve(0, answer(10, RUN, 1))
             .datagram(requests(RUN, REGION, 10), answer(10, RUN, 1))
-            .heartbeat(heartbeat(0, 1)));
+            .heartbeat(heartbeat(0, 1, REGION, 1)));
 
     cases.add(
         held("an answer is kept for 1000 ms")
@@ -133,7 +133,7 @@ final class ConformanceScripts {
         held("a cancel drops a waiting request and its later copies")
             .datagram(requests(RUN, REGION, 10, 11))
             .datagram(Frames.cancels(RUN, REGION, List.of(10L)))
-            .heartbeat(heartbeat(1, 0))
+            .heartbeat(heartbeat(1, 0, REGION, 1))
             .serve(0, answer(11, RUN, 1))
             .datagram(requests(RUN, REGION, 10))
             .serve(0));
@@ -159,7 +159,7 @@ final class ConformanceScripts {
             .datagram(requests(RUN, REGION, 10, 11, 12))
             .datagram(Frames.cancels(RUN, REGION, List.of(10L)))
             .serve(1, answer(11, RUN, 1))
-            .heartbeat(heartbeat(1, 1))
+            .heartbeat(heartbeat(1, 1, REGION, 1))
             .serve(1, answer(12, RUN, 1)));
 
     cases.add(
@@ -168,7 +168,7 @@ final class ConformanceScripts {
             .datagram(Frames.cancels(RUN, REGION, List.of(10L)))
             .advance(1000)
             .datagram(requests(RUN, REGION, 10))
-            .heartbeat(heartbeat(1, 0))
+            .heartbeat(heartbeat(1, 0, REGION, 1))
             .serve(0, answer(10, RUN, 1))
             .serve(0));
 
@@ -178,9 +178,9 @@ final class ConformanceScripts {
             .advance(1000)
             .serve(1, answer(10, RUN, 1))
             .advance(1)
-            .heartbeat(heartbeat(1, 1))
+            .heartbeat(heartbeat(1, 1, REGION, 1))
             .serve(0)
-            .heartbeat(heartbeat(0, 0))
+            .heartbeat(heartbeat(0, 0, REGION, 1))
             .datagram(requests(RUN, REGION, 11))
             .serve(0)
             .advance(1000)
@@ -410,7 +410,7 @@ final class ConformanceScripts {
         held("a join after the first frame is ignored").stream(
                 LinkPort.World, Frames.joinWorld(RUN, 1))
             .stream(LinkPort.Control, Frames.joinControl(OTHER_RUN, 9))
-            .heartbeat(heartbeat(0, 0))
+            .heartbeat(heartbeat(0, 0, REGION, 1))
             .disconnect(LinkPort.World, linkDropped())
             .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(RUN, REGION, 1)));
 
@@ -421,7 +421,18 @@ final class ConformanceScripts {
             .datagram(requests(RUN, REGION + 1, 13))
             .serve(
                 0, answer(10, RUN, 1), answer(11, RUN, 1), answer(12, RUN, 0), answer(13, RUN, 0))
-            .heartbeat(heartbeat(0, 2))
+            .heartbeat(heartbeat(0, 2, REGION, 1))
+            .heartbeat(heartbeat(0, 0, REGION, 1)));
+
+    cases.add(
+        held("a heartbeat reports the area held for the link's run only").stream(
+                LinkPort.World, delta(2))
+            .heartbeat(heartbeat(0, 0, REGION, 2))
+            .connect(
+                LinkPort.Control,
+                Frames.joinControl(OTHER_RUN, 1),
+                linkDropped(),
+                hello(RUN, REGION, 2))
             .heartbeat(heartbeat(0, 0)));
 
     cases.add(
@@ -432,7 +443,7 @@ final class ConformanceScripts {
             .heartbeat()
             .connect(LinkPort.Control, Frames.joinControl(RUN, 2), hello(RUN, REGION, 1))
             .connect(LinkPort.World, Frames.joinWorld(RUN, 2))
-            .heartbeat(heartbeat(0, 0)));
+            .heartbeat(heartbeat(0, 0, REGION, 1)));
 
     cases.add(
         new Script("the heartbeat needs the control connection and counts waiting requests")
@@ -616,9 +627,14 @@ final class ConformanceScripts {
     return new Expected(EffectKind.Hello, run, region, sequence, 0, 0, 0);
   }
 
-  /** {@code searches} counts those finished since the timer last fired. */
+  /** {@code searches} counts those finished since the timer last fired. Nothing is held. */
   static Expected heartbeat(long depth, long searches) {
-    return new Expected(EffectKind.Heartbeat, 0, 0, 0, depth, 0, searches);
+    return heartbeat(depth, searches, 0, 0);
+  }
+
+  /** As above, holding {@code region} of the link's run at {@code sequence}. */
+  static Expected heartbeat(long depth, long searches, long region, long sequence) {
+    return new Expected(EffectKind.Heartbeat, 0, region, sequence, depth, 0, searches);
   }
 
   static Expected answer(long requestId, long run, long sequence) {

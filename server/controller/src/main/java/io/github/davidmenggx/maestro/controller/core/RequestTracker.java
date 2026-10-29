@@ -1,8 +1,10 @@
 package io.github.davidmenggx.maestro.controller.core;
 
+import io.github.davidmenggx.maestro.controller.env.Clock;
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Offload;
+import io.github.davidmenggx.maestro.controller.env.RequestTrace;
 import io.github.davidmenggx.maestro.controller.env.Transport;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.region.Region;
@@ -174,6 +176,7 @@ public final class RequestTracker {
   private final long run;
   private final Capacity capacity;
   private final Dispatch dispatch;
+  private final RequestTraces traces;
 
   private final Set<Integer> mobs = new LinkedHashSet<>();
   private final Map<NodeId, Load> loads = new LinkedHashMap<>();
@@ -223,7 +226,8 @@ public final class RequestTracker {
       Violations violations,
       long run,
       Capacity capacity,
-      Dispatch dispatch) {
+      Dispatch dispatch,
+      RequestTraces traces) {
     this.env = env;
     this.world = world;
     this.out = out;
@@ -238,6 +242,7 @@ public final class RequestTracker {
     this.run = run;
     this.capacity = capacity;
     this.dispatch = dispatch;
+    this.traces = traces;
     for (NodeId node : fleet) {
       loads.put(node, new Load());
     }
@@ -360,6 +365,7 @@ public final class RequestTracker {
         requestId,
         new Outstanding(
             mobId, node, region, startChunk, event.tick(), request, NOT_SENT, NOT_SENT, 0, false));
+    traces.admitted(requestId, mobId, classId, node, region.id(), event.hunting(), event.tick());
     placement.sent(region, event.start());
     if (dispatch == Dispatch.STREAM) {
       stream(node, region, request);
@@ -379,6 +385,9 @@ public final class RequestTracker {
     return held + load.unsent;
   }
 
+  /** A streamed request's frames, and when the worker sent them. */
+  private record Streamed(List<byte[]> frames, long sentNanos) {}
+
   /**
    * Sends one request from the encode worker as soon as it is encoded. The send is recorded when
    * the encode is handed back, and a given-up encode joins the node's next batch.
@@ -389,6 +398,7 @@ public final class RequestTracker {
     byRegion.put(region, one);
     long attempt = links.attempt(node);
     Transport transport = env.transport();
+    Clock clock = env.clock();
     long run = this.run;
     leaving(node, one);
     encoder.encode(
@@ -396,16 +406,17 @@ public final class RequestTracker {
         Offload.Lane.REQUESTS,
         () -> {
           List<byte[]> frames = requestFrames(run, byRegion, Regions.NONE, List.of(), List.of());
+          long sentNanos = clock.nowNanos();
           for (byte[] frame : frames) {
             transport.send(node, Channel.REQUEST, ByteBuffer.wrap(frame));
           }
-          return frames;
+          return new Streamed(frames, sentNanos);
         },
-        frames -> {
-          for (byte[] frame : frames) {
+        streamed -> {
+          for (byte[] frame : streamed.frames()) {
             links.sentElsewhere(Channel.REQUEST, frame);
           }
-          recordSent(node, one, List.of(), List.of(), frames);
+          recordSent(node, one, List.of(), List.of(), streamed.frames(), streamed.sentNanos());
         },
         () -> requeue(node, attempt, one, List.of(), List.of()));
   }
@@ -429,7 +440,8 @@ public final class RequestTracker {
     return ready;
   }
 
-  void answer(NodeId node, Reply.Answer answer) {
+  /** {@code arrivedNanos} is when the transport heard the answer. */
+  void answer(NodeId node, Reply.Answer answer, long arrivedNanos) {
     long tick = env.clock().tick();
     Probe probe = probes.get(answer.requestId());
     if (probe != null) {
@@ -456,6 +468,11 @@ public final class RequestTracker {
       env.metrics().count("path.response.misrouted", 1, "node", node.toString());
       return;
     }
+    // Once per request: a later copy finds it settled above. Sequence 0 is an answer not searched.
+    env.metrics().record("node.wait.micros", answer.waitMicros(), "node", node.toString());
+    if (answer.worldSequence() != 0) {
+      env.metrics().record("node.search.micros", answer.searchMicros(), "node", node.toString());
+    }
     health.answered(node, tick);
     if (request.abandoned()) {
       // The node is done with it, and the mob no longer wants it.
@@ -463,6 +480,7 @@ public final class RequestTracker {
       env.metrics().count("path.response.abandoned", 1);
       return;
     }
+    traces.answered(answer.requestId(), answer, arrivedNanos);
     // The node must have held the start chunk when it searched, else it searched air.
     Long since = streams.residentSince(node, request.startChunk());
     if (since == null || answer.worldSequence() < since) {
@@ -482,6 +500,7 @@ public final class RequestTracker {
             inWorld(answer.nodes(), request.region()),
             answer.cost(),
             request.issuedTick()));
+    traces.ended(answer.requestId(), RequestTrace.ANSWERED);
   }
 
   /**
@@ -539,7 +558,7 @@ public final class RequestTracker {
       Outstanding request = remove(requestId);
       if (!request.abandoned()) {
         requestByMob.remove(request.mobId());
-        drop(request.mobId(), DropReason.NODE_LOST);
+        dropAdmitted(requestId, request.mobId(), DropReason.NODE_LOST);
       }
     }
   }
@@ -587,7 +606,8 @@ public final class RequestTracker {
     givenUp.values().removeIf(gone -> tick - gone.issuedTick() > MAX_TICKS_LATE);
     Iterator<Map.Entry<Long, Outstanding>> entries = outstanding.entrySet().iterator();
     while (entries.hasNext()) {
-      Outstanding request = entries.next().getValue();
+      Map.Entry<Long, Outstanding> entry = entries.next();
+      Outstanding request = entry.getValue();
       if (tick - request.issuedTick() <= MAX_TICKS_LATE) {
         return;
       }
@@ -598,7 +618,7 @@ public final class RequestTracker {
       }
       requestByMob.remove(request.mobId());
       env.metrics().count("path.expired", 1);
-      drop(request.mobId(), DropReason.TIMEOUT);
+      dropAdmitted(entry.getKey(), request.mobId(), DropReason.TIMEOUT);
     }
   }
 
@@ -705,10 +725,12 @@ public final class RequestTracker {
       List<Long> cancels,
       List<Long> probing,
       List<byte[]> frames) {
+    // Read first, as an early frame's answer can be heard before the last frame leaves.
+    long sentNanos = env.clock().nowNanos();
     for (byte[] frame : frames) {
       links.send(node, Channel.REQUEST, frame);
     }
-    recordSent(node, batch, cancels, probing, frames);
+    recordSent(node, batch, cancels, probing, frames, sentNanos);
   }
 
   /**
@@ -722,6 +744,7 @@ public final class RequestTracker {
       Outstanding waiting = outstanding.get(request.requestId());
       if (waiting != null && unsent(waiting)) {
         put(request.requestId(), waiting.encoding());
+        traces.encoding(request.requestId());
         fresh++;
       }
     }
@@ -733,15 +756,20 @@ public final class RequestTracker {
   }
 
   /**
-   * Sets when each request and probe of a batch that just left is due: once the node has served
-   * everything sent to it, as the model has it, plus {@link #RESEND_TICKS}.
+   * Sets when each request and probe of a batch that left at {@code sentNanos} is due: once the
+   * node has served everything sent to it, as the model has it, plus {@link #RESEND_TICKS}.
    */
   private void recordSent(
       NodeId node,
       List<Frames.Request> batch,
       List<Long> cancels,
       List<Long> probing,
-      List<byte[]> frames) {
+      List<byte[]> frames,
+      long sentNanos) {
+    // Settled or not: a streamed request's answer can be handed over before its send.
+    for (Frames.Request request : batch) {
+      traces.sent(request.requestId(), sentNanos);
+    }
     if (!cancels.isEmpty()) {
       env.metrics().count("path.cancels", cancels.size(), "node", node.toString());
     }
@@ -871,14 +899,20 @@ public final class RequestTracker {
       load.cancels.add(requestId);
       put(requestId, request.abandon());
     }
-    drop(request.mobId(), reason);
+    dropAdmitted(requestId, request.mobId(), reason);
   }
 
   /** Reports a live request dropped once its node is done with it or never had it. */
   private void finish(long requestId, Outstanding request, DropReason reason) {
     remove(requestId);
     requestByMob.remove(request.mobId());
-    drop(request.mobId(), reason);
+    dropAdmitted(requestId, request.mobId(), reason);
+  }
+
+  /** Reports an admitted request dropped, ending its trace. */
+  private void dropAdmitted(long requestId, int mobId, DropReason reason) {
+    drop(mobId, reason);
+    traces.ended(requestId, reason.name());
   }
 
   /** Reports a request dropped, counted by reason so every drop shows in the metrics. */
@@ -918,7 +952,10 @@ public final class RequestTracker {
     return request.resends() == 0 && request.dueTick() == NOT_SENT;
   }
 
-  /** One mob mapping per live request, and unsent counters matching the requests not yet sent. */
+  /**
+   * One mob mapping per live request, unsent counters matching the requests not yet sent, and no
+   * trace left open.
+   */
   void check(List<String> found) {
     Map<NodeId, Integer> unsent = new LinkedHashMap<>();
     for (Outstanding request : outstanding.values()) {
@@ -945,5 +982,6 @@ public final class RequestTracker {
         found.add("mob " + entry.getKey() + " points at a request that is not live");
       }
     }
+    traces.check(new LinkedHashSet<>(requestByMob.values()), found);
   }
 }

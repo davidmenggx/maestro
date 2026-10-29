@@ -549,7 +549,13 @@ public final class Frames {
           nodes.add(new WorldOutput.Node(pos, (byte) scratch.type()));
         }
         return new Reply.Answer(
-            body.requestId(), body.reached(), nodes, body.cost(), body.worldSequence());
+            body.requestId(),
+            body.reached(),
+            nodes,
+            body.cost(),
+            body.worldSequence(),
+            body.waitMicros(),
+            body.searchMicros());
       }
       case ResponseMsg.UnknownProfile -> {
         UnknownProfile body = (UnknownProfile) response.body(new UnknownProfile());
@@ -575,8 +581,10 @@ public final class Frames {
         return new Reply.Beat(
             heartbeat.queueDepth(),
             heartbeat.searches(),
-            heartbeat.searchMicros(),
-            heartbeat.workers());
+            heartbeat.workerMicros(),
+            heartbeat.workers(),
+            heartbeat.regionId(),
+            heartbeat.sequence());
       }
       default -> {
         return null;

@@ -64,14 +64,19 @@ table Hello {
 // Sent unsolicited on the node's timer. Phi accrual reads arrival intervals on
 // the controller's clock, so there is no timestamp. `queue_depth` counts the
 // requests waiting or running. `searches` counts the searches workers finished
-// since the timer last fired, and `search_micros` the worker time they took,
-// from taking each job to settling it; with `workers`, the node's search
-// threads, they give the rate the node serves at.
+// since the timer last fired, and `worker_micros` the worker time they took,
+// from taking each job to settling it, encoding included; with `workers`, the
+// node's search threads, they give the rate the node serves at. `region_id`
+// and `sequence` are the region the node holds for the link's run and its last
+// applied world sequence, or 0 if it holds none, so the controller can tell its
+// lag.
 table Heartbeat {
   queue_depth:uint;
   searches:uint;
-  search_micros:ulong;
+  worker_micros:ulong;
   workers:ushort;
+  region_id:uint;
+  sequence:ulong;
 }
 
 // One union per channel and direction, so a reader dispatches on one root

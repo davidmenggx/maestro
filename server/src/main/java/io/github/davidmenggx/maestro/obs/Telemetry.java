@@ -3,6 +3,7 @@ package io.github.davidmenggx.maestro.obs;
 import io.github.davidmenggx.maestro.config.MaestroConfig;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.metrics.MeterProvider;
 import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporter;
 import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -46,18 +47,6 @@ public final class Telemetry {
                         AttributeKey.stringKey("service.name"), SERVICE_NAME,
                         AttributeKey.stringKey("service.version"), version)));
 
-    SdkTracerProvider tracerProvider =
-        SdkTracerProvider.builder()
-            .setResource(resource)
-            .addSpanProcessor(
-                BatchSpanProcessor.builder(
-                        OtlpGrpcSpanExporter.builder()
-                            .setEndpoint(config.otlpEndpoint())
-                            .setTimeout(EXPORT_TIMEOUT)
-                            .build())
-                    .build())
-            .build();
-
     SdkMeterProvider meterProvider =
         SdkMeterProvider.builder()
             .setResource(resource)
@@ -72,9 +61,29 @@ public final class Telemetry {
 
     sdk =
         OpenTelemetrySdk.builder()
-            .setTracerProvider(tracerProvider)
+            .setTracerProvider(tracerProvider(resource, config.otlpEndpoint(), meterProvider))
             .setMeterProvider(meterProvider)
             .buildAndRegisterGlobal();
+  }
+
+  /**
+   * Spans exported to {@code endpoint}. Request traces take their ids from {@link RequestTraceIds}.
+   * Spans the full export queue drops show in the processor's own metrics.
+   */
+  static SdkTracerProvider tracerProvider(
+      Resource resource, String endpoint, MeterProvider meterProvider) {
+    return SdkTracerProvider.builder()
+        .setResource(resource)
+        .setIdGenerator(RequestTraceIds.INSTANCE)
+        .addSpanProcessor(
+            BatchSpanProcessor.builder(
+                    OtlpGrpcSpanExporter.builder()
+                        .setEndpoint(endpoint)
+                        .setTimeout(EXPORT_TIMEOUT)
+                        .build())
+                .setMeterProvider(meterProvider)
+                .build())
+        .build();
   }
 
   public static synchronized void shutdown() {

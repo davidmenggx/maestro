@@ -92,6 +92,9 @@ public final class SimRun {
   /** What the self-check of each controller process a restart replaced found. */
   private final List<String> retiredViolations = new ArrayList<>();
 
+  /** Answered requests whose traces the controller processes a restart replaced never reported. */
+  private int tracesLostToRestart;
+
   /** The tick the workload stops changing the world, or {@link #ticks} if it never does. */
   private final long quietAfter;
 
@@ -131,7 +134,23 @@ public final class SimRun {
 
   private final Rng checkpointRng;
 
-  /** {@code quietAfter} is the tick the workload stops changing the world. */
+  /**
+   * The share of admitted requests traced: all of them in a scripted run and in half the others, so
+   * that all can be checked.
+   */
+  public final double traceSampleRate;
+
+  /**
+   * The chance a worker that sent hands its completion over a hand-over late: none in a scripted
+   * run, which keeps its timing exact, unless {@link #lateCompletions} sets it, and in half the
+   * others.
+   */
+  private double lateCompletionChance;
+
+  /**
+   * {@code quietAfter} is the tick the workload stops changing the world. A {@code scripted} run
+   * traces every request and hands every completion over on time.
+   */
   private SimRun(
       long seed,
       FaultPlan faults,
@@ -141,7 +160,8 @@ public final class SimRun {
       Scenario scenario,
       int controllerGrace,
       int controllerCapacity,
-      BiFunction<SimWorld, Rng, Workload> workloadFactory) {
+      BiFunction<SimWorld, Rng, Workload> workloadFactory,
+      boolean scripted) {
     this.seed = seed;
     this.controllerGrace = controllerGrace;
     this.controllerCapacity = controllerCapacity;
@@ -166,6 +186,11 @@ public final class SimRun {
         new SimWorld(
             topology, scenario.counts().get(Count.MOB_CLASSES), sim.rng().derive("terrain"));
     this.out = new RecordingOutput(sim, world, this::regions);
+    Rng traceRng = sim.rng().derive("tracing");
+    this.traceSampleRate = scripted || traceRng.nextBoolean() ? 1 : traceRng.nextDouble();
+    Rng lateRng = sim.rng().derive("late-completion-chance");
+    this.lateCompletionChance = scripted || lateRng.nextBoolean() ? 0 : lateRng.nextDouble();
+    sim.lateCompletions(lateCompletionChance);
     this.controller = newController();
     this.workload = workloadFactory.apply(world, sim.rng().derive("workload"));
     this.checkpointRng = sim.rng().derive("checkpoints");
@@ -187,7 +212,8 @@ public final class SimRun {
             topology.spares(),
             controllerCapacity > 0 ? controllerCapacity : scenario.assumedCapacity(),
             scenario.dispatch(),
-            policy));
+            policy,
+            traceSampleRate));
   }
 
   /** The regions and their holders as the current controller has them now. */
@@ -201,6 +227,7 @@ public final class SimRun {
     for (String violation : controller.selfCheck()) {
       retiredViolations.add("controller of run " + controller.run() + ": " + violation);
     }
+    tracesLostToRestart += controller.tracesUnreported();
     controller = newController();
     workload.replayState(sim.env().clock().tick(), event -> sim.deliver(controller, event));
   }
@@ -208,6 +235,11 @@ public final class SimRun {
   /** Violations the self-checks of the controller processes a restart replaced found. */
   public List<String> retiredViolations() {
     return List.copyOf(retiredViolations);
+  }
+
+  /** Answered requests whose traces were held back when their controller restarted. */
+  public int tracesLostToRestart() {
+    return tracesLostToRestart;
   }
 
   public static SimRun of(long seed, FaultPlan faults, long ticks) {
@@ -263,7 +295,8 @@ public final class SimRun {
         scenario,
         graceTicks,
         capacity,
-        (world, rng) -> new SyntheticWorkload(world, rng, ticks - DRAIN_TICKS, scenario));
+        (world, rng) -> new SyntheticWorkload(world, rng, ticks - DRAIN_TICKS, scenario),
+        false);
   }
 
   /** A run whose geometry, load, length, faults and event order are all drawn from the seed. */
@@ -309,7 +342,15 @@ public final class SimRun {
         scenario,
         0,
         0,
-        (world, rng) -> new ScriptedWorkload(world, events));
+        (world, rng) -> new ScriptedWorkload(world, events),
+        true);
+  }
+
+  /** Sets the chance a worker that sent hands its completion over late, before the run goes. */
+  public SimRun lateCompletions(double chance) {
+    sim.lateCompletions(chance);
+    lateCompletionChance = chance;
+    return this;
   }
 
   public SimRun go() {
@@ -623,6 +664,10 @@ public final class SimRun {
         + topology
         + " scenario="
         + scenario
+        + " traceSampleRate="
+        + traceSampleRate
+        + " lateCompletionChance="
+        + lateCompletionChance
         + " digest="
         + Long.toHexString(sim.digest().value());
   }

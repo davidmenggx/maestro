@@ -14,12 +14,15 @@ import io.github.davidmenggx.maestro.controller.world.Cells;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.ProfileTable;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
+import io.github.davidmenggx.maestro.controller.world.WorldInput;
 import io.github.davidmenggx.maestro.obs.OtelMetrics;
+import io.github.davidmenggx.maestro.obs.OtelTracing;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import net.minecraft.core.BlockPos;
@@ -76,6 +79,9 @@ public final class Fleet implements AutoCloseable {
   /** {@link Controller#regionsVersion} when the regions were last logged. */
   private int loggedRegions = -1;
 
+  /** Also sees every event the game sends the controller, or null. */
+  private WorldInput watcher;
+
   private Fleet(
       ServerLevel level,
       RegionLayout layout,
@@ -131,7 +137,13 @@ public final class Fleet implements AutoCloseable {
     PoolOffload offload = new PoolOffload(OFFLOAD_THREADS);
     ControllerEnv env =
         new ControllerEnv(
-            clock, SeededRng.of(entropy.nextLong()), offload, transport, metrics, run);
+            clock,
+            SeededRng.of(entropy.nextLong()),
+            offload,
+            transport,
+            metrics,
+            new OtelTracing(config.subMode().name().toLowerCase(Locale.ROOT)),
+            run);
     ProfileTable profiles = new ProfileTable();
     PathOffload paths =
         new PathOffload(overworld, layout, clock, metrics, profiles, config.offload());
@@ -146,14 +158,14 @@ public final class Fleet implements AutoCloseable {
                 config.spares(),
                 config.nodeCapacity(),
                 config.subMode() == MaestroConfig.SubMode.STREAM ? Dispatch.STREAM : Dispatch.BATCH,
-                Placement.Policy.DEFAULT));
-    paths.bind(controller);
-    HeldPaths.clock(clock);
-    Searches.intercept(paths);
-
+                Placement.Policy.DEFAULT,
+                config.traceSampleRate()));
     active =
         new Fleet(
             overworld, layout, config.nodes(), fleet, clock, transport, offload, paths, controller);
+    paths.bind(active::accept);
+    HeldPaths.clock(clock);
+    Searches.intercept(paths);
     active.logRegions();
     LOG.info(
         "Maestro: offloading to {} nodes, offload={}, subMode={}, run {}",
@@ -170,7 +182,7 @@ public final class Fleet implements AutoCloseable {
    */
   public void tickStarted() {
     handOver();
-    controller.accept(new WorldEvent.TickBegan(clock.tick()));
+    accept(new WorldEvent.TickBegan(clock.tick()));
     if (controller.regionsVersion() != loggedRegions) {
       logRegions();
     }
@@ -185,13 +197,13 @@ public final class Fleet implements AutoCloseable {
     for (ServerPlayer player : level.players()) {
       if (!player.isSpectator()) {
         seen.add(player.getId());
-        controller.accept(
+        accept(
             new WorldEvent.PlayerMoved(clock.tick(), player.getId(), pos(player.blockPosition())));
       }
     }
     for (int gone : players) {
       if (!seen.contains(gone)) {
-        controller.accept(new WorldEvent.PlayerLeft(clock.tick(), gone));
+        accept(new WorldEvent.PlayerLeft(clock.tick(), gone));
       }
     }
     players = seen;
@@ -227,7 +239,7 @@ public final class Fleet implements AutoCloseable {
   public void tickEnding() {
     handOver();
     paths.tickEnding();
-    controller.accept(new WorldEvent.TickEnded(clock.tick()));
+    accept(new WorldEvent.TickEnded(clock.tick()));
     logChangedStates();
     if (clock.tick() % SELF_CHECK_TICKS == 0) {
       selfCheck();
@@ -267,22 +279,19 @@ public final class Fleet implements AutoCloseable {
 
   public void chunkLoaded(ServerLevel from, LevelChunk chunk) {
     if (from == level) {
-      controller.accept(
-          new WorldEvent.ChunkLoaded(clock.tick(), chunk.getPos().x(), chunk.getPos().z()));
+      accept(new WorldEvent.ChunkLoaded(clock.tick(), chunk.getPos().x(), chunk.getPos().z()));
     }
   }
 
   public void chunkUnloaded(ServerLevel from, LevelChunk chunk) {
     if (from == level) {
-      controller.accept(
-          new WorldEvent.ChunkUnloaded(clock.tick(), chunk.getPos().x(), chunk.getPos().z()));
+      accept(new WorldEvent.ChunkUnloaded(clock.tick(), chunk.getPos().x(), chunk.getPos().z()));
     }
   }
 
   public void entityLoaded(Entity entity, ServerLevel from) {
     if (from == level && entity instanceof Mob) {
-      controller.accept(
-          new WorldEvent.MobSpawned(clock.tick(), entity.getId(), pos(entity.blockPosition())));
+      accept(new WorldEvent.MobSpawned(clock.tick(), entity.getId(), pos(entity.blockPosition())));
     }
   }
 
@@ -290,7 +299,7 @@ public final class Fleet implements AutoCloseable {
   public void entityUnloaded(Entity entity, ServerLevel from) {
     if (from == level && entity instanceof Mob) {
       paths.mobRemoved(entity.getId());
-      controller.accept(new WorldEvent.MobRemoved(clock.tick(), entity.getId()));
+      accept(new WorldEvent.MobRemoved(clock.tick(), entity.getId()));
     }
   }
 
@@ -313,10 +322,22 @@ public final class Fleet implements AutoCloseable {
   public void blockChanged(LevelChunk chunk, BlockPos pos, int before) {
     int after = cell(chunk, pos);
     if (after != before) {
-      controller.accept(
+      accept(
           new WorldEvent.BlockChanged(
               clock.tick(), pos(pos), Cells.typeOf(after), Cells.floorOf(after)));
     }
+  }
+
+  /** Hands {@code next} every event the game sends the controller from now on. Null stops it. */
+  void watch(WorldInput next) {
+    watcher = next;
+  }
+
+  private void accept(WorldEvent event) {
+    if (watcher != null) {
+      watcher.accept(event);
+    }
+    controller.accept(event);
   }
 
   /** What became of the offloaded requests so far. */
