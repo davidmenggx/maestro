@@ -44,8 +44,6 @@ OpenTelemetry used throughout. Trace ids derive from the run and request ids, so
 CONVENTIONS
 Add comments when needed, but not excessively. Keep comments very concise, and wrap identifiers and variable names in backticks. Do not place comments describing a file's functionality at the top of the file. Do not make obvious comments. Comments on interfaces/functions/classes should not overly reference the implementation. Never use emojis or other unusual text symbols. Keep the comments clearly related to code and the system itself, i.e. do not overly reference prompt specific details/wording or one-off user requests or arbitrary project "milestones"/"phases". Only update the `README.md` when specifically prompted, and never bring overly session-specific details into the `README.md`. If in doubt, follow the existing codebase convention.
 
-After each long task completion, produce a `WHAT_CHANGED_X.md` file in the `ai-changelog/` directory, where X is a counter that is incremented from the last file in the folder (only do this if the change is actually major like an updated schema or new functionality, not just a small bugfix or documentation update). This file should include a high level paragraph summary of what changed in the task completion. If there were any critical design decisions made without my explicit instruction, always mention them and explain why the decision was made, and the alternatives. Do not amend previous changelog entries, create a new entry to overwrite. This must be written in concise, plain, simplified technical English.
-
 Follow C++20 best practices and LLVM code style.
 
 When implementing features, prefer a minimalistic implementation, but always ask clarifying questions.
