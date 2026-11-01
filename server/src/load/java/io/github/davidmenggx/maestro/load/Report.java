@@ -1,10 +1,12 @@
 package io.github.davidmenggx.maestro.load;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import io.github.davidmenggx.maestro.bridge.OffloadStats;
 import io.github.davidmenggx.maestro.config.MaestroConfig;
+import java.io.Writer;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
@@ -22,12 +24,15 @@ final class Report {
 
   private static final Gson GSON = new Gson();
 
+  /** Keeps empty values as null, so every field is in the file. */
+  private static final Gson FILE = new GsonBuilder().setPrettyPrinting().serializeNulls().create();
+
   private final String name;
   private final Scenario scenario;
   private final String started;
   private final String version;
   private final MaestroConfig config;
-  private final boolean offloading;
+  private final long run;
   private final int players;
   private final int spawned;
   private final int alive;
@@ -38,7 +43,8 @@ final class Report {
   /**
    * A run of scenario {@code name} that began measuring at {@code started} (ISO-8601) and measured
    * the ticks taking {@code tickNanos} over {@code wallNanos}, with {@code stats} the requests
-   * offloaded meanwhile. {@code offloading} says whether a fleet was active.
+   * offloaded meanwhile. {@code run} is the active fleet's run, which names its telemetry, or 0 if
+   * none was active.
    */
   Report(
       String name,
@@ -46,7 +52,7 @@ final class Report {
       String started,
       String version,
       MaestroConfig config,
-      boolean offloading,
+      long run,
       int players,
       int spawned,
       int alive,
@@ -58,7 +64,7 @@ final class Report {
     this.started = started;
     this.version = version;
     this.config = config;
-    this.offloading = offloading;
+    this.run = run;
     this.players = players;
     this.spawned = spawned;
     this.alive = alive;
@@ -69,6 +75,11 @@ final class Report {
 
   int measuredTicks() {
     return tickNanos.length;
+  }
+
+  /** Writes {@link #toJson} to {@code writer}. */
+  void write(Writer writer) {
+    FILE.toJson(toJson(), writer);
   }
 
   JsonObject toJson() {
@@ -93,7 +104,8 @@ final class Report {
   private JsonObject maestro() {
     JsonObject maestro = new JsonObject();
     maestro.addProperty("version", version);
-    maestro.addProperty("offloading", offloading);
+    maestro.addProperty("offloading", run != 0);
+    maestro.addProperty("run", run == 0 ? null : Long.toHexString(run));
     maestro.addProperty("offload", config.offload().name().toLowerCase(Locale.ROOT));
     maestro.addProperty("subMode", config.subMode().name().toLowerCase(Locale.ROOT));
     maestro.addProperty("nodes", config.nodes().size());

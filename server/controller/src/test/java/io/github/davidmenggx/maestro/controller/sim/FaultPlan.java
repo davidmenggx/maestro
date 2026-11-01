@@ -78,6 +78,16 @@ public record FaultPlan(
 
   static final double MAX_SAMPLED_RATE = 0.1;
 
+  /**
+   * Share of faulty plans whose encodes fail so often that some fail every attempt and are given
+   * up. Each failure costs a retry, so few plans are.
+   */
+  static final double FLAKY_ENCODE_CHANCE = 0.05;
+
+  static final double MIN_FLAKY_ENCODE_RATE = 0.4;
+
+  static final double MAX_FLAKY_ENCODE_RATE = 0.6;
+
   /** Share of sampled plans that cannot delay or lose a request, so the latency SLO applies. */
   static final double CLEAN_CHANCE = 0.4;
 
@@ -143,7 +153,8 @@ public record FaultPlan(
    * unless the node is lost for good. A share {@link #LONG_FAULT_CHANCE} of the silent faults last
    * up to {@link #MAX_LONG_FAULT_SPAN_TICKS}. One plan in {@link #CLEAN_CHANCE} has only latency
    * and duplication, and a share {@link #EDGE_CHANCE} of those sits at the edge for a fleet whose
-   * slowest request costs {@code maxCostSteps}. A share {@link #STALL_CHANCE} stall the server.
+   * slowest request costs {@code maxCostSteps}. A share {@link #STALL_CHANCE} stall the server, and
+   * a share {@link #FLAKY_ENCODE_CHANCE} of the others fail encodes often.
    */
   public static FaultPlan sample(Rng rng, int nodeCount, long activeTicks, int maxCostSteps) {
     int minLatency = 1 + rng.nextInt(MAX_MIN_LATENCY_STEPS);
@@ -164,14 +175,17 @@ public record FaultPlan(
       }
       return new FaultPlan(minLatency, maxLatency, 0.0, duplicateRate, 0.0, stalls);
     }
+    double dropRate = rng.nextDouble() * MAX_SAMPLED_RATE;
+    double encodeFailureRate = rng.nextDouble() * MAX_SAMPLED_RATE;
+    // A stream of its own, so whether a plan is flaky does not shift its other draws.
+    Rng flaky = rng.derive("flaky-encodes");
+    if (flaky.nextDouble() < FLAKY_ENCODE_CHANCE) {
+      encodeFailureRate =
+          MIN_FLAKY_ENCODE_RATE
+              + flaky.nextDouble() * (MAX_FLAKY_ENCODE_RATE - MIN_FLAKY_ENCODE_RATE);
+    }
     FaultPlan plan =
-        new FaultPlan(
-            minLatency,
-            maxLatency,
-            rng.nextDouble() * MAX_SAMPLED_RATE,
-            duplicateRate,
-            rng.nextDouble() * MAX_SAMPLED_RATE,
-            stalls);
+        new FaultPlan(minLatency, maxLatency, dropRate, duplicateRate, encodeFailureRate, stalls);
     if (nodeCount < 1 || activeTicks <= MAX_FAULT_SPAN_TICKS) {
       return plan;
     }

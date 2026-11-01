@@ -14,11 +14,14 @@ import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionLayout;
 import io.github.davidmenggx.maestro.controller.region.RegionMap;
 import io.github.davidmenggx.maestro.controller.region.Regions;
+import io.github.davidmenggx.maestro.controller.sim.SimEvents;
 import io.github.davidmenggx.maestro.controller.sim.SimMetrics;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
@@ -31,8 +34,10 @@ class PlacementRulesTest {
   private static final int HOT = 2 * Placement.WINDOW_TICKS;
   private static final int COLD = 3 * Placement.WINDOW_TICKS;
   private static final int CAPACITY = 4;
+  private static final long RUN = 1;
 
   private final SimMetrics metrics = new SimMetrics();
+  private final SimEvents events = new SimEvents();
   private final List<String> changes = new ArrayList<>();
   private List<NodeId> fleet;
   private RegionMap regions;
@@ -62,7 +67,7 @@ class PlacementRulesTest {
             new Placement.Policy(GRACE, HOT, COLD),
             capacity,
             new Recorder(),
-            metrics);
+            env());
   }
 
   @Test
@@ -114,7 +119,7 @@ class PlacementRulesTest {
     links.greeted(spare, 0);
     run(1);
     assertEquals(List.of(spare), regions.holders(1));
-    assertEquals(1, metrics.total("region.reassigned"));
+    assertEquals(1, events.named("holder.added", "handoff").size());
   }
 
   @Test
@@ -177,7 +182,7 @@ class PlacementRulesTest {
         new Region(
             3, whole.minX() + RegionLayout.CELL, whole.minZ(), RegionLayout.CELL, whole.sizeZ()),
         regions.region(3));
-    assertEquals(1, metrics.total("region.split"));
+    assertEquals(1, events.named("region.removed", "split").size());
   }
 
   @Test
@@ -220,7 +225,10 @@ class PlacementRulesTest {
 
     assertEquals(List.of("held 1 node-1"), changes);
     assertEquals(List.of(NodeId.of(0), NodeId.of(1)), regions.holders(1));
-    assertEquals(1, metrics.counter("region.replica.added", "node", "node-1", "cells", "4"));
+    List<SimEvents.Event> replicas = events.named("holder.added", "replica");
+    assertEquals(1, replicas.size());
+    assertEquals("node-1", replicas.get(0).get("node"));
+    assertEquals(4, events.cells(replicas.get(0)));
   }
 
   @Test
@@ -255,7 +263,7 @@ class PlacementRulesTest {
     shedEveryWindow(region, 1);
     assertEquals(List.of("held 1 node-1"), changes);
     assertEquals(List.of(NodeId.of(0), NodeId.of(1)), regions.holders(1));
-    assertEquals(1, metrics.total("region.replica.added"));
+    assertEquals(1, events.named("holder.added", "replica").size());
   }
 
   @Test
@@ -289,7 +297,7 @@ class PlacementRulesTest {
     assertEquals(List.of(NodeId.of(0), NodeId.of(1)), regions.holders(1));
     sendEveryWindow(region, lowLoad, COLD / Placement.WINDOW_TICKS);
     assertEquals(List.of(NodeId.of(0)), regions.holders(1));
-    assertEquals(2, metrics.total("region.replica.returned"));
+    assertEquals(2, events.named("holder.removed", "return").size());
   }
 
   @Test
@@ -309,6 +317,33 @@ class PlacementRulesTest {
   }
 
   @Test
+  void aHolderReturnedWhileDownIsAPlainSpareOnceBack() {
+    start(1, 2, 1);
+    NodeId first = NodeId.of(0);
+    NodeId replica = NodeId.of(1);
+    Region region = regions.region(1);
+    shedEveryWindow(region, HOT / Placement.WINDOW_TICKS);
+    links.disconnected(first);
+    sendEveryWindow(region, 0, COLD / Placement.WINDOW_TICKS);
+    assertEquals(List.of(replica), regions.holders(1));
+    changes.clear();
+
+    // Its time down ended with its region, so its grace running out moves nothing.
+    run(2 * GRACE);
+    assertEquals(List.of(), changes);
+
+    // Back, it takes the region of the next holder down past its grace.
+    links.greeted(first, 0);
+    run(1);
+    links.disconnected(replica);
+    run(GRACE);
+    assertEquals(List.of(), changes);
+    run(1);
+    assertEquals(List.of("released 1 node-1", "held 1 node-0"), changes);
+    assertEquals(List.of(), topology());
+  }
+
+  @Test
   void aHotRegionLeavesASpareForEachHolderThatIsDown() {
     start(2, 3, 1);
     Region hot = regions.region(2);
@@ -322,7 +357,7 @@ class PlacementRulesTest {
 
     run(GRACE);
     assertEquals(List.of("released 1 node-0", "held 1 node-2"), changes);
-    assertEquals(0, metrics.total("region.split"));
+    assertEquals(List.of(), events.named("region.removed", "split"));
   }
 
   @Test
@@ -340,7 +375,7 @@ class PlacementRulesTest {
 
     assertEquals(List.of("released 1 node-4", "released 2 node-1", "held 2 node-4"), changes);
     assertEquals(List.of(NodeId.of(0)), regions.holders(1));
-    assertEquals(1, metrics.total("region.replica.reclaimed"));
+    assertEquals(1, events.named("holder.added", "reclaim").size());
   }
 
   @Test
@@ -397,6 +432,131 @@ class PlacementRulesTest {
   }
 
   @Test
+  void theStartingLayoutIsReportedAtOnceAndTheNodesUpAtTheFirstEvaluation() {
+    start(2, 2, 1);
+    assertEquals(
+        List.of(
+            "0 region.added " + bounds(regions.region(1)) + " reason=initial",
+            "0 holder.added region=1 node=node-0 reason=initial"),
+        reported(-1));
+
+    run(3);
+    // Up from the start, so the last check each failed is the link a new controller had not seen.
+    assertEquals(
+        List.of("1 node.up node=node-0 reason=linked", "1 node.up node=node-1 reason=linked"),
+        reported(0));
+    assertEquals(1, metrics.gauge("region.holder", "run", "1", "region", "1", "node", "node-0"));
+    assertEquals(1, metrics.gauge("node.up", "node", "node-1"));
+    assertEquals(List.of(), topology());
+  }
+
+  @Test
+  void aHandoffIsReportedAfterTheHolderWentDown() {
+    start(1, 2, 1);
+    run(1);
+    links.disconnected(NodeId.of(0));
+    run(GRACE + 1);
+
+    long moved = 2 + GRACE;
+    assertEquals(
+        List.of(
+            "2 node.down node=node-0 reason=not_linked",
+            moved + " holder.removed region=1 node=node-0 reason=handoff",
+            moved + " holder.added region=1 node=node-1 reason=handoff"),
+        reported(1));
+    assertEquals(0, metrics.gauge("node.up", "node", "node-0"));
+    assertEquals(0, metrics.gauge("region.holder", "run", "1", "region", "1", "node", "node-0"));
+    assertEquals(1, metrics.gauge("region.holder", "run", "1", "region", "1", "node", "node-1"));
+    assertEquals(List.of(), topology());
+  }
+
+  @Test
+  void aCutIsReportedAsTheRegionReplacedByItsSides() {
+    start(2, 2, 1);
+    Region whole = regions.region(1);
+    shedEveryWindow(whole, HOT / Placement.WINDOW_TICKS);
+
+    // The cut comes as the last window of the hot time closes.
+    String at = HOT + " ";
+    assertEquals(
+        List.of(
+            at + "holder.removed region=1 node=node-0 reason=split",
+            at + "region.removed " + bounds(whole) + " reason=split",
+            at + "region.added " + bounds(regions.region(2)) + " reason=split",
+            at + "region.added " + bounds(regions.region(3)) + " reason=split",
+            at + "holder.added region=2 node=node-0 reason=split",
+            at + "holder.added region=3 node=node-1 reason=split"),
+        reported(1));
+    assertEquals(0, metrics.gauge("region.holder", "run", "1", "region", "1", "node", "node-0"));
+    assertEquals(List.of(), topology());
+  }
+
+  @Test
+  void eachHolderChangeIsReportedWithTheReasonForIt() {
+    start(2, 5, 1);
+    shedEveryWindow(regions.region(1), HOT / Placement.WINDOW_TICKS);
+    assertEquals(List.of("holder.added 1 node-4 replica"), holderChanges());
+
+    // No spare is left when the holder of region 2 dies, so region 1's replica takes it.
+    links.disconnected(NodeId.of(1));
+    run(GRACE + 1);
+    assertEquals(
+        List.of(
+            "holder.added 1 node-4 replica",
+            "holder.removed 1 node-4 reclaim",
+            "holder.removed 2 node-1 reclaim",
+            "holder.added 2 node-4 reclaim"),
+        holderChanges());
+    assertEquals(List.of(), topology());
+  }
+
+  @Test
+  void aReplicaReturningIsReportedWithItsReason() {
+    start(1, 2, 1);
+    Region region = regions.region(1);
+    shedEveryWindow(region, HOT / Placement.WINDOW_TICKS);
+    sendEveryWindow(region, 0, COLD / Placement.WINDOW_TICKS);
+
+    assertEquals(
+        List.of("holder.added 1 node-1 replica", "holder.removed 1 node-1 return"),
+        holderChanges());
+    assertEquals(List.of(), topology());
+  }
+
+  @Test
+  void aNodeGoesDownForTheFirstCheckItFailsAndComesUpForTheLastOne() {
+    start(1, 2, 1);
+    NodeId spare = NodeId.of(1);
+    run(1);
+
+    // Its link drops, and the next one has yet to show its request path works.
+    links.disconnected(spare);
+    health.disconnected(spare);
+    run(1);
+    links.greeted(spare, 0);
+    run(1);
+    health.answered(spare, tick);
+    run(1);
+
+    // Its request path goes quiet, which also ends its verification, and an answer brings it back.
+    health.missed(spare, tick);
+    health.missed(spare, tick);
+    health.evaluate(tick + NodeHealth.QUIET_TICKS, 0);
+    run(1);
+    health.answered(spare, tick);
+    run(1);
+
+    assertEquals(
+        List.of(
+            "2 node.down node=node-1 reason=not_linked",
+            "4 node.up node=node-1 reason=verified",
+            "5 node.down node=node-1 reason=not_in_service",
+            "6 node.up node=node-1 reason=in_service"),
+        reported(1));
+    assertEquals(List.of(), topology());
+  }
+
+  @Test
   void aPolicyIsWholeWindows() {
     assertThrows(IllegalArgumentException.class, () -> new Placement.Policy(0, HOT, COLD));
     assertThrows(IllegalArgumentException.class, () -> new Placement.Policy(GRACE, 30, COLD));
@@ -438,6 +598,64 @@ class PlacementRulesTest {
   private void searchAt(NodeId node, int perTick) {
     long searches = Capacity.MIN_SEARCHES;
     capacity.heartbeat(node, searches, searches * Capacity.TICK_MICROS / perTick, 1);
+  }
+
+  /** The run's events, replayed, against the regions, the nodes up and the gauges now. */
+  private List<String> topology() {
+    Set<NodeId> up = new LinkedHashSet<>();
+    for (NodeId node : fleet) {
+      if (placement.up(node)) {
+        up.add(node);
+      }
+    }
+    return events.checkTopology(RUN, regions, fleet, up, metrics);
+  }
+
+  /** The run's events after {@code tick}, each as its tick, name and remaining attributes. */
+  private List<String> reported(long tick) {
+    List<String> lines = new ArrayList<>();
+    for (SimEvents.Event event : events.of(RUN)) {
+      if (Long.parseLong(event.get("tick")) <= tick) {
+        continue;
+      }
+      StringBuilder line = new StringBuilder(event.get("tick")).append(' ').append(event.name());
+      event
+          .attributes()
+          .forEach(
+              (key, value) -> {
+                if (!key.equals("run") && !key.equals("tick")) {
+                  line.append(' ').append(key).append('=').append(value);
+                }
+              });
+      lines.add(line.toString());
+    }
+    return lines;
+  }
+
+  /** The holder changes reported after the starting layout, as name, region, node and reason. */
+  private List<String> holderChanges() {
+    List<String> lines = new ArrayList<>();
+    for (SimEvents.Event event : events.of(RUN)) {
+      if (event.name().startsWith("holder.") && !event.get("reason").equals("initial")) {
+        lines.add(
+            String.join(
+                " ", event.name(), event.get("region"), event.get("node"), event.get("reason")));
+      }
+    }
+    return lines;
+  }
+
+  private static String bounds(Region region) {
+    return "region="
+        + region.id()
+        + " min_x="
+        + region.minX()
+        + " min_z="
+        + region.minZ()
+        + " size_x="
+        + region.sizeX()
+        + " size_z="
+        + region.sizeZ();
   }
 
   /** Evaluates the next {@code ticks} ticks. */
@@ -501,6 +719,7 @@ class PlacementRulesTest {
           public void listen(Listener listener) {}
         };
     Tracing tracing = trace -> {};
-    return new ControllerEnv(clock, SeededRng.of(1), offload, transport, metrics, tracing, 1);
+    return new ControllerEnv(
+        clock, SeededRng.of(1), offload, transport, metrics, tracing, events, RUN);
   }
 }

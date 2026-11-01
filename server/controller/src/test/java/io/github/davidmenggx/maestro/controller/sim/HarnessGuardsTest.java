@@ -53,6 +53,9 @@ class HarnessGuardsTest {
 
   private static final int DRAWS = 300;
 
+  /** Draws of the cheap samplers, enough to reach the ends of settings few runs have. */
+  private static final int SAMPLER_DRAWS = 2000;
+
   /** Any value works for a node created outside a controller. */
   private static final long RUN = 7;
 
@@ -116,7 +119,7 @@ class HarnessGuardsTest {
     Map<Chance, Span> chances = new EnumMap<>(Chance.class);
     int keptUp = 0;
 
-    for (int seed = 0; seed < DRAWS; seed++) {
+    for (int seed = 0; seed < SAMPLER_DRAWS; seed++) {
       Scenario scenario = Scenario.sample(SeededRng.of(seed).derive("fuzz"));
       keptUp += scenario.chances().get(Chance.SLOW_TICK) == 0 ? 1 : 0;
       for (Count setting : Count.values()) {
@@ -135,8 +138,8 @@ class HarnessGuardsTest {
       chances.get(setting).assertCovers(setting, 0, setting.ceiling());
     }
     // The latency SLO applies only to a server that keeps up, so most draws must, and some not.
-    assertTrue(keptUp > DRAWS / 2, keptUp + " of " + DRAWS + " servers kept up");
-    assertTrue(keptUp < DRAWS, "no sampled server fell behind");
+    assertTrue(keptUp > SAMPLER_DRAWS / 2, keptUp + " of " + SAMPLER_DRAWS + " servers kept up");
+    assertTrue(keptUp < SAMPLER_DRAWS, "no sampled server fell behind");
   }
 
   @Test
@@ -192,7 +195,7 @@ class HarnessGuardsTest {
     boolean sawEdge = false;
     long longestSpan = 0;
 
-    for (int seed = 0; seed < DRAWS; seed++) {
+    for (int seed = 0; seed < SAMPLER_DRAWS; seed++) {
       FaultPlan plan = FaultPlan.sample(SeededRng.of(seed).derive("fuzz"), 4, active, COST);
       faultCount.see(plan.faults().size());
       minLatency.see(plan.minLatencySteps());
@@ -251,7 +254,8 @@ class HarnessGuardsTest {
         "max latency", 1, FaultPlan.MAX_MIN_LATENCY_STEPS + FaultPlan.MAX_LATENCY_SPAN_STEPS);
     // Clean plans at the edge make a round trip and a search take nearly a tick.
     assertTrue(sawEdge, "no clean plan put its latency at the edge");
-    failureRate.assertCovers("offload failure rate", 0, FaultPlan.MAX_SAMPLED_RATE);
+    // Some plans fail encodes often enough that one fails every attempt.
+    failureRate.assertCovers("offload failure rate", 0, FaultPlan.MAX_FLAKY_ENCODE_RATE);
     assertTrue(sawPermanentLoss, "no node was ever lost for the rest of the run");
     assertEquals(
         List.of(), FaultPlan.sample(SeededRng.of(1).derive("fuzz"), 0, active, COST).faults());
@@ -545,6 +549,34 @@ class HarnessGuardsTest {
     servable.pathDropped(3, DropReason.NO_NODE);
     assertEquals(List.of(), servable.ledgerViolations());
     assertEquals(2, servable.sloMisses());
+  }
+
+  @Test
+  void aChunkThatStaysAfterItWasAboutToLeaveCountsFromWhenItCouldBeReadAgain() {
+    SimWorld world = new SimWorld(Topology.DEFAULT, 1, SeededRng.of(1));
+    int chunkX = Chunks.of(ORIGIN.x());
+    int chunkZ = Chunks.of(ORIGIN.z());
+    world.loadChunk(chunkX, chunkZ, 0);
+    world.beginLeaving(chunkX, chunkZ);
+    RecordingOutput out = recorder(world);
+
+    // Not servable while it cannot be read, nor just after, though it loaded long before.
+    out.issued(request(1, 100, ORIGIN));
+    out.pathDropped(1, DropReason.UNAVAILABLE);
+    world.stayLoaded(chunkX, chunkZ, 100);
+    assertEquals(100, world.readableSince(chunkX, chunkZ));
+    out.issued(request(2, 101, ORIGIN));
+    out.pathDropped(2, DropReason.UNAVAILABLE);
+    // Readable long enough to be on its node.
+    out.issued(request(3, 200, ORIGIN));
+    out.pathDropped(3, DropReason.UNAVAILABLE);
+
+    assertEquals(List.of(), out.ledgerViolations());
+    assertEquals(1, out.sloMisses());
+    // A chunk that left is not made readable by a late stay.
+    world.unloadChunk(chunkX, chunkZ);
+    world.stayLoaded(chunkX, chunkZ, 300);
+    assertEquals(-1, world.readableSince(chunkX, chunkZ));
   }
 
   @Test

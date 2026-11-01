@@ -87,12 +87,17 @@ public final class NodeLinks {
     link.greeted = false;
     link.attempt++;
     link.registeredClasses.clear();
+    env.metrics().count("node.link", 1, "node", node.toString(), "event", "connected");
     send(node, Channel.WORLD, Frames.joinWorld(run, link.attempt));
     send(node, Channel.CONTROL, Frames.joinControl(run, link.attempt));
   }
 
+  /** The link is gone, or an attempt to open one failed. */
   void disconnected(NodeId node) {
     Link link = link(node);
+    env.metrics()
+        .count(
+            "node.link", 1, "node", node.toString(), "event", link.connected ? "lost" : "failed");
     link.connecting = false;
     link.connected = false;
     link.greeted = false;

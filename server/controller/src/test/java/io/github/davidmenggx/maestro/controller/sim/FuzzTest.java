@@ -6,8 +6,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.github.davidmenggx.maestro.controller.core.Dispatch;
 import io.github.davidmenggx.maestro.controller.env.RequestTrace;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Count;
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.WorldOutput.DropReason;
 import java.util.EnumSet;
 import java.util.LinkedHashSet;
@@ -197,6 +199,9 @@ class FuzzTest {
     long partlyTraced = 0;
     long tracedResends = 0;
     long tracedBehind = 0;
+    long wideLoads = 0;
+    long streamedGiveUps = 0;
+    long unreadableReads = 0;
 
     // Uses its own size: a few seeds miss outcomes, and a very large sweep only repeats them.
     int seeds = Math.clamp(SimRun.runCount(), MIN_COVERAGE_SEEDS, MAX_COVERAGE_SEEDS);
@@ -228,15 +233,26 @@ class FuzzTest {
       gridWidths.add(run.topology.cells());
       multiCellStarts +=
           run.topology.regionCount() < run.topology.cells() * run.topology.cells() ? 1 : 0;
-      splits += run.sim.metrics().total("region.split");
-      replicasAdded += run.sim.metrics().total("region.replica.added");
-      replicasReturned += run.sim.metrics().total("region.replica.returned");
-      reassigned += run.sim.metrics().total("region.reassigned");
-      reclaimed += run.sim.metrics().total("region.replica.reclaimed");
+      SimEvents events = run.sim.events();
+      splits += events.named("region.removed", "split").size();
+      replicasAdded += events.named("holder.added", "replica").size();
+      replicasReturned += events.named("holder.removed", "return").size();
+      reassigned += events.named("holder.added", "handoff").size();
+      reclaimed += events.named("holder.added", "reclaim").size();
       keptHalves += run.sim.metrics().total("world.kept");
+      int smallestArea = Integer.MAX_VALUE;
+      for (Region region : run.regions().regions()) {
+        smallestArea =
+            Math.min(
+                smallestArea,
+                region.areaSizeX() / Chunks.SIZE * (region.areaSizeZ() / Chunks.SIZE));
+      }
+      wideLoads += run.world.mostLoaded() >= smallestArea ? 1 : 0;
+      unreadableReads += run.sim.metrics().total("world.chunks.unreadable");
       if (run.scenario.dispatch() == Dispatch.STREAM) {
         streamedRuns++;
         streamedAnswered += run.out.answered();
+        streamedGiveUps += run.sim.metrics().counter("offload.abandoned", "job", "request");
         lateSends += run.sim.metrics().total("offload.late");
       }
       List<RequestTrace> traces = run.sim.tracing().traces();
@@ -276,9 +292,9 @@ class FuzzTest {
       checksFailed += run.sim.metrics().total("node.check.failed");
       chunksSkipped += run.sim.metrics().total("world.chunks.skipped");
       sharedRequests += run.sim.metrics().total("path.shared");
-      multiCellReplicas +=
-          run.sim.metrics().total("region.replica.added")
-              - run.sim.metrics().total("region.replica.added", "cells", "1");
+      for (SimEvents.Event replica : events.named("holder.added", "replica")) {
+        multiCellReplicas += events.cells(replica) > 1 ? 1 : 0;
+      }
       heldWithoutShedding += run.heldWithoutShedding() && run.out.answered() > 0 ? 1 : 0;
       heldOverloaded += held && !run.fitsCapacity() && run.out.dropped(DropReason.SHED) > 0 ? 1 : 0;
       for (ModeledNode node : run.sim.nodes()) {
@@ -355,6 +371,9 @@ class FuzzTest {
     assertTrue(partlyTraced > 0, "no run traced only a share of its requests");
     assertTrue(tracedResends > 0, "no traced request was ever sent again");
     assertTrue(tracedBehind > 0, "no traced answer was ever turned down for its world sequence");
+    assertTrue(wideLoads > 0, "no run loaded as many chunks as a region's area holds");
+    assertTrue(streamedGiveUps > 0, "no streamed request's encode was ever given up");
+    assertTrue(unreadableReads > 0, "no chunk was ever found unreadable when read");
     System.out.println(
         "coverage: "
             + heldToTheSlo

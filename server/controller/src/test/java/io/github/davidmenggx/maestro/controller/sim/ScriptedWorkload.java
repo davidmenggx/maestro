@@ -1,5 +1,6 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
+import io.github.davidmenggx.maestro.controller.world.Chunks;
 import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldInput;
@@ -22,6 +23,13 @@ public final class ScriptedWorkload implements Workload {
 
   private final Map<Integer, Pos> players = new LinkedHashMap<>();
 
+  /**
+   * Chunks, as {@link Chunks#key}, that cannot be read from each tick, and those that can again.
+   */
+  private final Map<Long, List<Long>> unreadableFrom = new HashMap<>();
+
+  private final Map<Long, List<Long>> readableFrom = new HashMap<>();
+
   public ScriptedWorkload(SimWorld world, List<WorldEvent> events) {
     this.world = Objects.requireNonNull(world, "world");
     for (WorldEvent event : events) {
@@ -29,11 +37,28 @@ public final class ScriptedWorkload implements Workload {
     }
   }
 
+  /**
+   * The chunk, loaded by then, cannot be read from {@code from} until {@code until}, as one about
+   * to leave, and can be again then unless it left meanwhile. Nothing is reported for either.
+   */
+  public ScriptedWorkload unreadable(int chunkX, int chunkZ, long from, long until) {
+    long key = Chunks.key(chunkX, chunkZ);
+    unreadableFrom.computeIfAbsent(from, tick -> new ArrayList<>()).add(key);
+    readableFrom.computeIfAbsent(until, tick -> new ArrayList<>()).add(key);
+    return this;
+  }
+
   @Override
   public void tick(long tick, WorldInput input) {
     for (WorldEvent event : byTick.getOrDefault(tick, List.of())) {
       apply(event);
       input.accept(event);
+    }
+    for (long key : unreadableFrom.getOrDefault(tick, List.of())) {
+      world.beginLeaving((int) (key >> 32), (int) key);
+    }
+    for (long key : readableFrom.getOrDefault(tick, List.of())) {
+      world.stayLoaded((int) (key >> 32), (int) key, tick);
     }
   }
 

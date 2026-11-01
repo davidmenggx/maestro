@@ -70,6 +70,15 @@ public final class SimWorld implements WorldSource {
   /** Where each chunk index sits in {@link #loaded}, or -1. */
   private final int[] loadedAt;
 
+  /** Chunks still loaded but about to leave, which cannot be read. */
+  private final boolean[] leaving;
+
+  /**
+   * The tick each loaded chunk last became readable: when it loaded, or when it stayed after it was
+   * about to leave. {@link #NOT_LOADED} if it is not loaded.
+   */
+  private final long[] readableSince;
+
   /** Bumped whenever a chunk's cells change, so a digest of them can be kept until then. */
   private final int[] chunkVersions;
 
@@ -98,12 +107,15 @@ public final class SimWorld implements WorldSource {
     this.loadedSince = new long[chunks];
     this.loaded = new int[chunks];
     this.loadedAt = new int[chunks];
+    this.leaving = new boolean[chunks];
+    this.readableSince = new long[chunks];
     this.chunkVersions = new int[chunks];
     this.chunkHashes = new long[chunks];
     this.hashedVersions = new int[chunks];
     this.hashCells = new byte[Chunks.SIZE * Chunks.SIZE * topology.height()];
     this.hashFloors = new byte[hashCells.length];
     Arrays.fill(loadedSince, NOT_LOADED);
+    Arrays.fill(readableSince, NOT_LOADED);
     Arrays.fill(loadedAt, -1);
     Arrays.fill(hashedVersions, -1);
 
@@ -198,6 +210,7 @@ public final class SimWorld implements WorldSource {
       return;
     }
     loadedSince[index] = tick;
+    readableSince[index] = tick;
     chunkVersions[index]++;
     loaded[loadedCount] = index;
     loadedAt[index] = loadedCount++;
@@ -210,12 +223,46 @@ public final class SimWorld implements WorldSource {
       return;
     }
     loadedSince[index] = NOT_LOADED;
+    leaving[index] = false;
+    readableSince[index] = NOT_LOADED;
     chunkVersions[index]++;
     int at = loadedAt[index];
     int last = loaded[--loadedCount];
     loaded[at] = last;
     loadedAt[last] = at;
     loadedAt[index] = -1;
+  }
+
+  /** The loaded chunk is about to leave: it stays loaded, but cannot be read until it does. */
+  public void beginLeaving(int chunkX, int chunkZ) {
+    int index = chunkIndex(chunkX, chunkZ);
+    if (loadedSince[index] == NOT_LOADED) {
+      throw new IllegalStateException("chunk " + chunkX + "," + chunkZ + " is not loaded");
+    }
+    leaving[index] = true;
+  }
+
+  /** The leaving chunk stays after all, and can be read again from {@code tick}. */
+  public void stayLoaded(int chunkX, int chunkZ, long tick) {
+    int index = chunkIndex(chunkX, chunkZ);
+    if (leaving[index]) {
+      leaving[index] = false;
+      readableSince[index] = tick;
+    }
+  }
+
+  public boolean leaving(int chunkX, int chunkZ) {
+    return leaving[chunkIndex(chunkX, chunkZ)];
+  }
+
+  /** The tick the loaded chunk last became readable, or -1 if it is not loaded. */
+  public long readableSince(int chunkX, int chunkZ) {
+    return readableSince[chunkIndex(chunkX, chunkZ)];
+  }
+
+  @Override
+  public boolean readable(int chunkX, int chunkZ) {
+    return !leaving(chunkX, chunkZ);
   }
 
   public int loadedCount() {

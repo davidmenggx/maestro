@@ -14,6 +14,7 @@ public record ControllerEnv(
     Transport transport,
     Metrics metrics,
     Tracing tracing,
+    Events events,
     long run) {
 
   public ControllerEnv {
@@ -23,6 +24,7 @@ public record ControllerEnv(
     Objects.requireNonNull(transport, "transport");
     Objects.requireNonNull(metrics, "metrics");
     Objects.requireNonNull(tracing, "tracing");
+    Objects.requireNonNull(events, "events");
     if (run == 0) {
       throw new IllegalArgumentException("run 0 means no run");
     }

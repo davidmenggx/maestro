@@ -6,6 +6,7 @@ import io.github.davidmenggx.maestro.controller.env.Rng;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * The load a run puts on the fleet, and how much the world changes during it. See {@link FaultPlan}
@@ -32,6 +33,11 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     MOB_CLASSES(1, 4),
     BLOCK_CHANGES_PER_TICK(0, 6),
     PLAYERS(0, 3),
+    /**
+     * Chunks loaded around a player in every direction at the start. At the most, one player loads
+     * more chunks than a region's area holds, as on a server with players about.
+     */
+    VIEW_RADIUS(3, 12),
     /** How much of a tick the server works, as a percentage. It idles for the rest. */
     SERVER_BUSY_PERCENT(20, 100),
     /** Ticks a holder may be down before a spare takes its region. */
@@ -72,6 +78,11 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     REPEAT_REQUEST(0.1),
     /** A tick whose work runs past its time, so the server falls behind and catches up. */
     SLOW_TICK(0.2),
+    /**
+     * A chunk about to leave cannot be read for a few ticks before it is reported gone, or before
+     * it stays after all. Per chunk that leaves.
+     */
+    LEAVE_UNREADABLE(1.0),
     /** A request whose mob has a target, which sheds it last. */
     HUNTING(1.0);
 
@@ -117,6 +128,7 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
               Map.entry(Count.MOB_CLASSES, 2),
               Map.entry(Count.BLOCK_CHANGES_PER_TICK, 3),
               Map.entry(Count.PLAYERS, 1),
+              Map.entry(Count.VIEW_RADIUS, 3),
               Map.entry(Count.SERVER_BUSY_PERCENT, 50),
               Map.entry(Count.GRACE_TICKS, Placement.Policy.DEFAULT.graceTicks()),
               Map.entry(
@@ -135,6 +147,7 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
               Map.entry(Chance.STRAY_REQUEST, 0.0),
               Map.entry(Chance.REPEAT_REQUEST, 0.0),
               Map.entry(Chance.SLOW_TICK, 0.0),
+              Map.entry(Chance.LEAVE_UNREADABLE, 0.0),
               Map.entry(Chance.HUNTING, 0.5)));
 
   /** Far more demand than the fleet can serve, so pre-send rejection must limit the load. */
@@ -157,11 +170,31 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
    */
   static final double MODEST_ESTIMATE_SHARE = 0.3;
 
-  /** One draw from the full range of every setting. Few draws have slow ticks. */
+  /**
+   * Share of sampled runs whose players see past the floor of {@link Count#VIEW_RADIUS}. Such a run
+   * loads many more chunks, and costs as much more to run.
+   */
+  static final double WIDE_VIEW_SHARE = 0.1;
+
+  /** Share of sampled runs whose chunks may be unreadable before they leave. */
+  static final double SLOW_LEAVE_SHARE = 0.2;
+
+  /**
+   * Settings drawn from streams of their own, so they do not shift the other settings a seed draws.
+   * Few runs take them off their floor.
+   */
+  private static final Set<Enum<?>> SEPARATE = Set.of(Count.VIEW_RADIUS, Chance.LEAVE_UNREADABLE);
+
+  /**
+   * One draw from the full range of every setting. Few draws have slow ticks, wide views or chunks
+   * unreadable before they leave.
+   */
   public static Scenario sample(Rng rng) {
     Map<Count, Integer> counts = new EnumMap<>(Count.class);
     for (Count setting : Count.values()) {
-      counts.put(setting, setting.floor() + rng.nextInt(setting.ceiling() - setting.floor() + 1));
+      if (!SEPARATE.contains(setting)) {
+        counts.put(setting, setting.floor() + rng.nextInt(setting.ceiling() - setting.floor() + 1));
+      }
     }
     if (rng.nextDouble() < MODEST_ESTIMATE_SHARE) {
       int floor = Count.CAPACITY_ESTIMATE_PERCENT.floor();
@@ -172,11 +205,26 @@ public record Scenario(Map<Count, Integer> counts, Map<Chance, Double> chances) 
     }
     Map<Chance, Double> chances = new EnumMap<>(Chance.class);
     for (Chance setting : Chance.values()) {
-      chances.put(setting, rng.nextDouble() * setting.ceiling());
+      if (!SEPARATE.contains(setting)) {
+        chances.put(setting, rng.nextDouble() * setting.ceiling());
+      }
     }
     if (rng.nextDouble() >= SLOW_SERVER_SHARE) {
       chances.put(Chance.SLOW_TICK, 0.0);
     }
+    Rng views = rng.derive("view-radius");
+    Count view = Count.VIEW_RADIUS;
+    counts.put(
+        view,
+        views.nextDouble() < WIDE_VIEW_SHARE
+            ? view.floor() + views.nextInt(view.ceiling() - view.floor() + 1)
+            : view.floor());
+    Rng leaves = rng.derive("leave-unreadable");
+    chances.put(
+        Chance.LEAVE_UNREADABLE,
+        leaves.nextDouble() < SLOW_LEAVE_SHARE
+            ? leaves.nextDouble() * Chance.LEAVE_UNREADABLE.ceiling()
+            : 0.0);
     return new Scenario(counts, chances);
   }
 

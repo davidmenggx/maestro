@@ -86,6 +86,7 @@ if(MAESTRO_BUILD_TESTS)
     tests/test_path_types.cpp
     tests/test_request_queue.cpp
     tests/test_schema.cpp
+    tests/test_search_reach.cpp
     tests/test_server.cpp
     tests/test_vanilla_search.cpp
     tests/test_world.cpp

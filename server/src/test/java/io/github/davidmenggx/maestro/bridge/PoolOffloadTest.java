@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.env.Metrics;
 import io.github.davidmenggx.maestro.controller.env.Offload.Lane;
 import java.util.ArrayList;
 import java.util.List;
@@ -12,14 +13,57 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class PoolOffloadTest {
 
+  /** What the pool reported, read on the draining thread. */
+  private final List<String> recorded = new ArrayList<>();
+
+  private PoolOffload pool() {
+    return new PoolOffload(1, new Recorder(), System::nanoTime);
+  }
+
+  @Test
+  void eachJobThatRanRecordsItsTimeByLaneWhenDrained() throws InterruptedException {
+    AtomicLong nanos = new AtomicLong();
+    try (PoolOffload offload = new PoolOffload(1, new Recorder(), nanos::get)) {
+      AtomicInteger finished = new AtomicInteger();
+      offload.submit(
+          "request",
+          Lane.REQUESTS,
+          () -> nanos.addAndGet(2_500_000),
+          value -> finished.incrementAndGet(),
+          () -> {});
+      offload.<String>submit(
+          "world",
+          Lane.WORLD,
+          () -> {
+            nanos.addAndGet(40_000);
+            throw new IllegalStateException("expected");
+          },
+          value -> {},
+          finished::incrementAndGet);
+
+      for (int i = 0; i < 100 && finished.get() < 2; i++) {
+        offload.drain();
+        Thread.sleep(10);
+      }
+      assertEquals(2, finished.get());
+      assertEquals(
+          List.of(
+              "offload.job.micros=2500.0[lane, requests]", "offload.job.micros=40.0[lane, world]"),
+          recorded.stream().filter(entry -> entry.startsWith("offload.job.micros")).toList());
+      assertEquals("offload.threads:1.0", recorded.getFirst());
+      assertTrue(recorded.contains("offload.queued:0.0"), recorded.toString());
+    }
+  }
+
   @Test
   void completionsRunOnlyWhenDrained() throws InterruptedException {
-    try (PoolOffload offload = new PoolOffload(1)) {
+    try (PoolOffload offload = pool()) {
       CountDownLatch worked = new CountDownLatch(1);
       AtomicReference<String> published = new AtomicReference<>();
       AtomicBoolean failed = new AtomicBoolean();
@@ -49,7 +93,7 @@ class PoolOffloadTest {
 
   @Test
   void aFailedJobReportsItsFailureWhenDrainedAndPublishesNothing() throws InterruptedException {
-    try (PoolOffload offload = new PoolOffload(1)) {
+    try (PoolOffload offload = pool()) {
       CountDownLatch attempted = new CountDownLatch(1);
       AtomicReference<String> published = new AtomicReference<>();
       AtomicReference<Thread> failedOn = new AtomicReference<>();
@@ -79,7 +123,7 @@ class PoolOffloadTest {
 
   @Test
   void anErrorInAJobIsReportedAsAFailure() throws InterruptedException {
-    try (PoolOffload offload = new PoolOffload(1)) {
+    try (PoolOffload offload = pool()) {
       AtomicBoolean failed = new AtomicBoolean();
 
       offload.<String>submit(
@@ -101,7 +145,7 @@ class PoolOffloadTest {
 
   @Test
   void aCompletionThatThrowsDoesNotStopTheOthers() throws InterruptedException {
-    try (PoolOffload offload = new PoolOffload(1)) {
+    try (PoolOffload offload = pool()) {
       AtomicBoolean second = new AtomicBoolean();
 
       offload.submit(
@@ -124,7 +168,7 @@ class PoolOffloadTest {
 
   @Test
   void aWorkerTakesQueuedRequestJobsBeforeQueuedWorldJobs() throws InterruptedException {
-    try (PoolOffload offload = new PoolOffload(1)) {
+    try (PoolOffload offload = pool()) {
       CountDownLatch running = new CountDownLatch(1);
       CountDownLatch release = new CountDownLatch(1);
       List<String> ran = new ArrayList<>();
@@ -162,7 +206,7 @@ class PoolOffloadTest {
 
   @Test
   void aJobSubmittedAfterCloseFails() {
-    PoolOffload offload = new PoolOffload(1);
+    PoolOffload offload = pool();
     offload.close();
     AtomicBoolean completed = new AtomicBoolean();
     AtomicBoolean failed = new AtomicBoolean();
@@ -177,7 +221,7 @@ class PoolOffloadTest {
 
   @Test
   void aJobThatNeverStartedFailsWhenThePoolCloses() throws InterruptedException {
-    PoolOffload offload = new PoolOffload(1);
+    PoolOffload offload = pool();
     CountDownLatch running = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
     AtomicBoolean queuedCompleted = new AtomicBoolean();
@@ -216,7 +260,7 @@ class PoolOffloadTest {
 
   @Test
   void aRetryQueuedDuringADrainWaitsForTheNextOne() {
-    PoolOffload offload = new PoolOffload(1);
+    PoolOffload offload = pool();
     offload.close();
     AtomicInteger attempts = new AtomicInteger();
 
@@ -233,5 +277,23 @@ class PoolOffloadTest {
     assertEquals(1, attempts.get());
     offload.drain();
     assertEquals(2, attempts.get());
+  }
+
+  private final class Recorder implements Metrics {
+
+    @Override
+    public void count(String name, long delta, String... labels) {
+      recorded.add(name + "+" + delta + List.of(labels));
+    }
+
+    @Override
+    public void record(String name, double value, String... labels) {
+      recorded.add(name + "=" + value + List.of(labels));
+    }
+
+    @Override
+    public void gauge(String name, double value, String... labels) {
+      recorded.add(name + ":" + value);
+    }
   }
 }

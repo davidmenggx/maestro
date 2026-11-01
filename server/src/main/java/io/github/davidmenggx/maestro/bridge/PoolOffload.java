@@ -1,7 +1,9 @@
 package io.github.davidmenggx.maestro.bridge;
 
+import io.github.davidmenggx.maestro.controller.env.Metrics;
 import io.github.davidmenggx.maestro.controller.env.Offload;
 import java.util.Comparator;
+import java.util.Locale;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.PriorityBlockingQueue;
@@ -10,6 +12,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,6 +24,8 @@ import org.slf4j.LoggerFactory;
  * waits behind an unstarted world job.
  *
  * <p>Every submitted job queues exactly one of completion or failure, also after {@link #close}.
+ * Each job that ran records its time as {@code offload.job.micros} by lane when drained, and each
+ * drain reports the jobs still waiting as {@code offload.queued}.
  */
 public final class PoolOffload implements Offload, AutoCloseable {
 
@@ -58,16 +63,27 @@ public final class PoolOffload implements Offload, AutoCloseable {
 
     @Override
     public void run() {
+      long started = nanos.getAsLong();
       T result;
       try {
         result = work.get();
       } catch (Throwable e) {
         // An `Error` is reported too, or the caller would wait forever.
         LOG.error("Maestro offload job '{}' failed", name, e);
-        completions.add(failure);
+        long micros = (nanos.getAsLong() - started) / 1000;
+        completions.add(
+            () -> {
+              recordRun(lane, micros);
+              failure.run();
+            });
         return;
       }
-      completions.add(() -> completion.accept(result));
+      long micros = (nanos.getAsLong() - started) / 1000;
+      completions.add(
+          () -> {
+            recordRun(lane, micros);
+            completion.accept(result);
+          });
     }
 
     /** The job will not run. */
@@ -78,10 +94,18 @@ public final class PoolOffload implements Offload, AutoCloseable {
   }
 
   private final ThreadPoolExecutor workers;
+  private final Metrics metrics;
+  private final LongSupplier nanos;
   private final AtomicLong submitted = new AtomicLong();
   private final Queue<Runnable> completions = new ConcurrentLinkedQueue<>();
 
-  public PoolOffload(int threads) {
+  /**
+   * {@code metrics} is used only on the thread that makes the pool and drains it. {@code nanos} is
+   * a monotonic clock.
+   */
+  public PoolOffload(int threads, Metrics metrics, LongSupplier nanos) {
+    this.metrics = metrics;
+    this.nanos = nanos;
     this.workers =
         new ThreadPoolExecutor(
             threads,
@@ -96,6 +120,7 @@ public final class PoolOffload implements Offload, AutoCloseable {
             });
     // A job submitted while a worker has yet to start would run on it at once, skipping the order.
     workers.prestartAllCoreThreads();
+    metrics.gauge("offload.threads", threads);
   }
 
   @Override
@@ -115,6 +140,7 @@ public final class PoolOffload implements Offload, AutoCloseable {
    * and does not stop the others.
    */
   public void drain() {
+    metrics.gauge("offload.queued", workers.getQueue().size());
     // Only this thread removes entries, so at least this many are present.
     for (int pending = completions.size(); pending > 0; pending--) {
       try {
@@ -123,6 +149,10 @@ public final class PoolOffload implements Offload, AutoCloseable {
         LOG.error("Maestro offload completion failed", e);
       }
     }
+  }
+
+  private void recordRun(Lane lane, long micros) {
+    metrics.record("offload.job.micros", micros, "lane", lane.name().toLowerCase(Locale.ROOT));
   }
 
   /** Stops the workers. Jobs that had not started queue their failure. */

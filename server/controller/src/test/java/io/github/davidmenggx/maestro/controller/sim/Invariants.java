@@ -36,6 +36,9 @@ public final class Invariants {
     violations.addAll(run.retiredViolations());
     violations.addAll(run.controller.selfCheck());
 
+    // The topology events, replayed, give the regions, holders and nodes up the controller has.
+    violations.addAll(run.topologyViolations());
+
     // Each traced request matches what its mob was told.
     violations.addAll(
         run.sim.tracing().check(run.out, run.traceSampleRate == 1, run.tracesLostToRestart()));

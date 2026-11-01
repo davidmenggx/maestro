@@ -825,11 +825,14 @@ class PathOffloadTest {
     assertEquals(searches, metrics.counter("path.failover{outcome=FULL}"));
     assertEquals(1, metrics.counter("path.failover{outcome=CHEAP}"));
     assertEquals(1.0, metrics.gauges.get("failover.waiting"));
+    // Only full searches spend the budget, so only they are timed.
+    assertEquals(searches * SEARCH_NANOS / 1000, metrics.counter("failover.search.micros"));
 
     clock.tick++;
     offload.tickEnding();
     assertEquals(1, metrics.counter("path.failover{outcome=LATER}"));
     assertEquals(0.0, metrics.gauges.get("failover.waiting"));
+    assertEquals((searches + 1) * SEARCH_NANOS / 1000, metrics.counter("failover.search.micros"));
   }
 
   @Test

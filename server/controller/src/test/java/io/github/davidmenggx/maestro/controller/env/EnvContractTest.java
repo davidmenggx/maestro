@@ -75,27 +75,31 @@ class EnvContractTest {
   void anEnvironmentHasEverySeamAndARun() {
     Rng rng = SeededRng.of(1L);
     Tracing tracing = trace -> {};
-    new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, tracing, 1);
+    Events events = (name, attributes) -> {};
+    new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, tracing, events, 1);
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(null, rng, OFFLOAD, TRANSPORT, METRICS, tracing, 1));
+        () -> new ControllerEnv(null, rng, OFFLOAD, TRANSPORT, METRICS, tracing, events, 1));
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(CLOCK, null, OFFLOAD, TRANSPORT, METRICS, tracing, 1));
+        () -> new ControllerEnv(CLOCK, null, OFFLOAD, TRANSPORT, METRICS, tracing, events, 1));
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(CLOCK, rng, null, TRANSPORT, METRICS, tracing, 1));
+        () -> new ControllerEnv(CLOCK, rng, null, TRANSPORT, METRICS, tracing, events, 1));
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, null, METRICS, tracing, 1));
+        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, null, METRICS, tracing, events, 1));
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, null, tracing, 1));
+        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, null, tracing, events, 1));
     assertThrows(
         NullPointerException.class,
-        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, null, 1));
+        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, null, events, 1));
+    assertThrows(
+        NullPointerException.class,
+        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, tracing, null, 1));
     assertThrows(
         IllegalArgumentException.class,
-        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, tracing, 0));
+        () -> new ControllerEnv(CLOCK, rng, OFFLOAD, TRANSPORT, METRICS, tracing, events, 0));
   }
 }

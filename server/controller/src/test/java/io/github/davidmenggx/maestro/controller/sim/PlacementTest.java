@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.davidmenggx.maestro.controller.core.Placement;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.RegionLayout;
@@ -50,7 +51,7 @@ class PlacementTest {
     Region spawn = run.regions().regionAt(0, 0);
     assertEquals(List.of(SPARE), run.regions().holders(spawn.id()), run.describe());
     assertEquals(Regions.NONE, run.regions().regionOf(SPAWN_HOLDER), run.describe());
-    assertEquals(1, run.sim.metrics().total("region.reassigned"), run.describe());
+    assertEquals(1, run.sim.events().named("holder.added", "handoff").size(), run.describe());
     assertTrue(Invariants.caughtUp(run.controller, run.sim.node(SPARE)), run.describe());
     assertTrue(run.sim.node(SPARE).servedRequests() > 0, run.describe());
   }
@@ -68,7 +69,7 @@ class PlacementTest {
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(1, run.regions().regionOf(SPAWN_HOLDER), run.describe());
     assertEquals(Regions.NONE, run.regions().regionOf(SPARE), run.describe());
-    assertEquals(0, run.sim.metrics().total("region.reassigned"), run.describe());
+    assertEquals(0, run.sim.events().named("holder.added", "handoff").size(), run.describe());
   }
 
   @Test
@@ -84,7 +85,7 @@ class PlacementTest {
 
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(1, run.regions().regionOf(SPAWN_HOLDER), run.describe());
-    assertEquals(0, run.sim.metrics().total("region.reassigned"), run.describe());
+    assertEquals(0, run.sim.events().named("holder.added", "handoff").size(), run.describe());
     assertTrue(Invariants.caughtUp(run.controller, run.sim.node(SPAWN_HOLDER)), run.describe());
   }
 
@@ -97,7 +98,7 @@ class PlacementTest {
     SimRun run = SimRun.of(11L, FaultPlan.reliable(), TICKS, one, hot).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    assertEquals(1, run.sim.metrics().total("region.split"), run.describe());
+    assertEquals(1, run.sim.events().named("region.removed", "split").size(), run.describe());
     List<Region> regions = List.copyOf(run.regions().regions());
     assertEquals(2, regions.size(), run.describe());
     RegionLayout layout = one.layout();
@@ -129,7 +130,7 @@ class PlacementTest {
     SimRun run = SimRun.of(3L, FaultPlan.reliable(), TICKS, one, hot).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    assertEquals(1, run.sim.metrics().total("region.split"), run.describe());
+    assertEquals(1, run.sim.events().named("region.removed", "split").size(), run.describe());
     assertTrue(run.sim.metrics().total("world.chunks.deferred") > 0, run.describe());
     assertEquals(1, run.sim.metrics().total("world.kept"), run.describe());
     for (ModeledNode node : run.sim.nodes()) {
@@ -147,8 +148,8 @@ class PlacementTest {
             .go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    assertEquals(0, run.sim.metrics().total("region.split"), run.describe());
-    assertTrue(run.sim.metrics().total("region.replica.added") > 0, run.describe());
+    assertEquals(0, run.sim.events().named("region.removed", "split").size(), run.describe());
+    assertFalse(run.sim.events().named("holder.added", "replica").isEmpty(), run.describe());
     // Its mobs split between the two holders while the load lasted, each taking the other's when
     // its own queue was full.
     assertTrue(run.sim.node(NodeId.of(0)).servedRequests() > 0, run.describe());
@@ -157,9 +158,34 @@ class PlacementTest {
     // The replica was sent the area, and the holder only empty deltas in place of its chunks.
     assertTrue(run.sim.metrics().total("world.chunks.skipped") > 0, run.describe());
     // Once the load ends, the replica goes back to the spares.
-    assertTrue(run.sim.metrics().total("region.replica.returned") > 0, run.describe());
+    assertFalse(run.sim.events().named("holder.removed", "return").isEmpty(), run.describe());
     assertEquals(Regions.NONE, run.regions().regionOf(NodeId.of(1)), run.describe());
     assertEquals(List.of(NodeId.of(0)), run.regions().holders(1), run.describe());
+  }
+
+  @Test
+  void aReplicaThatIsDownWhenItsRegionCoolsReturnsToTheSparesFirst() {
+    Topology single = Topology.DEFAULT.withCells(1).withNodes(2).withSpares(1);
+    Scenario hot =
+        ONE_A_TICK
+            .with(Count.HOT_WINDOWS, 1)
+            .with(Count.COLD_WINDOWS, 1)
+            .with(Count.GRACE_TICKS, 20);
+    // The replica freezes while the load lasts, and is still frozen, past its grace, when it ends.
+    NodeId replica = NodeId.of(1);
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(
+                new FaultPlan.Paused(50, replica, true), new FaultPlan.Paused(150, replica, false));
+
+    SimRun run = SimRun.scripted(11L, plan, TICKS, single, hot, crowd(new Pos(20, 40, 20))).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertEquals(1, run.sim.events().returnedBeforeStable(Placement.STABLE_TICKS), run.describe());
+    // Back, it is a spare like any other.
+    assertEquals(Regions.NONE, run.regions().regionOf(replica), run.describe());
+    assertEquals(List.of(NodeId.of(0)), run.regions().holders(1), run.describe());
+    assertTrue(run.controller.serves(replica), run.describe());
   }
 
   @Test
@@ -173,11 +199,11 @@ class PlacementTest {
             .go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    assertEquals(0, run.sim.metrics().total("region.split"), run.describe());
-    assertEquals(
-        1,
-        run.sim.metrics().counter("region.replica.added", "node", "node-1", "cells", "4"),
-        run.describe());
+    assertEquals(0, run.sim.events().named("region.removed", "split").size(), run.describe());
+    List<SimEvents.Event> replicas = run.sim.events().named("holder.added", "replica");
+    assertEquals(1, replicas.size(), run.describe());
+    assertEquals("node-1", replicas.get(0).get("node"), run.describe());
+    assertEquals(4, run.sim.events().cells(replicas.get(0)), run.describe());
     assertEquals(List.of(NodeId.of(0), NodeId.of(1)), run.regions().holders(1), run.describe());
     assertTrue(run.sim.node(NodeId.of(1)).servedRequests() > 0, run.describe());
   }
@@ -192,7 +218,7 @@ class PlacementTest {
     assertEquals(List.of(), run.violations(), run.describe());
     Region spawn = run.regions().regionAt(0, 0);
     assertEquals(List.of(SPARE), run.regions().holders(spawn.id()), run.describe());
-    assertEquals(1, run.sim.metrics().total("region.reassigned"), run.describe());
+    assertEquals(1, run.sim.events().named("holder.added", "handoff").size(), run.describe());
     // It is no spare while nothing it is sent is answered.
     assertFalse(run.controller.serves(SPAWN_HOLDER), run.describe());
   }
@@ -234,7 +260,7 @@ class PlacementTest {
         SimRun.scripted(11L, plan, TICKS, Topology.DEFAULT, hot, crowd(new Pos(20, 40, 20))).go();
 
     assertEquals(List.of(), run.violations(), run.describe());
-    assertEquals(1, run.sim.metrics().total("region.replica.reclaimed"), run.describe());
+    assertEquals(1, run.sim.events().named("holder.added", "reclaim").size(), run.describe());
     assertEquals(List.of(SPAWN_HOLDER), run.regions().holders(1), run.describe());
     assertEquals(List.of(SPARE), run.regions().holders(2), run.describe());
     assertEquals(Regions.NONE, run.regions().regionOf(dead), run.describe());
@@ -250,7 +276,7 @@ class PlacementTest {
 
     assertEquals(List.of(), run.violations(), run.describe());
     assertTrue(run.out.dropped(DropReason.SHED) > 0, run.describe());
-    assertEquals(0, run.sim.metrics().total("region.replica.added"), run.describe());
+    assertEquals(List.of(), run.sim.events().named("holder.added", "replica"), run.describe());
     assertFalse(run.fitsCapacity(), run.describe());
   }
 

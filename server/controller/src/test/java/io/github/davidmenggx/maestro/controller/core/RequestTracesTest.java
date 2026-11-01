@@ -280,6 +280,13 @@ class RequestTracesTest {
           public void gauge(String name, double value, String... labels) {}
         };
     return new ControllerEnv(
-        clock, SeededRng.of(1), offload, transport, metrics, reported::add, RUN);
+        clock,
+        SeededRng.of(1),
+        offload,
+        transport,
+        metrics,
+        reported::add,
+        (name, attributes) -> {},
+        RUN);
   }
 }

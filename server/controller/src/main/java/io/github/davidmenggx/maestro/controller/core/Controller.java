@@ -93,8 +93,7 @@ public final class Controller implements WorldInput, Transport.Listener, Placeme
     this.capacity = new Capacity(settings.nodeCapacity(), fleet);
     this.streams = new WorldStreams(env, world, regions, links, encoder, violations, run);
     this.placement =
-        new Placement(
-            regions, fleet, links, health, settings.policy(), capacity, this, env.metrics());
+        new Placement(regions, fleet, links, health, settings.policy(), capacity, this, env);
     this.traces = new RequestTraces(env, settings.traceSampleRate());
     this.requests =
         new RequestTracker(
@@ -321,10 +320,13 @@ public final class Controller implements WorldInput, Transport.Listener, Placeme
         requests.depth(node, beat.queueDepth());
         health.heartbeat(node, arrivedNanos);
         String label = node.toString();
-        // The only view of a node's backlog and speed in production.
+        // The only view of a node's backlog and speed in production. Its worker time per second and
+        // per worker is its utilization.
         env.metrics().record("node.queue.reported", beat.queueDepth(), "node", label);
         env.metrics().gauge("node.queue.depth", beat.queueDepth(), "node", label);
         env.metrics().count("node.searches", beat.searches(), "node", label);
+        env.metrics().count("node.worker.micros", beat.workerMicros(), "node", label);
+        env.metrics().gauge("node.workers", beat.workers(), "node", label);
         env.metrics().gauge("node.capacity", capacity.of(node), "node", label);
         beats.put(node, beat);
       }

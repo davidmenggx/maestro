@@ -5,6 +5,7 @@ import io.github.davidmenggx.maestro.controller.core.Controller;
 import io.github.davidmenggx.maestro.controller.core.Dispatch;
 import io.github.davidmenggx.maestro.controller.core.Placement;
 import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
+import io.github.davidmenggx.maestro.controller.env.Metrics;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.SeededRng;
 import io.github.davidmenggx.maestro.controller.region.Region;
@@ -15,6 +16,7 @@ import io.github.davidmenggx.maestro.controller.world.Pos;
 import io.github.davidmenggx.maestro.controller.world.ProfileTable;
 import io.github.davidmenggx.maestro.controller.world.WorldEvent;
 import io.github.davidmenggx.maestro.controller.world.WorldInput;
+import io.github.davidmenggx.maestro.obs.OtelEvents;
 import io.github.davidmenggx.maestro.obs.OtelMetrics;
 import io.github.davidmenggx.maestro.obs.OtelTracing;
 import java.security.SecureRandom;
@@ -63,6 +65,7 @@ public final class Fleet implements AutoCloseable {
   private final RegionLayout layout;
   private final List<MaestroConfig.NodeAddress> addresses;
   private final ServerClock clock;
+  private final Metrics metrics;
   private final Thread serverThread;
   private final NettyTransport transport;
   private final PoolOffload offload;
@@ -88,6 +91,7 @@ public final class Fleet implements AutoCloseable {
       List<MaestroConfig.NodeAddress> addresses,
       List<NodeId> fleet,
       ServerClock clock,
+      Metrics metrics,
       NettyTransport transport,
       PoolOffload offload,
       PathOffload paths,
@@ -96,6 +100,7 @@ public final class Fleet implements AutoCloseable {
     this.layout = layout;
     this.addresses = List.copyOf(addresses);
     this.clock = clock;
+    this.metrics = metrics;
     this.serverThread = Thread.currentThread();
     this.transport = transport;
     this.offload = offload;
@@ -134,7 +139,7 @@ public final class Fleet implements AutoCloseable {
     OtelMetrics metrics = new OtelMetrics();
     NettyTransport transport =
         new NettyTransport(nodes, NettyTransport.MAX_PENDING_BYTES, clock::nowNanos);
-    PoolOffload offload = new PoolOffload(OFFLOAD_THREADS);
+    PoolOffload offload = new PoolOffload(OFFLOAD_THREADS, metrics, clock::nowNanos);
     ControllerEnv env =
         new ControllerEnv(
             clock,
@@ -143,6 +148,7 @@ public final class Fleet implements AutoCloseable {
             transport,
             metrics,
             new OtelTracing(config.subMode().name().toLowerCase(Locale.ROOT)),
+            new OtelEvents(),
             run);
     ProfileTable profiles = new ProfileTable();
     PathOffload paths =
@@ -162,7 +168,16 @@ public final class Fleet implements AutoCloseable {
                 config.traceSampleRate()));
     active =
         new Fleet(
-            overworld, layout, config.nodes(), fleet, clock, transport, offload, paths, controller);
+            overworld,
+            layout,
+            config.nodes(),
+            fleet,
+            clock,
+            metrics,
+            transport,
+            offload,
+            paths,
+            controller);
     paths.bind(active::accept);
     HeldPaths.clock(clock);
     Searches.intercept(paths);
@@ -181,6 +196,7 @@ public final class Fleet implements AutoCloseable {
    * players stand is reported every {@link #PLAYER_TICKS}.
    */
   public void tickStarted() {
+    long started = clock.nowNanos();
     handOver();
     accept(new WorldEvent.TickBegan(clock.tick()));
     if (controller.regionsVersion() != loggedRegions) {
@@ -189,6 +205,7 @@ public final class Fleet implements AutoCloseable {
     if (clock.tick() % PLAYER_TICKS == 0) {
       reportPlayers();
     }
+    recordBoundary("tick_start", started);
   }
 
   /** Each player's position, and each player gone since the last report. */
@@ -237,6 +254,7 @@ public final class Fleet implements AutoCloseable {
    * tick closes.
    */
   public void tickEnding() {
+    long started = clock.nowNanos();
     handOver();
     paths.tickEnding();
     accept(new WorldEvent.TickEnded(clock.tick()));
@@ -244,6 +262,16 @@ public final class Fleet implements AutoCloseable {
     if (clock.tick() % SELF_CHECK_TICKS == 0) {
       selfCheck();
     }
+    recordBoundary("tick_end", started);
+  }
+
+  /**
+   * The server thread's time in Maestro at a tick boundary that began at {@code started}: the
+   * hand-over, the controller's tick work, and the failover searches run in turns at a tick's end.
+   * A failover search run in its mob's own call falls outside every boundary.
+   */
+  private void recordBoundary(String at, long started) {
+    metrics.record("server.maestro.micros", (clock.nowNanos() - started) / 1e3, "at", at);
   }
 
   /** Logs each node whose link or service changed, with what became of the requests so far. */
@@ -338,6 +366,11 @@ public final class Fleet implements AutoCloseable {
       watcher.accept(event);
     }
     controller.accept(event);
+  }
+
+  /** This controller's run, which names its traces and events. */
+  public long run() {
+    return controller.run();
   }
 
   /** What became of the offloaded requests so far. */

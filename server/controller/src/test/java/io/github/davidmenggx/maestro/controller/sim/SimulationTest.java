@@ -8,6 +8,7 @@ import io.github.davidmenggx.maestro.controller.core.NodeHealth;
 import io.github.davidmenggx.maestro.controller.core.NodeLinks;
 import io.github.davidmenggx.maestro.controller.core.WorldStreams;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
+import io.github.davidmenggx.maestro.controller.env.RequestTrace;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
 import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.sim.Scenario.Chance;
@@ -124,6 +125,18 @@ class SimulationTest {
         List.of(), Invariants.checkSlo(run.out.latencies(), run.out.sloMisses()), run.describe());
     // The run drains, so nothing counts against a node at its end.
     assertEquals(0, run.sim.metrics().gauge("controller.outstanding"), run.describe());
+    // Each answer's latency is recorded once, under its node and whether its mob hunted.
+    long labeled = 0;
+    for (NodeId node : run.fleet) {
+      for (String hunting : List.of("true", "false")) {
+        labeled +=
+            run.sim
+                .metrics()
+                .recorded("path.latency.ticks", "node", node.toString(), "hunting", hunting)
+                .size();
+      }
+    }
+    assertEquals(run.out.answered(), labeled, run.describe());
   }
 
   /** Each way takes the most at which one request at the highest cost is still answered in time. */
@@ -260,6 +273,93 @@ class SimulationTest {
       discarded += run.sim.metrics().total("requests.discarded");
     }
     assertTrue(discarded > 0, "no batch outlived its connection");
+  }
+
+  @Test
+  void aStreamedRequestWhoseEveryEncodeFailsLeavesInItsNodesNextBatch() {
+    // Encodes fail so often that some streamed request fails every attempt. Mobs ask seldom and
+    // never cancel or leave, so a request left unsent would not be replaced by another.
+    Scenario streamed =
+        Scenario.DEFAULT
+            .with(Count.STREAM, 1)
+            .with(Chance.REQUEST, 0.05)
+            .with(Chance.CANCEL, 0.0)
+            .with(Chance.MOB_CHURN, 0.0);
+    SimRun run =
+        SimRun.of(41L, FaultPlan.reliable().withOffloadFailureRate(0.7), TICKS, streamed).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(
+        run.sim.metrics().counter("offload.abandoned", "job", "request") > 0, run.describe());
+    // Each went out with a batch instead, unless its mob asked again first.
+    for (RequestTrace trace : run.sim.tracing().traces()) {
+      if (trace.encodingNanos() != RequestTrace.NEVER
+          && !trace.outcome().equals(DropReason.SUPERSEDED.name())) {
+        assertTrue(trace.sentNanos() != RequestTrace.NEVER, trace + " " + run.describe());
+      }
+    }
+    assertEquals(0, run.out.dropped(DropReason.TIMEOUT), run.describe());
+    assertTrue(run.out.answered() > 0, run.describe());
+  }
+
+  @Test
+  void aChunkThatCannotBeReadIsSentOnceItCanBeOrClearedOnceItLeaves() {
+    List<WorldEvent> script = new ArrayList<>();
+    for (int x = 0; x < 3; x++) {
+      for (int z = 0; z < 3; z++) {
+        script.add(new WorldEvent.ChunkLoaded(0, x, z));
+      }
+    }
+    // Neither can be read at first. One stays and can be read again; the other leaves.
+    script.add(new WorldEvent.ChunkUnloaded(40, 2, 2));
+    SimRun run = SimRun.scripted(1L, FaultPlan.reliable(), 120, script);
+    ((ScriptedWorkload) run.workload).unreadable(1, 1, 0, 60).unreadable(2, 2, 0, 60);
+    run.go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    assertTrue(run.sim.metrics().total("world.chunks.unreadable") > 0, run.describe());
+    for (Region region : run.regions().regions()) {
+      assertTrue(run.controller.regionSettled(region.id()), region + " " + run.describe());
+    }
+    for (NodeId holder : run.regions().nodes()) {
+      ModeledNode node = run.sim.node(holder);
+      assertTrue(Invariants.caughtUp(run.controller, node), holder + " " + run.describe());
+      assertEquals(List.of(), Invariants.checkAgainstFreshSnapshot(run, node), run.describe());
+    }
+  }
+
+  @Test
+  void aHolderOfAnAreaWithFewerChunksThanAreLoadedIsSentEveryOneOfThem() {
+    // Every chunk of the world is loaded, more than any region's area holds.
+    Topology topology = Topology.DEFAULT;
+    int minChunk = Chunks.of(topology.min());
+    List<WorldEvent> script = new ArrayList<>();
+    for (int x = minChunk; x < minChunk + topology.chunksPerSide(); x++) {
+      for (int z = minChunk; z < minChunk + topology.chunksPerSide(); z++) {
+        script.add(new WorldEvent.ChunkLoaded(0, x, z));
+      }
+    }
+    // A holder dies after its area is sent, and is sent it afresh when it returns.
+    NodeId victim = NodeId.of(0);
+    FaultPlan plan =
+        FaultPlan.reliable()
+            .with(new FaultPlan.NodeDied(200, victim), new FaultPlan.NodeRecovered(202, victim));
+
+    SimRun run = SimRun.scripted(1L, plan, 450, topology, Scenario.DEFAULT, script).go();
+
+    assertEquals(List.of(), run.violations(), run.describe());
+    for (Region region : run.regions().regions()) {
+      int areaChunks = region.areaSizeX() / Chunks.SIZE * (region.areaSizeZ() / Chunks.SIZE);
+      assertTrue(run.world.loadedCount() > areaChunks, run.describe());
+    }
+    assertTrue(
+        run.sim.metrics().counter("world.resnapshot", "node", victim.toString()) > 0,
+        run.describe());
+    for (NodeId holder : run.regions().nodes()) {
+      ModeledNode node = run.sim.node(holder);
+      assertTrue(Invariants.caughtUp(run.controller, node), holder + " " + run.describe());
+      assertEquals(List.of(), Invariants.checkAgainstFreshSnapshot(run, node), run.describe());
+    }
   }
 
   @Test
@@ -410,6 +510,15 @@ class SimulationTest {
     assertEquals(List.of(), run.violations(), run.describe());
     assertEquals(
         1, run.sim.metrics().counter("world.resume", "node", victim.toString()), run.describe());
+    // The reset shows as the link lost once and opened again.
+    assertEquals(
+        1,
+        run.sim.metrics().counter("node.link", "node", victim.toString(), "event", "lost"),
+        run.describe());
+    assertEquals(
+        2,
+        run.sim.metrics().counter("node.link", "node", victim.toString(), "event", "connected"),
+        run.describe());
     // The node kept its state across the reset, so no chunk was sent twice.
     assertEquals(
         run.chunkCount(),

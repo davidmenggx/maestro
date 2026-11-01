@@ -42,7 +42,10 @@ public final class RecordingOutput implements WorldOutput {
   /** An outcome a mob was told, named as a trace names it. */
   public record Told(long tick, int mobId, String outcome) {}
 
-  /** Ticks after which a loaded chunk is resident on its holders: greet, read, and margin. */
+  /**
+   * Ticks after which a chunk loaded, or readable again, is resident on its holders: greet, read,
+   * and margin.
+   */
   private static final int SETTLE_TICKS = 4;
 
   private final Simulation sim;
@@ -102,8 +105,12 @@ public final class RecordingOutput implements WorldOutput {
             profile.shape().width())) {
       return false;
     }
-    long since = world.loadedSince(Chunks.of(start.x()), Chunks.of(start.z()));
-    return since >= 0 && request.tick() - since >= readTicks() + SETTLE_TICKS;
+    int chunkX = Chunks.of(start.x());
+    int chunkZ = Chunks.of(start.z());
+    // A chunk about to leave, or one that stayed after it, may never have been read.
+    return world.chunkLoaded(chunkX, chunkZ)
+        && world.readable(chunkX, chunkZ)
+        && request.tick() - world.readableSince(chunkX, chunkZ) >= readTicks() + SETTLE_TICKS;
   }
 
   /** Ticks the read budget takes to send every area in full, at the most chunks seen loaded. */

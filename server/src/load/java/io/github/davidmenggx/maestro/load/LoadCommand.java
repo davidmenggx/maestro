@@ -1,6 +1,5 @@
 package io.github.davidmenggx.maestro.load;
 
-import com.google.gson.GsonBuilder;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
@@ -206,7 +205,7 @@ final class LoadCommand {
   private static void write(Report report, Path file) throws IOException {
     Files.createDirectories(file.getParent());
     try (Writer writer = Files.newBufferedWriter(file)) {
-      new GsonBuilder().setPrettyPrinting().create().toJson(report.toJson(), writer);
+      report.write(writer);
       writer.write('\n');
     }
   }

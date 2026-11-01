@@ -283,7 +283,7 @@ final class LoadRun {
             measureStarted,
             version,
             config,
-            Fleet.active() != null,
+            Fleet.active() == null ? 0 : Fleet.active().run(),
             players.size(),
             entities.size(),
             alive,

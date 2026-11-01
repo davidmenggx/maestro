@@ -118,11 +118,13 @@ dependencies {
   implementation "io.opentelemetry:opentelemetry-api"
   implementation "io.opentelemetry:opentelemetry-sdk"
   implementation "io.opentelemetry:opentelemetry-exporter-otlp"
+  implementation "io.opentelemetry.instrumentation:opentelemetry-runtime-telemetry-java8:${opentelemetry_instrumentation_version}"
 
   otelBundle platform("io.opentelemetry:opentelemetry-bom:${opentelemetry_version}")
   otelBundle "io.opentelemetry:opentelemetry-api"
   otelBundle "io.opentelemetry:opentelemetry-sdk"
   otelBundle "io.opentelemetry:opentelemetry-exporter-otlp"
+  otelBundle "io.opentelemetry.instrumentation:opentelemetry-runtime-telemetry-java8:${opentelemetry_instrumentation_version}"
 
   testImplementation "org.junit.jupiter:junit-jupiter:${junit_version}"
   testRuntimeOnly "org.junit.platform:junit-platform-launcher"

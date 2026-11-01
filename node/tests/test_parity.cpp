@@ -276,6 +276,33 @@ void replay(const std::filesystem::path &Path, Tally &Count) {
 constexpr int MinExactPercent = 95;
 constexpr int MinExactPerEntity = 50;
 
+/// Every kind of mob the capture places.
+const std::set<std::string> CapturedEntities = {
+    "minecraft:cow",    "minecraft:iron_golem", "minecraft:sniffer",
+    "minecraft:spider", "minecraft:villager",   "minecraft:zombie"};
+
+/// Every type some exact path crosses. Rails and trapdoors stand in the
+/// capture's terrain but on no captured path; a rail is passable only to a mob
+/// starting on one.
+const std::set<fbs::PathType> TypesOnExactPaths = {
+    fbs::PathType::BLOCKED,
+    fbs::PathType::OPEN,
+    fbs::PathType::WALKABLE,
+    fbs::PathType::WALKABLE_DOOR,
+    fbs::PathType::ON_TOP_OF_POWDER_SNOW,
+    fbs::PathType::FENCE,
+    fbs::PathType::WATER,
+    fbs::PathType::WATER_BORDER,
+    fbs::PathType::FIRE_IN_NEIGHBOR,
+    fbs::PathType::FIRE,
+    fbs::PathType::DAMAGING_IN_NEIGHBOR,
+    fbs::PathType::DOOR_OPEN,
+    fbs::PathType::STICKY_HONEY,
+    fbs::PathType::COCOA,
+    fbs::PathType::DAMAGE_CAUTIOUS,
+    fbs::PathType::ON_TOP_OF_TRAPDOOR,
+    fbs::PathType::BIG_MOBS_CLOSE_TO_DANGER};
+
 } // namespace
 
 TEST(Parity, ReproducesEveryExactVanillaSearch) {
@@ -297,16 +324,20 @@ TEST(Parity, ReproducesEveryExactVanillaSearch) {
             (Count.Exact + Count.Approximated) * MinExactPercent)
       << Count.Exact << " exact of " << Count.Exact + Count.Approximated;
   // The capture picks each case's mob at random, so every kind it places has
-  // cases.
-  for (const std::string &Entity : Count.EntitiesSeen)
+  // cases. Those listed are checked too, so a capture that loses one fails.
+  std::set<std::string> Entities = CapturedEntities;
+  Entities.insert(Count.EntitiesSeen.begin(), Count.EntitiesSeen.end());
+  for (const std::string &Entity : Entities)
     EXPECT_GE(Count.ExactByEntity[Entity], MinExactPerEntity)
         << "too few exact cases of " << Entity;
-  for (const fbs::PathType Type : Count.TypesSeen)
-    // Leaving a closed door sweeps the mob's box from where it stands, which
-    // the node does not know, so those cases are approximated by design.
-    if (Type != fbs::PathType::DOOR_WOOD_CLOSED)
-      EXPECT_GT(Count.ExactByType[Type], 0)
-          << "no exact path crosses " << fbs::EnumNamePathType(Type);
+  std::set<fbs::PathType> Types = TypesOnExactPaths;
+  Types.insert(Count.TypesSeen.begin(), Count.TypesSeen.end());
+  // Leaving a closed door sweeps the mob's box from where it stands, which the
+  // node does not know, so those cases are approximated by design.
+  Types.erase(fbs::PathType::DOOR_WOOD_CLOSED);
+  for (const fbs::PathType Type : Types)
+    EXPECT_GT(Count.ExactByType[Type], 0)
+        << "no exact path crosses " << fbs::EnumNamePathType(Type);
   // Approximated cases may differ by design: measured, not asserted. Recorded
   // as test properties to track across runs.
   const int Approximated = std::max(Count.Approximated, 1);

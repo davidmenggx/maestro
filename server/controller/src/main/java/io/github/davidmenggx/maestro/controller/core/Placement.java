@@ -1,5 +1,7 @@
 package io.github.davidmenggx.maestro.controller.core;
 
+import io.github.davidmenggx.maestro.controller.env.ControllerEnv;
+import io.github.davidmenggx.maestro.controller.env.Events;
 import io.github.davidmenggx.maestro.controller.env.Metrics;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.region.Region;
@@ -10,6 +12,7 @@ import io.github.davidmenggx.maestro.controller.world.Pos;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -37,6 +40,12 @@ import java.util.Map;
  *
  * A new holder is sent its region afresh, so a mob of a changed region waits for its chunks. The
  * holders of a cut region keep what they hold of the lower side.
+ *
+ * <p>Every change to the regions, their holders and which nodes are up is reported as an event and
+ * in the {@code region.info}, {@code region.holder} and {@code node.up} gauges, from the layout the
+ * run starts with on. Replayed from the start, the events give the regions and holders now; the
+ * gauges give them at any time, without the events before. The region gauges name the run, as each
+ * run numbers its regions afresh.
  */
 public final class Placement {
 
@@ -76,6 +85,37 @@ public final class Placement {
                 + ", "
                 + coldTicks);
       }
+    }
+  }
+
+  /** Why a region or a holder came or went. */
+  enum Reason {
+    /** The layout the run starts with. */
+    INITIAL,
+    /** A spare took the region of a holder down past its grace. */
+    HANDOFF,
+    /** A replica left its region for one with no holder up. */
+    RECLAIM,
+    /** A spare joined a hot region that could not be cut. */
+    REPLICA,
+    /** A cold region returned a holder to the spares. */
+    RETURN,
+    /** A hot region was cut. */
+    SPLIT;
+
+    String label() {
+      return name().toLowerCase(Locale.ROOT);
+    }
+  }
+
+  /** What a node must be to be up, in the order checked. */
+  private enum Check {
+    LINKED,
+    IN_SERVICE,
+    VERIFIED;
+
+    String label() {
+      return name().toLowerCase(Locale.ROOT);
     }
   }
 
@@ -144,6 +184,10 @@ public final class Placement {
   private final Capacity capacity;
   private final Changes changes;
   private final Metrics metrics;
+  private final Events events;
+
+  /** The run, as its events and gauges name it. */
+  private final String run;
 
   /** Holders down or not yet back for {@link #STABLE_TICKS}, in the order they went down. */
   private final Map<NodeId, Episode> episodes = new LinkedHashMap<>();
@@ -151,7 +195,13 @@ public final class Placement {
   /** By region id, in id order. */
   private final Map<Integer, Load> loads = new LinkedHashMap<>();
 
+  /** Each node last reported down, with the check it failed at the last look. */
+  private final Map<NodeId, Check> down = new LinkedHashMap<>();
+
   private int version;
+
+  /** The tick being evaluated, or the one this was made at, which its events name. */
+  private long tick;
 
   Placement(
       RegionMap regions,
@@ -161,7 +211,7 @@ public final class Placement {
       Policy policy,
       Capacity capacity,
       Changes changes,
-      Metrics metrics) {
+      ControllerEnv env) {
     this.regions = regions;
     this.fleet = List.copyOf(fleet);
     this.links = links;
@@ -169,10 +219,14 @@ public final class Placement {
     this.policy = policy;
     this.capacity = capacity;
     this.changes = changes;
-    this.metrics = metrics;
+    this.metrics = env.metrics();
+    this.events = env.events();
+    this.run = Long.toHexString(env.run());
+    this.tick = env.clock().tick();
     for (Region region : regions.regions()) {
       loads.put(region.id(), new Load(region));
     }
+    reportLayout();
   }
 
   /** Counts changes to the region map, so a reader can tell when to look again. */
@@ -198,11 +252,24 @@ public final class Placement {
 
   /** Whether the node can take a region: linked, in service, and its request path shown to work. */
   boolean up(NodeId node) {
-    return links.greeted(node) && health.inService(node) && health.verified(node);
+    return failing(node) == null;
+  }
+
+  /** The first check the node fails, or null if it is up. */
+  private Check failing(NodeId node) {
+    if (!links.greeted(node)) {
+      return Check.LINKED;
+    }
+    if (!health.inService(node)) {
+      return Check.IN_SERVICE;
+    }
+    return health.verified(node) ? null : Check.VERIFIED;
   }
 
   /** Judges every holder and region at the start of a tick, and changes what must change. */
   void evaluate(long tick) {
+    this.tick = tick;
+    reportUp();
     for (NodeId node : regions.nodes()) {
       Episode episode = episodes.get(node);
       if (!up(node)) {
@@ -232,9 +299,8 @@ public final class Placement {
       NodeId spare = spare();
       if (spare != null) {
         episodes.remove(node);
-        release(region, node);
-        hold(region, spare);
-        metrics.count("region.reassigned", 1, "node", spare.toString());
+        release(region, node, Reason.HANDOFF);
+        hold(region, spare, Reason.HANDOFF);
         continue;
       }
       if (upHolders(region) > 0) {
@@ -245,10 +311,9 @@ public final class Placement {
         break;
       }
       episodes.remove(node);
-      release(regions.region(regions.regionOf(replica)), replica);
-      release(region, node);
-      hold(region, replica);
-      metrics.count("region.replica.reclaimed", 1, "node", replica.toString());
+      release(regions.region(regions.regionOf(replica)), replica, Reason.RECLAIM);
+      release(region, node, Reason.RECLAIM);
+      hold(region, replica, Reason.RECLAIM);
     }
     if (tick > 0 && tick % WINDOW_TICKS == 0) {
       closeWindow();
@@ -258,8 +323,7 @@ public final class Placement {
       List<NodeId> holders = regions.holders(region.id());
       if (load.coldWindows * WINDOW_TICKS >= policy.coldTicks() && holders.size() > 1) {
         load.coldWindows = 0;
-        release(region, returning(holders));
-        metrics.count("region.replica.returned", 1);
+        release(region, returning(holders), Reason.RETURN);
       }
     }
     for (Region region : List.copyOf(regions.regions())) {
@@ -275,18 +339,10 @@ public final class Placement {
           RegionLayout.splittable(region) ? balancedCut(region, load.streak) : null;
       if (cut != null) {
         split(region, cut, spare);
-        metrics.count("region.split", 1);
       } else {
         load.hotWindows = 0;
         Arrays.fill(load.streak, 0);
-        hold(region, spare);
-        metrics.count(
-            "region.replica.added",
-            1,
-            "node",
-            spare.toString(),
-            "cells",
-            Integer.toString(load.streak.length));
+        hold(region, spare, Reason.REPLICA);
       }
     }
   }
@@ -378,30 +434,137 @@ public final class Placement {
     List<NodeId> holders = List.copyOf(regions.holders(region.id()));
     for (NodeId node : holders) {
       regions.unassign(node);
+      reportHolder(region, node, false, Reason.SPLIT);
     }
+    reportRegion(region, false, Reason.SPLIT);
     loads.remove(region.id());
     List<Region> sides = regions.split(region.id(), cut);
     for (Region side : sides) {
       loads.put(side.id(), new Load(side));
+      reportRegion(side, true, Reason.SPLIT);
     }
     for (NodeId node : holders) {
       regions.assign(sides.get(0).id(), node);
+      reportHolder(sides.get(0), node, true, Reason.SPLIT);
     }
     changes.regionSplit(region, sides.get(0), sides.get(1));
-    hold(sides.get(1), spare);
+    hold(sides.get(1), spare, Reason.SPLIT);
     version++;
   }
 
-  private void hold(Region region, NodeId node) {
+  private void hold(Region region, NodeId node, Reason reason) {
     regions.assign(region.id(), node);
+    reportHolder(region, node, true, reason);
     changes.holderAdded(region, node);
     version++;
   }
 
-  private void release(Region region, NodeId node) {
+  private void release(Region region, NodeId node, Reason reason) {
     regions.unassign(node);
+    reportHolder(region, node, false, reason);
     changes.holderRemoved(region, node);
     version++;
+  }
+
+  /**
+   * Reports the layout the run starts with. Every node counts as down until it is found up, for
+   * want of a link, as a new controller has none.
+   */
+  private void reportLayout() {
+    for (NodeId node : fleet) {
+      down.put(node, Check.LINKED);
+      metrics.gauge("node.up", 0, "node", node.toString());
+    }
+    for (Region region : regions.regions()) {
+      reportRegion(region, true, Reason.INITIAL);
+      for (NodeId node : regions.holders(region.id())) {
+        reportHolder(region, node, true, Reason.INITIAL);
+      }
+    }
+  }
+
+  /**
+   * Reports each node that came up or went down since the last evaluation. A node goes down for the
+   * first check it fails, as {@code not_<check>}, and comes up for the last one it failed.
+   */
+  private void reportUp() {
+    for (NodeId node : fleet) {
+      Check failing = failing(node);
+      Check was = down.get(node);
+      if (failing != null) {
+        down.put(node, failing);
+        if (was == null) {
+          metrics.gauge("node.up", 0, "node", node.toString());
+          report("node.down", "node", node.toString(), "reason", "not_" + failing.label());
+        }
+      } else if (was != null) {
+        down.remove(node);
+        metrics.gauge("node.up", 1, "node", node.toString());
+        report("node.up", "node", node.toString(), "reason", was.label());
+      }
+    }
+  }
+
+  private void reportRegion(Region region, boolean exists, Reason reason) {
+    String id = Integer.toString(region.id());
+    String minX = Integer.toString(region.minX());
+    String minZ = Integer.toString(region.minZ());
+    String sizeX = Integer.toString(region.sizeX());
+    String sizeZ = Integer.toString(region.sizeZ());
+    metrics.gauge(
+        "region.info",
+        exists ? 1 : 0,
+        "run",
+        run,
+        "region",
+        id,
+        "min_x",
+        minX,
+        "min_z",
+        minZ,
+        "size_x",
+        sizeX,
+        "size_z",
+        sizeZ);
+    report(
+        exists ? "region.added" : "region.removed",
+        "region",
+        id,
+        "min_x",
+        minX,
+        "min_z",
+        minZ,
+        "size_x",
+        sizeX,
+        "size_z",
+        sizeZ,
+        "reason",
+        reason.label());
+  }
+
+  private void reportHolder(Region region, NodeId node, boolean holds, Reason reason) {
+    String id = Integer.toString(region.id());
+    metrics.gauge(
+        "region.holder", holds ? 1 : 0, "run", run, "region", id, "node", node.toString());
+    report(
+        holds ? "holder.added" : "holder.removed",
+        "region",
+        id,
+        "node",
+        node.toString(),
+        "reason",
+        reason.label());
+  }
+
+  /** An event of this run at the tick being evaluated. */
+  private void report(String name, String... attributes) {
+    String[] named = new String[attributes.length + 4];
+    named[0] = "run";
+    named[1] = run;
+    named[2] = "tick";
+    named[3] = Long.toString(tick);
+    System.arraycopy(attributes, 0, named, 4, attributes.length);
+    events.event(name, named);
   }
 
   /** The first node of the fleet that holds no region and is up, or null. */

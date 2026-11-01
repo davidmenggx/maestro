@@ -62,20 +62,28 @@ class OtelMetricsTest {
 
   @Test
   void aGaugeKeepsItsLastValuePerLabelAndTakesFractions() {
-    metrics.gauge("node.phi", 0.5, "node", "node-0");
-    metrics.gauge("node.phi", 8.25, "node", "node-0");
-    metrics.gauge("node.phi", 1.0, "node", "node-1");
+    metrics.gauge("node.capacity", 8.25, "node", "node-0");
+    metrics.gauge("node.capacity", 0.5, "node", "node-0");
+    metrics.gauge("node.capacity", 1.0, "node", "node-1");
 
-    MetricData data = metric("node.phi");
-    double node0 =
-        data.getDoubleGaugeData().getPoints().stream()
-            .filter(
-                point -> "node-0".equals(point.getAttributes().get(AttributeKey.stringKey("node"))))
-            .findFirst()
-            .orElseThrow()
-            .getValue();
-    assertEquals(8.25, node0);
-    assertEquals(2, data.getDoubleGaugeData().getPoints().size());
+    assertEquals(0.5, gauge("node.capacity", "node-0"));
+    assertEquals(2, metric("node.capacity").getDoubleGaugeData().getPoints().size());
+  }
+
+  @Test
+  void aPeakGaugeExportsTheHighestValueSinceTheLastExport() {
+    metrics.gauge("node.phi", 0.5, "node", "node-0");
+    metrics.gauge("node.phi", 9.0, "node", "node-0");
+    metrics.gauge("node.phi", 1.0, "node", "node-0");
+    metrics.gauge("node.phi", 2.0, "node", "node-1");
+
+    assertEquals(9.0, gauge("node.phi", "node-0"));
+    // The next interval starts at the value held now.
+    assertEquals(1.0, gauge("node.phi", "node-0"));
+    metrics.gauge("node.phi", 3.0, "node", "node-0");
+    metrics.gauge("node.phi", 0.25, "node", "node-0");
+    assertEquals(3.0, gauge("node.phi", "node-0"));
+    assertEquals(2.0, gauge("node.phi", "node-1"));
   }
 
   @Test
@@ -95,6 +103,15 @@ class OtelMetricsTest {
   void labelsMustComeInKeyAndValuePairs() {
     assertThrows(IllegalArgumentException.class, () -> metrics.count("path.offload", 1, "outcome"));
     assertThrows(IllegalArgumentException.class, () -> metrics.gauge("node.phi", 1.0, "node"));
+  }
+
+  /** The gauge's value for one node, from a fresh collection. */
+  private double gauge(String name, String node) {
+    return metric(name).getDoubleGaugeData().getPoints().stream()
+        .filter(point -> node.equals(point.getAttributes().get(AttributeKey.stringKey("node"))))
+        .findFirst()
+        .orElseThrow()
+        .getValue();
   }
 
   private long sum(String name, String key, String value) {

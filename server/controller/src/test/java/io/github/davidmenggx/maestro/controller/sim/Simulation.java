@@ -118,6 +118,7 @@ public final class Simulation {
   private final FailOpenCheck failOpen = new FailOpenCheck();
   private final SimMetrics metrics = new SimMetrics();
   private final SimTracing tracing = new SimTracing();
+  private final SimEvents events = new SimEvents();
   private final Digest digest = new Digest();
   private final SimTransport transport;
   private final SimClock clock = new SimClock();
@@ -181,6 +182,11 @@ public final class Simulation {
   /** The traces of every controller process so far. */
   public SimTracing tracing() {
     return tracing;
+  }
+
+  /** The events of every controller process so far. */
+  public SimEvents events() {
+    return events;
   }
 
   public Digest digest() {
@@ -264,6 +270,7 @@ public final class Simulation {
             transport.restart(),
             metrics,
             tracing,
+            events,
             run);
     failOpen.restarted(run, tick);
   }

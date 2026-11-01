@@ -6,8 +6,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import io.github.davidmenggx.maestro.bridge.OffloadStats;
 import io.github.davidmenggx.maestro.config.MaestroConfig;
+import java.io.StringWriter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -67,6 +69,7 @@ class ReportTest {
     JsonObject maestro = json.getAsJsonObject("maestro");
     assertEquals("0.1.0", maestro.get("version").getAsString());
     assertTrue(maestro.get("offloading").getAsBoolean());
+    assertEquals("abc", maestro.get("run").getAsString());
     assertEquals("shadow", maestro.get("offload").getAsString());
     assertEquals("stream", maestro.get("subMode").getAsString());
     assertEquals(1, maestro.get("nodes").getAsInt());
@@ -146,7 +149,7 @@ class ReportTest {
             "2026-10-27T12:00:00Z",
             "0.1.0",
             MaestroConfig.DEFAULT,
-            false,
+            0,
             1,
             2,
             2,
@@ -157,9 +160,17 @@ class ReportTest {
     JsonObject json = report.toJson();
 
     assertFalse(json.getAsJsonObject("maestro").get("offloading").getAsBoolean());
+    assertTrue(json.getAsJsonObject("maestro").get("run").isJsonNull());
     assertEquals(0, json.getAsJsonObject("requests").size());
     assertEquals(0, json.getAsJsonObject("ticksLate").get("answers").getAsLong());
     assertTrue(json.getAsJsonObject("ticksLate").get("p99").isJsonNull());
+
+    // The file keeps the empty values.
+    StringWriter file = new StringWriter();
+    report.write(file);
+    JsonObject written = JsonParser.parseString(file.toString()).getAsJsonObject();
+    assertEquals(json, written);
+    assertTrue(written.getAsJsonObject("maestro").get("run").isJsonNull());
   }
 
   @Test
@@ -179,7 +190,7 @@ class ReportTest {
         "2026-10-27T12:00:00Z",
         "0.1.0",
         CONFIG,
-        true,
+        0xabcL,
         1,
         2,
         1,

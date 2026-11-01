@@ -90,11 +90,18 @@ class NodeHealthTest {
     ticks(1);
     assertTrue(metrics.gauge("node.phi", "node", label) < NodeHealth.PHI_THRESHOLD);
 
-    // A node with no link is not judged, so its phi is not reported.
+    // A node with no link is not judged, so its phi reads 0 once and is not reported again.
     int reported = metrics.gaugeValues("node.phi", "node", label).size();
     health.disconnected(NODE);
     ticks(HEARTBEAT_TICKS);
-    assertEquals(reported, metrics.gaugeValues("node.phi", "node", label).size());
+    assertEquals(reported + 1, metrics.gaugeValues("node.phi", "node", label).size());
+    assertEquals(0, metrics.gauge("node.phi", "node", label));
+    health.disconnected(NODE);
+    assertEquals(reported + 1, metrics.gaugeValues("node.phi", "node", label).size());
+
+    // One never heard from has no phi to clear.
+    health.disconnected(OTHER);
+    assertEquals(List.of(), metrics.gaugeValues("node.phi", "node", OTHER.toString()));
   }
 
   @Test

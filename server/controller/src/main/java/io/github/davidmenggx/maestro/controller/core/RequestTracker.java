@@ -57,10 +57,11 @@ public final class RequestTracker {
 
   /**
    * {@code request} is kept for resends. {@code startChunk} is the chunk the search starts in.
-   * {@code firstSent} is when the first copy left. {@code dueTick} is when the latest copy should
-   * be answered. Both are {@link #NOT_SENT} until then, and {@code dueTick} is {@link #ENCODING}
-   * while a first copy's batch encodes. An {@code abandoned} request is reported dropped and
-   * canceled, but still counts against its node.
+   * {@code hunting} is whether the mob had a target when it asked. {@code firstSent} is when the
+   * first copy left. {@code dueTick} is when the latest copy should be answered. Both are {@link
+   * #NOT_SENT} until then, and {@code dueTick} is {@link #ENCODING} while a first copy's batch
+   * encodes. An {@code abandoned} request is reported dropped and canceled, but still counts
+   * against its node.
    */
   private record Outstanding(
       int mobId,
@@ -68,6 +69,7 @@ public final class RequestTracker {
       Region region,
       long startChunk,
       long issuedTick,
+      boolean hunting,
       Frames.Request request,
       long firstSent,
       long dueTick,
@@ -81,6 +83,7 @@ public final class RequestTracker {
           region,
           startChunk,
           issuedTick,
+          hunting,
           request,
           resends == 0 ? tick : firstSent,
           due,
@@ -95,6 +98,7 @@ public final class RequestTracker {
           region,
           startChunk,
           issuedTick,
+          hunting,
           request,
           firstSent,
           ENCODING,
@@ -109,6 +113,7 @@ public final class RequestTracker {
           region,
           startChunk,
           issuedTick,
+          hunting,
           request,
           firstSent,
           NOT_SENT,
@@ -118,7 +123,17 @@ public final class RequestTracker {
 
     Outstanding abandon() {
       return new Outstanding(
-          mobId, node, region, startChunk, issuedTick, request, firstSent, dueTick, resends, true);
+          mobId,
+          node,
+          region,
+          startChunk,
+          issuedTick,
+          hunting,
+          request,
+          firstSent,
+          dueTick,
+          resends,
+          true);
     }
   }
 
@@ -364,7 +379,17 @@ public final class RequestTracker {
     put(
         requestId,
         new Outstanding(
-            mobId, node, region, startChunk, event.tick(), request, NOT_SENT, NOT_SENT, 0, false));
+            mobId,
+            node,
+            region,
+            startChunk,
+            event.tick(),
+            event.hunting(),
+            request,
+            NOT_SENT,
+            NOT_SENT,
+            0,
+            false));
     traces.admitted(requestId, mobId, classId, node, region.id(), event.hunting(), event.tick());
     placement.sent(region, event.start());
     if (dispatch == Dispatch.STREAM) {
@@ -490,8 +515,16 @@ public final class RequestTracker {
     }
     remove(answer.requestId());
     requestByMob.remove(request.mobId());
-    env.metrics().record("path.latency.ticks", tick - request.issuedTick());
-    env.metrics().count("path.answered", 1);
+    String hunting = Boolean.toString(request.hunting());
+    env.metrics()
+        .record(
+            "path.latency.ticks",
+            tick - request.issuedTick(),
+            "node",
+            node.toString(),
+            "hunting",
+            hunting);
+    env.metrics().count("path.answered", 1, "node", node.toString(), "hunting", hunting);
     out.pathComputed(
         new WorldOutput.PathResult(
             request.mobId(),

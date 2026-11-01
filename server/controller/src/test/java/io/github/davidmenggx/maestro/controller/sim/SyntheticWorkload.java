@@ -42,8 +42,8 @@ public final class SyntheticWorkload implements Workload {
   /** Chunks loaded around the origin in every direction, as vanilla keeps spawn chunks. */
   private static final int SPAWN_RADIUS = 2;
 
-  /** Chunks loaded around a player in every direction at the start. */
-  private static final int VIEW_RADIUS = 3;
+  /** Longest a leaving chunk cannot be read before it is reported gone. */
+  private static final int MAX_LEAVING_TICKS = 5;
 
   /** `reachRange` values vanilla passes: 0 and 1 almost everywhere, 6 for one POI type. */
   private static final int[] REACH_RANGES = {0, 0, 1, 6};
@@ -70,6 +70,12 @@ public final class SyntheticWorkload implements Workload {
   private final SimWorld world;
   private final Rng rng;
   private final Rng order;
+
+  /**
+   * Whether and when a chunk leaves slowly, from a stream of its own so other draws do not shift.
+   */
+  private final Rng leavings;
+
   private final Activity[] activities = {
     this::churnChunks,
     this::changeBlocks,
@@ -100,12 +106,16 @@ public final class SyntheticWorkload implements Workload {
   private final Map<Integer, Pos> mobs = new LinkedHashMap<>();
   private final Map<Integer, Pos> players = new LinkedHashMap<>();
 
+  /** Chunks about to leave, as {@link Chunks#key}, with the tick each is reported gone. */
+  private final Map<Long, Long> leaving = new LinkedHashMap<>();
+
   private int nextMobId = 1;
 
   public SyntheticWorkload(SimWorld world, Rng rng, long quietAfter, Scenario scenario) {
     this.world = world;
     this.rng = rng;
     this.order = rng.derive("order");
+    this.leavings = rng.derive("leavings");
     this.quietAfter = quietAfter;
     this.scenario = scenario;
     this.classCount = world.mobClassCount();
@@ -121,6 +131,7 @@ public final class SyntheticWorkload implements Workload {
       // Chunks that left stay unloaded, and are air in the final comparison too.
       return;
     }
+    leave(tick, input);
     for (int i = activities.length - 1; i > 0; i--) {
       int j = order.nextInt(i + 1);
       Activity swapped = activities[i];
@@ -137,7 +148,8 @@ public final class SyntheticWorkload implements Workload {
     for (int player = 1; player <= scenario.counts().get(Count.PLAYERS); player++) {
       movePlayer(0, player, input);
       Pos pos = players.get(player);
-      loadAround(Chunks.of(pos.x()), Chunks.of(pos.z()), VIEW_RADIUS, input);
+      loadAround(
+          Chunks.of(pos.x()), Chunks.of(pos.z()), scenario.counts().get(Count.VIEW_RADIUS), input);
     }
     for (int i = 0; i < scenario.counts().get(Count.MOBS); i++) {
       spawn(0, input);
@@ -187,22 +199,20 @@ public final class SyntheticWorkload implements Workload {
       long key = world.loadedChunk(rng.nextInt(world.loadedCount()));
       int chunkX = (int) (key >> 32);
       int chunkZ = (int) key;
-      // Mobs leave with their chunk, and as many appear in the chunks still loaded.
-      int left = 0;
-      Iterator<Map.Entry<Integer, Pos>> each = mobs.entrySet().iterator();
-      while (each.hasNext()) {
-        Map.Entry<Integer, Pos> mob = each.next();
-        if (Chunks.of(mob.getValue().x()) == chunkX && Chunks.of(mob.getValue().z()) == chunkZ) {
-          each.remove();
-          input.accept(new WorldEvent.MobRemoved(tick, mob.getKey()));
-          left++;
+      if (leaving.containsKey(key)) {
+        return;
+      }
+      double slowly = scenario.chances().get(Chance.LEAVE_UNREADABLE);
+      if (slowly > 0 && leavings.nextDouble() < slowly) {
+        long gone = tick + 1 + leavings.nextInt(MAX_LEAVING_TICKS);
+        // Gone before the run goes quiet, so a quiet world has no chunk it cannot read.
+        if (gone < quietAfter) {
+          world.beginLeaving(chunkX, chunkZ);
+          leaving.put(key, gone);
+          return;
         }
       }
-      world.unloadChunk(chunkX, chunkZ);
-      input.accept(new WorldEvent.ChunkUnloaded(tick, chunkX, chunkZ));
-      for (int i = 0; i < left; i++) {
-        spawn(tick, input);
-      }
+      unload(tick, chunkX, chunkZ, input);
       return;
     }
     int chunkX = world.minChunk() + rng.nextInt(world.chunksPerSide());
@@ -210,6 +220,47 @@ public final class SyntheticWorkload implements Workload {
     if (!world.chunkLoaded(chunkX, chunkZ)) {
       world.loadChunk(chunkX, chunkZ, tick);
       input.accept(new WorldEvent.ChunkLoaded(tick, chunkX, chunkZ));
+    }
+  }
+
+  /**
+   * Each leaving chunk whose time has come is reported gone, or, at even odds, stays after all and
+   * can be read again with nothing reported.
+   */
+  private void leave(long tick, WorldInput input) {
+    Iterator<Map.Entry<Long, Long>> each = leaving.entrySet().iterator();
+    while (each.hasNext()) {
+      Map.Entry<Long, Long> chunk = each.next();
+      if (chunk.getValue() > tick) {
+        continue;
+      }
+      each.remove();
+      int chunkX = (int) (chunk.getKey() >> 32);
+      int chunkZ = (int) (long) chunk.getKey();
+      if (leavings.nextBoolean()) {
+        world.stayLoaded(chunkX, chunkZ, tick);
+      } else {
+        unload(tick, chunkX, chunkZ, input);
+      }
+    }
+  }
+
+  /** Unloads a chunk. Mobs leave with it, and as many appear in the chunks still loaded. */
+  private void unload(long tick, int chunkX, int chunkZ, WorldInput input) {
+    int left = 0;
+    Iterator<Map.Entry<Integer, Pos>> each = mobs.entrySet().iterator();
+    while (each.hasNext()) {
+      Map.Entry<Integer, Pos> mob = each.next();
+      if (Chunks.of(mob.getValue().x()) == chunkX && Chunks.of(mob.getValue().z()) == chunkZ) {
+        each.remove();
+        input.accept(new WorldEvent.MobRemoved(tick, mob.getKey()));
+        left++;
+      }
+    }
+    world.unloadChunk(chunkX, chunkZ);
+    input.accept(new WorldEvent.ChunkUnloaded(tick, chunkX, chunkZ));
+    for (int i = 0; i < left; i++) {
+      spawn(tick, input);
     }
   }
 

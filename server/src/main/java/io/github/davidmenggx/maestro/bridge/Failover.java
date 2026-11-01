@@ -202,7 +202,9 @@ final class Failover {
     try {
       return search.get();
     } finally {
-      budgetLeft -= nanos.getAsLong() - started;
+      long took = nanos.getAsLong() - started;
+      budgetLeft -= took;
+      metrics.count("failover.search.micros", took / 1000);
     }
   }
 

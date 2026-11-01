@@ -95,6 +95,9 @@ public final class SimRun {
   /** Answered requests whose traces the controller processes a restart replaced never reported. */
   private int tracesLostToRestart;
 
+  /** The nodes the current controller found up when it last judged them, at a tick's start. */
+  private Set<NodeId> upWhenJudged = Set.of();
+
   /** The tick the workload stops changing the world, or {@link #ticks} if it never does. */
   private final long quietAfter;
 
@@ -224,12 +227,21 @@ public final class SimRun {
   /** The controller restarted. Its requests are gone, and the new one learns the world afresh. */
   private void restartController() {
     out.restarted();
-    for (String violation : controller.selfCheck()) {
+    List<String> found = new ArrayList<>(controller.selfCheck());
+    found.addAll(topologyViolations());
+    for (String violation : found) {
       retiredViolations.add("controller of run " + controller.run() + ": " + violation);
     }
     tracesLostToRestart += controller.tracesUnreported();
     controller = newController();
+    upWhenJudged = Set.of();
     workload.replayState(sim.env().clock().tick(), event -> sim.deliver(controller, event));
+  }
+
+  /** The current controller's topology events, replayed, against its regions, nodes and gauges. */
+  List<String> topologyViolations() {
+    return sim.events()
+        .checkTopology(controller.run(), controller.regions(), fleet, upWhenJudged, sim.metrics());
   }
 
   /** Violations the self-checks of the controller processes a restart replaced found. */
@@ -364,6 +376,15 @@ public final class SimRun {
             out.handled(requested);
           } else {
             controller.accept(event);
+            if (event instanceof WorldEvent.TickBegan) {
+              Set<NodeId> up = new LinkedHashSet<>();
+              for (NodeId node : fleet) {
+                if (controller.serves(node)) {
+                  up.add(node);
+                }
+              }
+              upWhenJudged = up;
+            }
           }
         };
     sim.run(input, workload, ticks, this::afterTick);

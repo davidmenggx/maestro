@@ -19,7 +19,7 @@ MAESTRO_SANITIZE ?=
 .PHONY: all help flatc schema schema-cpp schema-java \
         node node-configure node-test \
         server server-test fuzz test test-boot test-game test-e2e capture conformance run-node run-server \
-        coverage clean distclean
+        obs-up obs-down coverage clean distclean
 
 all: node server ## Build the C++ node and the Java mod
 
@@ -101,6 +101,24 @@ capture: schema-java ## Record parity fixtures into fixtures/parity (SEED="1 2" 
 conformance: schema-java ## Write the node conformance fixture into fixtures/conformance
 	cd server && $(GRADLE) :controller:test --tests '*ConformanceTest*' \
 		-Dmaestro.conformance.write=true
+
+# ---------------------------------------------------------------------------
+# Local telemetry
+# ---------------------------------------------------------------------------
+# One container holding an OpenTelemetry collector, Prometheus, Tempo, Loki and Grafana. The mod's
+# default `otlpEndpoint` points at it. Its data, dashboards included, lives in the volume.
+OBS_IMAGE     := docker.io/grafana/otel-lgtm:0.36.0
+OBS_CONTAINER := maestro-obs
+
+# A container left stopped, as after a reboot, is started again rather than made anew.
+obs-up: ## Start the local telemetry stack (Grafana on localhost:3000, admin/admin)
+	docker start $(OBS_CONTAINER) 2>/dev/null || docker run -d --name $(OBS_CONTAINER) --init \
+		-p 127.0.0.1:3000:3000 -p 127.0.0.1:4317:4317 \
+		-v $(OBS_CONTAINER):/data -e GF_PATHS_DATA=/data/grafana \
+		$(OBS_IMAGE)
+
+obs-down: ## Stop the local telemetry stack, keeping its data
+	docker rm -f $(OBS_CONTAINER)
 
 # ---------------------------------------------------------------------------
 # Coverage

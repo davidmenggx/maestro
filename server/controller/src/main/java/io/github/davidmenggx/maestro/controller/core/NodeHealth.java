@@ -201,10 +201,14 @@ public final class NodeHealth {
 
   /**
    * The link is gone, with its heartbeats and the requests the node forgot. The circuit stays as
-   * is, but a probe out is withdrawn: one that ended a backoff is sent again once a link is up.
+   * is, but a probe out is withdrawn: one that ended a backoff is sent again once a link is up. A
+   * node with no link is not judged, so its phi reads 0 until one is up.
    */
   void disconnected(NodeId node) {
     Health health = health(node);
+    if (health.lastArrival != NONE) {
+      metrics.gauge("node.phi", 0, "node", node.toString());
+    }
     health.lastArrival = NONE;
     health.suspected = false;
     health.forgetMissed();
