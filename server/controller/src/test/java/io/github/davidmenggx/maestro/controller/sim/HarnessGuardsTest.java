@@ -580,6 +580,31 @@ class HarnessGuardsTest {
   }
 
   @Test
+  void aHolderNewToItsRegionCountsFromWhenItTookTheRegion() {
+    SimWorld world = new SimWorld(Topology.DEFAULT, 1, SeededRng.of(1));
+    world.loadChunk(Chunks.of(ORIGIN.x()), Chunks.of(ORIGIN.z()), 0);
+    RegionMap regions = initialRegions();
+    RecordingOutput out =
+        new RecordingOutput(new Simulation(1L, FaultPlan.reliable()), world, () -> regions);
+
+    // The holders a controller starts with count from when the chunk loaded.
+    out.issued(request(1, 100, ORIGIN));
+    out.pathDropped(1, DropReason.NO_NODE);
+    // A spare taken as a replica is sent the area afresh, so the request may reach it first.
+    NodeId spare = NodeId.of(Topology.DEFAULT.nodeCount() - 1);
+    assertEquals(Regions.NONE, regions.regionOf(spare));
+    regions.assign(regions.regionAt(ORIGIN.x(), ORIGIN.z()).id(), spare);
+    out.issued(request(2, 101, ORIGIN));
+    out.pathDropped(2, DropReason.NO_NODE);
+    // Held long enough to be on the replica too.
+    out.issued(request(3, 200, ORIGIN));
+    out.pathDropped(3, DropReason.NO_NODE);
+
+    assertEquals(List.of(), out.ledgerViolations());
+    assertEquals(2, out.sloMisses());
+  }
+
+  @Test
   void theLedgerMatchesEachOutcomeToItsRequest() {
     RecordingOutput out = recorder(new SimWorld(Topology.DEFAULT, 1, SeededRng.of(1)));
     WorldEvent.PathRequested first = request(1, 0, ORIGIN);
@@ -1292,10 +1317,15 @@ class HarnessGuardsTest {
   }
 
   private static RecordingOutput recorder(Simulation sim, SimWorld world) {
+    RegionMap regions = initialRegions();
+    return new RecordingOutput(sim, world, () -> regions);
+  }
+
+  /** The regions of the default topology as a controller starts with them. */
+  private static RegionMap initialRegions() {
     Topology topology = Topology.DEFAULT;
     List<NodeId> fleet = IntStream.range(0, topology.nodeCount()).mapToObj(NodeId::of).toList();
-    RegionMap regions = topology.layout().initial(fleet, topology.spares());
-    return new RecordingOutput(sim, world, () -> regions);
+    return topology.layout().initial(fleet, topology.spares());
   }
 
   /** A trace of {@code mob}'s request asked at 100 that ended at {@code tick}. */

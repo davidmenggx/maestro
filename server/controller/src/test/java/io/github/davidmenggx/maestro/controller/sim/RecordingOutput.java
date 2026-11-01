@@ -1,6 +1,7 @@
 package io.github.davidmenggx.maestro.controller.sim;
 
 import io.github.davidmenggx.maestro.controller.core.WorldStreams;
+import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.RequestTrace;
 import io.github.davidmenggx.maestro.controller.region.Region;
 import io.github.davidmenggx.maestro.controller.region.Regions;
@@ -14,6 +15,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -30,9 +32,10 @@ import java.util.function.Supplier;
  * <p>A request open when its controller process restarts is closed as lost with the process.
  *
  * <p>A request is servable when it starts in a region far enough inside the region's area that the
- * search cannot read past it, in a chunk loaded long enough for chunk reads to have reached it.
- * Dropping a servable request for want of a node counts against the SLO, unless its chunk left
- * meanwhile. So does losing a request with its node, and shedding one.
+ * search cannot read past it, in a chunk loaded long enough for chunk reads to have reached it on
+ * every holder of the region, a holder new to it included. Dropping a servable request for want of
+ * a node counts against the SLO, unless its chunk left meanwhile. So does losing a request with its
+ * node, and shedding one.
  */
 public final class RecordingOutput implements WorldOutput {
 
@@ -43,8 +46,8 @@ public final class RecordingOutput implements WorldOutput {
   public record Told(long tick, int mobId, String outcome) {}
 
   /**
-   * Ticks after which a chunk loaded, or readable again, is resident on its holders: greet, read,
-   * and margin.
+   * Ticks after which a chunk loaded, or readable again, is resident on its holders, and a holder
+   * new to a region holds its loaded chunks: greet, read, and margin.
    */
   private static final int SETTLE_TICKS = 4;
 
@@ -64,6 +67,15 @@ public final class RecordingOutput implements WorldOutput {
   /** The most chunk reads a full send of every area took so far: a chunk once per area. */
   private long mostAreaChunks;
 
+  /** Per region id, each holder and the tick it was first seen holding the region. */
+  private final Map<Integer, Map<NodeId, Long>> holderSince = new TreeMap<>();
+
+  /**
+   * When the current controller process started. Its first holders count from then, so those of the
+   * first process are sent each chunk as it loads.
+   */
+  private long startedAt = Long.MIN_VALUE;
+
   private int issued;
   private int lostToRestart;
   private int unservedServable;
@@ -79,6 +91,7 @@ public final class RecordingOutput implements WorldOutput {
   /** A request went in. Called before the controller sees it. */
   public void issued(WorldEvent.PathRequested request) {
     issued++;
+    seeHolders(request.tick());
     boolean servable = servable(request);
     long since =
         servable
@@ -107,10 +120,37 @@ public final class RecordingOutput implements WorldOutput {
     }
     int chunkX = Chunks.of(start.x());
     int chunkZ = Chunks.of(start.z());
-    // A chunk about to leave, or one that stayed after it, may never have been read.
-    return world.chunkLoaded(chunkX, chunkZ)
-        && world.readable(chunkX, chunkZ)
-        && request.tick() - world.readableSince(chunkX, chunkZ) >= readTicks() + SETTLE_TICKS;
+    // A chunk about to leave, or one that stayed after it, may never have been read. A holder new
+    // to the region is sent its area afresh, and may be sent the request before the chunk arrives.
+    if (!world.chunkLoaded(chunkX, chunkZ) || !world.readable(chunkX, chunkZ)) {
+      return false;
+    }
+    long since = Math.max(world.readableSince(chunkX, chunkZ), newestHolderSince(region.id()));
+    return request.tick() - since >= readTicks() + SETTLE_TICKS;
+  }
+
+  /** Records the holders new to each region since the last look as taking it at {@code tick}. */
+  private void seeHolders(long tick) {
+    long since = holderSince.isEmpty() ? startedAt : tick;
+    Regions now = regions.get();
+    for (Region region : now.regions()) {
+      List<NodeId> holders = now.holders(region.id());
+      Map<NodeId, Long> seen =
+          holderSince.computeIfAbsent(region.id(), unseen -> new LinkedHashMap<>());
+      seen.keySet().retainAll(holders);
+      for (NodeId node : holders) {
+        seen.putIfAbsent(node, since);
+      }
+    }
+  }
+
+  /** The tick the newest holder of the region was first seen holding it. */
+  private long newestHolderSince(int regionId) {
+    long newest = Long.MIN_VALUE;
+    for (long since : holderSince.getOrDefault(regionId, Map.of()).values()) {
+      newest = Math.max(newest, since);
+    }
+    return newest;
   }
 
   /** Ticks the read budget takes to send every area in full, at the most chunks seen loaded. */
@@ -120,8 +160,12 @@ public final class RecordingOutput implements WorldOutput {
         / WorldStreams.MAX_CHUNK_READS_PER_TICK;
   }
 
-  /** A tick ended: counts the chunk reads a full send of every area would take now. */
+  /**
+   * A tick ended: records new holders, and counts the chunk reads a full send of every area would
+   * take now.
+   */
   public void tickEnded() {
+    seeHolders(sim.env().clock().tick());
     long areaChunks = 0;
     for (int i = 0; i < world.loadedCount(); i++) {
       long chunk = world.loadedChunk(i);
@@ -149,6 +193,9 @@ public final class RecordingOutput implements WorldOutput {
       lostToRestart += requests.size();
     }
     open.clear();
+    // The new process numbers its regions afresh and sends their areas again.
+    holderSince.clear();
+    startedAt = sim.env().clock().tick();
   }
 
   @Override
