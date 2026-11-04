@@ -3,8 +3,6 @@ package io.github.davidmenggx.maestro.load;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
-import io.github.davidmenggx.maestro.MaestroServer;
-import io.github.davidmenggx.maestro.bridge.Fleet;
 import java.io.IOException;
 import java.io.Writer;
 import java.nio.file.Files;
@@ -12,6 +10,7 @@ import java.nio.file.Path;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.function.BooleanSupplier;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -22,9 +21,10 @@ import org.slf4j.LoggerFactory;
 /**
  * {@code /maestro load start <scenario>} runs the scenario in `<game
  * dir>/maestro-load/scenarios/<scenario>.json` on the overworld, and {@code /maestro load stop}
- * ends it. {@code /maestro load mark} logs the fleet's counts so far. A run that ends while
- * measuring writes its report to `<game dir>/maestro-load/reports/`. One run goes at a time, and
- * the server stopping ends it.
+ * ends it. {@code /maestro load terrain <scenario>} builds only its terrain, so a world can be
+ * saved with it before runs. {@code /maestro load mark} logs the fleet's counts so far. A run that
+ * ends while measuring writes its report to `<game dir>/maestro-load/reports/`. One run goes at a
+ * time, and the server stopping ends it.
  */
 final class LoadCommand {
 
@@ -38,6 +38,8 @@ final class LoadCommand {
   static final String FAILED = "Maestro load failed";
 
   static final String MARK = "Maestro load mark";
+
+  static final String TERRAIN = "Maestro load terrain built";
 
   private static final Logger LOG = LoggerFactory.getLogger("maestro");
 
@@ -61,6 +63,11 @@ final class LoadCommand {
                                 Commands.argument("scenario", StringArgumentType.word())
                                     .executes(LoadCommand::start)))
                     .then(Commands.literal("stop").executes(LoadCommand::stop))
+                    .then(
+                        Commands.literal("terrain")
+                            .then(
+                                Commands.argument("scenario", StringArgumentType.word())
+                                    .executes(LoadCommand::terrain)))
                     .then(Commands.literal("mark").executes(LoadCommand::mark))));
   }
 
@@ -77,22 +84,34 @@ final class LoadCommand {
     }
     try {
       Scenario loaded = Scenario.load(Scenario.file(directory().resolve("scenarios"), name));
-      String version =
-          FabricLoader.getInstance()
-              .getModContainer(MaestroServer.MOD_ID)
-              .orElseThrow()
-              .getMetadata()
-              .getVersion()
-              .getFriendlyString();
-      // The config the running mod uses, which the file may no longer match.
-      run =
-          LoadRun.start(
-              name, loaded, source.getServer().overworld(), MaestroServer.config(), version);
+      run = LoadRun.start(name, loaded, source.getServer().overworld(), Maestro.find());
       scenario = name;
       String message =
           String.format(
-              "%s: scenario=%s players=%d entities=%d",
-              STARTED, name, run.players(), loaded.entities());
+              "%s: scenario=%s players=%d entities=%d blocks=%d",
+              STARTED, name, run.players(), loaded.entities(), run.built());
+      LOG.info(message);
+      source.sendSuccess(() -> Component.literal(message), false);
+      return 1;
+    } catch (RuntimeException e) {
+      LOG.error("{}: scenario={}: {}", FAILED, name, e.getMessage(), e);
+      source.sendFailure(Component.literal(FAILED + ": " + e.getMessage()));
+      return 0;
+    }
+  }
+
+  private static int terrain(CommandContext<CommandSourceStack> context) {
+    CommandSourceStack source = context.getSource();
+    String name = StringArgumentType.getString(context, "scenario");
+    if (run != null) {
+      source.sendFailure(Component.literal("Scenario " + scenario + " is running; stop it first"));
+      return 0;
+    }
+    try {
+      Scenario loaded = Scenario.load(Scenario.file(directory().resolve("scenarios"), name));
+      int changed =
+          new Terrain(loaded.keeps()).build(source.getServer().overworld(), loaded.terrain());
+      String message = String.format("%s: scenario=%s blocks=%d", TERRAIN, name, changed);
       LOG.info(message);
       source.sendSuccess(() -> Component.literal(message), false);
       return 1;
@@ -119,14 +138,11 @@ final class LoadCommand {
 
   /** Logs what became of the offloaded requests so far, so a script can compare two points. */
   private static int mark(CommandContext<CommandSourceStack> context) {
-    Fleet fleet = Fleet.active();
     StringBuilder counts = new StringBuilder(MARK + ":");
-    if (fleet != null) {
-      fleet
-          .stats()
-          .counts()
-          .forEach((name, count) -> counts.append(' ').append(name).append('=').append(count));
-    }
+    Maestro.find()
+        .stats()
+        .counts()
+        .forEach((name, count) -> counts.append(' ').append(name).append('=').append(count));
     String message = counts.toString();
     LOG.info(message);
     context.getSource().sendSuccess(() -> Component.literal(message), false);
@@ -139,19 +155,24 @@ final class LoadCommand {
     }
   }
 
+  /** The tick's work ends, before other mods' listeners. */
+  static void tickEnding() {
+    if (run != null) {
+      step(
+          () -> {
+            run.tickEnding();
+            return false;
+          });
+    }
+  }
+
   static void tickEnded() {
     if (run == null) {
       return;
     }
     boolean wasMeasuring = run.measuring();
-    boolean over;
-    try {
-      over = run.tickEnded();
-    } catch (RuntimeException e) {
-      LoadRun failed = run;
-      run = null;
-      failed.abort();
-      LOG.error("{}: scenario={}: {}", FAILED, scenario, e.getMessage(), e);
+    boolean over = step(run::tickEnded);
+    if (run == null) {
       return;
     }
     if (!wasMeasuring && run.measuring()) {
@@ -159,6 +180,19 @@ final class LoadCommand {
     }
     if (over) {
       end("its duration ended");
+    }
+  }
+
+  /** Runs {@code work} of the run, which ends with no report if the work throws. */
+  private static boolean step(BooleanSupplier work) {
+    try {
+      return work.getAsBoolean();
+    } catch (RuntimeException e) {
+      LoadRun failed = run;
+      run = null;
+      failed.abort();
+      LOG.error("{}: scenario={}: {}", FAILED, scenario, e.getMessage(), e);
+      return false;
     }
   }
 

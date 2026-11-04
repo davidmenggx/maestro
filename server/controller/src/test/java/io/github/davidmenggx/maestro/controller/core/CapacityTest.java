@@ -2,6 +2,7 @@ package io.github.davidmenggx.maestro.controller.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import java.util.List;
@@ -61,6 +62,15 @@ class CapacityTest {
   void theAssumedCapacityCapsTheRate() {
     sample(NODE, 10 * ASSUMED);
     assertEquals(ASSUMED, capacity.of(NODE));
+  }
+
+  @Test
+  void theMeasuredRateIsNotCapped() {
+    assertTrue(Double.isNaN(capacity.measured(NODE)));
+    sample(NODE, 10 * ASSUMED);
+    assertEquals(10.0 * ASSUMED, capacity.measured(NODE), 1e-9);
+    capacity.linkLost(NODE);
+    assertTrue(Double.isNaN(capacity.measured(NODE)));
   }
 
   @Test

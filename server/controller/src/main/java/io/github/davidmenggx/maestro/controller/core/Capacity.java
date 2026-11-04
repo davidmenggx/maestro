@@ -63,6 +63,11 @@ final class Capacity {
     return Double.isNaN(measured) ? assumed : Math.min(assumed, measured);
   }
 
+  /** The node's measured rate in requests a tick, not capped, or NaN before its first sample. */
+  double measured(NodeId node) {
+    return rate(node).measured;
+  }
+
   /**
    * A heartbeat: {@code workers} threads finished {@code searches} since the last one, taking
    * {@code micros} of worker time.

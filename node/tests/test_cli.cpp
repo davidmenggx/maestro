@@ -7,6 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#ifdef __linux__
+#include <sched.h>
+#endif
+
 using namespace maestro::cli;
 
 namespace {
@@ -39,6 +43,26 @@ TEST(Cli, NoArgumentsKeepTheDefaults) {
   EXPECT_EQ(Opts.Server.Node.Workers, defaultWorkers());
   EXPECT_GE(defaultWorkers(), 1u);
 }
+
+#ifdef __linux__
+TEST(Cli, TheDefaultWorkersAreTheCoresThisProcessMayRunOn) {
+  cpu_set_t Before;
+  ASSERT_EQ(sched_getaffinity(0, sizeof(Before), &Before), 0);
+  EXPECT_EQ(defaultWorkers(), static_cast<unsigned>(CPU_COUNT(&Before)));
+
+  // As `taskset -c <cpu>` leaves it.
+  int First = 0;
+  while (!CPU_ISSET(First, &Before))
+    ++First;
+  cpu_set_t One;
+  CPU_ZERO(&One);
+  CPU_SET(First, &One);
+  ASSERT_EQ(sched_setaffinity(0, sizeof(One), &One), 0);
+  const unsigned Pinned = defaultWorkers();
+  ASSERT_EQ(sched_setaffinity(0, sizeof(Before), &Before), 0);
+  EXPECT_EQ(Pinned, 1u);
+}
+#endif
 
 TEST(Cli, EveryFlagSetsItsOption) {
   Options Opts;

@@ -16,10 +16,14 @@ GRADLE := ./gradlew
 # e.g. `address,undefined` or `thread`.
 MAESTRO_SANITIZE ?=
 
+# ON builds `maestro-bench`, which fetches Google Benchmark. The bench targets turn it on, and
+# every other build turns it off again.
+MAESTRO_BUILD_BENCH ?= OFF
+
 .PHONY: all help flatc schema schema-cpp schema-java \
         node node-configure node-test \
-        server server-test fuzz test test-boot test-game test-e2e capture conformance run-node run-server \
-        obs-up obs-down coverage clean distclean
+        server server-test tools-test fuzz test test-boot test-load test-game test-e2e capture conformance run-node run-server \
+        bench bench-node obs-up obs-down coverage clean distclean
 
 all: node server ## Build the C++ node and the Java mod
 
@@ -54,7 +58,8 @@ schema-java: $(FLATC) ## Generate Java bindings into server/controller/src/gener
 # ---------------------------------------------------------------------------
 node-configure: schema-cpp
 	cmake -S node -B $(BUILD)/node -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-		-DMAESTRO_SANITIZE=$(MAESTRO_SANITIZE)
+		-DMAESTRO_SANITIZE=$(MAESTRO_SANITIZE) \
+		-DMAESTRO_BUILD_BENCH=$(MAESTRO_BUILD_BENCH)
 
 node: node-configure ## Configure and build the C++ compute node
 	cmake --build $(BUILD)/node -j
@@ -85,6 +90,9 @@ run-server: schema-java ## Boot a dev server (WORLD=<name> loads worlds/<name>)
 test-boot: schema-java ## Boot the released mod and assert the mixins applied
 	tools/boot-smoke-test.sh
 
+test-load: schema-java ## Run a load scenario beside the released mod, with no nodes, and check the load mod's work
+	tools/load-smoke-test.sh
+
 test-game: schema-java ## Run the game tests, which need a running server, headless
 	cd server && $(GRADLE) runGameTest --console=plain
 
@@ -101,6 +109,30 @@ capture: schema-java ## Record parity fixtures into fixtures/parity (SEED="1 2" 
 conformance: schema-java ## Write the node conformance fixture into fixtures/conformance
 	cd server && $(GRADLE) :controller:test --tests '*ConformanceTest*' \
 		-Dmaestro.conformance.write=true
+
+# ---------------------------------------------------------------------------
+# Benchmarks
+# ---------------------------------------------------------------------------
+# Each setting is passed on only when set. BENCH_FLAGS takes any other option of
+# `tools/bench.py run`.
+BENCH_ARGS = $(if $(CONFIGS),--configs $(CONFIGS)) $(if $(SCENARIOS),--scenarios $(SCENARIOS)) \
+	$(if $(NODES),--nodes $(NODES)) $(if $(SERVER_CPUS),--server-cpus $(SERVER_CPUS)) \
+	$(if $(NODE_CPUS),--node-cpus $(NODE_CPUS)) $(if $(REPEATS),--repeats $(REPEATS)) \
+	$(if $(MOBS),--mobs $(MOBS))
+
+# Inherited by `node`, so its build makes `maestro-bench`.
+bench bench-node: MAESTRO_BUILD_BENCH = ON
+
+# The node is built only when CONFIGS names one that offloads, as every config does by default.
+comma := ,
+BENCH_OFFLOADS := $(if $(CONFIGS),$(filter batch stream,$(subst $(comma), ,$(CONFIGS))),all)
+
+bench: $(if $(BENCH_OFFLOADS),node) schema-java ## Find the most mobs a server holds at 20 TPS, vanilla and with Maestro (CONFIGS= SCENARIOS= NODES= SERVER_CPUS= NODE_CPUS= REPEATS= MOBS= BENCH_FLAGS=)
+	cd server && $(GRADLE) benchMods
+	python3 -I tools/bench.py run $(BENCH_ARGS) $(BENCH_FLAGS)
+
+bench-node: node ## Measure the node's searches per second on the parity fixtures (CPUS=list pins it)
+	$(if $(CPUS),taskset -c $(CPUS)) $(BUILD)/node/maestro-bench
 
 # ---------------------------------------------------------------------------
 # Local telemetry
@@ -151,7 +183,10 @@ coverage: schema ## Measure the unit suites' line and branch coverage into build
 # ---------------------------------------------------------------------------
 # Aggregate / cleanup
 # ---------------------------------------------------------------------------
-test: node-test server-test ## Run every unit test suite (see `fuzz` for the sweeps)
+tools-test: ## Run the Python tools' unit tests
+	python3 -I -B -m unittest discover -s tools -p 'test_*.py'
+
+test: node-test server-test tools-test ## Run every unit test suite (see `fuzz` for the sweeps)
 
 clean: ## Remove build outputs (keeps fetched dependencies)
 	rm -rf $(BUILD)/node $(NODE_COVERAGE) $(COVERAGE) $(GEN_CPP) $(GEN_JAVA)

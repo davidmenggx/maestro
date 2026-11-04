@@ -157,6 +157,14 @@ public final class Controller implements WorldInput, Transport.Listener, Placeme
     return health.inService(node);
   }
 
+  /**
+   * Requests a tick the node's heartbeats show it serves, not capped by the assumed capacity, or
+   * NaN before they show any.
+   */
+  public double measuredRate(NodeId node) {
+    return capacity.measured(node);
+  }
+
   /** Whether the node can take a region: linked, in service, and its request path shown to work. */
   public boolean serves(NodeId node) {
     return placement.up(node);

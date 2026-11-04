@@ -10,6 +10,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(MAESTRO_BUILD_TESTS "Build the unit test suite" ON)
+option(MAESTRO_BUILD_BENCH "Build the search benchmark" OFF)
 
 include(cmake/Dependencies.cmake)
 
@@ -68,6 +69,15 @@ endif()
 # --- Node executable ---------------------------------------------------------
 add_executable(maestro-node src/main.cpp)
 target_link_libraries(maestro-node PRIVATE maestro_core)
+
+# --- Search benchmark --------------------------------------------------------
+# Replays the parity fixtures' searches, so it measures the recorded mix.
+if(MAESTRO_BUILD_BENCH)
+  add_executable(maestro-bench bench/search_bench.cpp)
+  target_link_libraries(maestro-bench PRIVATE maestro_core benchmark::benchmark)
+  target_compile_definitions(maestro-bench PRIVATE
+    MAESTRO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/parity")
+endif()
 
 # --- Tests -------------------------------------------------------------------
 if(MAESTRO_BUILD_TESTS)

@@ -51,6 +51,9 @@ jobs:
         env:
           STARTUP_TIMEOUT: "600"
 
+      - name: Load mod
+        run: make test-load
+
       - name: Game tests
         run: make test-game
 
@@ -61,6 +64,7 @@ jobs:
           name: server-logs
           path: |
             server/build/boot-smoke-test.log
+            server/build/load-smoke-test.log
             server/build/gametest/
             server/run/gametest/logs/
             server/run/gametest/crash-reports/

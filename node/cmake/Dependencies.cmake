@@ -5,6 +5,7 @@ find_package(Threads REQUIRED)
 set(FLATBUFFERS_TAG "v25.2.10"    CACHE STRING "FlatBuffers git tag")
 set(ASIO_TAG        "asio-1-34-2" CACHE STRING "Asio git tag")
 set(GOOGLETEST_TAG  "v1.16.0"     CACHE STRING "GoogleTest git tag")
+set(BENCHMARK_TAG   "v1.9.4"      CACHE STRING "Google Benchmark git tag")
 
 # ---- FlatBuffers (runtime library only, flatc is built under tools/) --------
 set(FLATBUFFERS_BUILD_FLATC   OFF CACHE BOOL "" FORCE)
@@ -36,6 +37,22 @@ FetchContent_Declare(
 )
 
 FetchContent_MakeAvailable(flatbuffers asio googletest)
+
+# ---- Google Benchmark -------------------------------------------------------
+if(MAESTRO_BUILD_BENCH)
+  set(BENCHMARK_ENABLE_TESTING      OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_ENABLE_GTEST_TESTS  OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_ENABLE_INSTALL      OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_INSTALL_DOCS        OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_ENABLE_WERROR       OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    benchmark
+    GIT_REPOSITORY https://github.com/google/benchmark.git
+    GIT_TAG        ${BENCHMARK_TAG}
+    GIT_SHALLOW    TRUE
+  )
+  FetchContent_MakeAvailable(benchmark)
+endif()
 
 # Asio ships no CMakeLists, so expose a standalone interface target ourselves.
 if(NOT TARGET asio::asio)

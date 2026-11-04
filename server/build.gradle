@@ -26,7 +26,8 @@ sourceSets {
     runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
   }
   // The load generator, a separate mod loaded beside the released one for experiments. It hooks
-  // nothing on the search path, so a run measures the released mod alone.
+  // nothing on the search path, so a run measures the released mod alone. It also runs without
+  // the released mod, as a vanilla baseline.
   load {
     compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
     runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
@@ -287,4 +288,24 @@ def loadJar = tasks.register('loadJar', Jar) {
 }
 tasks.named('assemble') {
   dependsOn loadJar
+}
+
+// The jars a benchmark server picks its mods from, under fixed names: the released mod, the load
+// mod and fabric-api, as a production server loads them.
+def fabricApiJar = configurations.detachedConfiguration(
+    dependencies.create("net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"))
+fabricApiJar.transitive = false
+
+tasks.register('benchMods', Sync) {
+  description = 'Collects the mod jars a benchmark server loads into build/bench-mods.'
+  from(tasks.named('jar')) {
+    rename { 'maestro.jar' }
+  }
+  from(loadJar) {
+    rename { 'maestro-load.jar' }
+  }
+  from(fabricApiJar) {
+    rename { 'fabric-api.jar' }
+  }
+  into layout.buildDirectory.dir('bench-mods')
 }

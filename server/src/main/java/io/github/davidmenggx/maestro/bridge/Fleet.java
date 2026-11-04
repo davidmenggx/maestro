@@ -378,6 +378,19 @@ public final class Fleet implements AutoCloseable {
     return paths.stats();
   }
 
+  /**
+   * Requests a tick each node's heartbeats show it serves, not capped by `nodeCapacity`, in fleet
+   * order, null for a node not measured yet.
+   */
+  public List<Double> measuredRates() {
+    List<Double> rates = new ArrayList<>();
+    for (NodeId node : states.keySet()) {
+      double rate = controller.measuredRate(node);
+      rates.add(Double.isNaN(rate) ? null : rate);
+    }
+    return rates;
+  }
+
   /** Stops offloading. Searches are vanilla's from here on. */
   @Override
   public void close() {

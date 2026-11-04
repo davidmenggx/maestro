@@ -13,7 +13,7 @@ struct Options {
 
 enum class ArgsResult { Parsed, Help, Error };
 
-/// One search thread per core, and at least one.
+/// One search thread per core this process may run on, and at least one.
 unsigned defaultWorkers();
 
 void printUsage(std::ostream &OS);

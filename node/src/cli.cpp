@@ -6,6 +6,10 @@
 #include <string_view>
 #include <thread>
 
+#ifdef __linux__
+#include <sched.h>
+#endif
+
 namespace maestro::cli {
 
 namespace {
@@ -26,6 +30,13 @@ bool parseNumber(std::string_view Text, T Min, T Max, T &Out) {
 } // namespace
 
 unsigned defaultWorkers() {
+#ifdef __linux__
+  // Counts only the cores `taskset` or a cgroup cpuset leaves this process.
+  cpu_set_t Allowed;
+  if (sched_getaffinity(0, sizeof(Allowed), &Allowed) == 0 &&
+      CPU_COUNT(&Allowed) > 0)
+    return static_cast<unsigned>(CPU_COUNT(&Allowed));
+#endif
   const unsigned Cores = std::thread::hardware_concurrency();
   return Cores == 0 ? 1 : Cores;
 }
@@ -42,7 +53,7 @@ void printUsage(std::ostream &OS) {
      << "  --request-port <port>  UDP port of the request stream (default "
      << Defaults.Server.RequestPort << ")\n"
      << "  --workers <n>          search threads (default " << defaultWorkers()
-     << ", one per core)\n"
+     << ", one per core it may run on)\n"
      << "  --help                 show this message\n";
 }
 

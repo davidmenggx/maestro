@@ -3,19 +3,20 @@ package io.github.davidmenggx.maestro.load;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
-import io.github.davidmenggx.maestro.bridge.OffloadStats;
-import io.github.davidmenggx.maestro.config.MaestroConfig;
 import java.io.Writer;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Locale;
 
 /**
  * What one run measured, as JSON for comparing runs. A tick's time is its work, from the start to
- * the end of the server's tick events. {@code ticksLate} counts answers by ticks from request to
- * answer, the last entry holding any later. Percentiles are by nearest rank, and null with nothing
- * to rank.
+ * the end of the server's tick events, and the mean of each half of the measured ticks shows
+ * whether the run kept a steady load. {@code ticksLate} counts answers by ticks from request to
+ * answer, the last entry holding any later. {@code nodeRates} is each node's measured rate as the
+ * run ended, in requests a tick. Percentiles are by nearest rank, and null with nothing to rank. On
+ * a server without the released mod, what it would describe is null, and so are the request counts
+ * and node rates if the active fleet changed while the run measured.
  */
 final class Report {
 
@@ -30,44 +31,45 @@ final class Report {
   private final String name;
   private final Scenario scenario;
   private final String started;
-  private final String version;
-  private final MaestroConfig config;
+  private final Maestro.Release release;
   private final long run;
   private final int players;
   private final int spawned;
   private final int alive;
+  private final int resets;
   private final long[] tickNanos;
   private final long wallNanos;
-  private final OffloadStats stats;
+  private final Offloads stats;
 
   /**
    * A run of scenario {@code name} that began measuring at {@code started} (ISO-8601) and measured
-   * the ticks taking {@code tickNanos} over {@code wallNanos}, with {@code stats} the requests
-   * offloaded meanwhile. {@code run} is the active fleet's run, which names its telemetry, or 0 if
-   * none was active.
+   * the ticks taking {@code tickNanos}, in order, over {@code wallNanos}, with {@code resets} the
+   * mobs reset and {@code stats} the requests offloaded meanwhile, or null if the active fleet
+   * changed. {@code release} is the released mod, or null on a server without it. {@code run} is
+   * the active fleet's run as measuring began, which names its telemetry, or 0 if none was active.
    */
   Report(
       String name,
       Scenario scenario,
       String started,
-      String version,
-      MaestroConfig config,
+      Maestro.Release release,
       long run,
       int players,
       int spawned,
       int alive,
+      int resets,
       long[] tickNanos,
       long wallNanos,
-      OffloadStats stats) {
+      Offloads stats) {
     this.name = name;
     this.scenario = scenario;
     this.started = started;
-    this.version = version;
-    this.config = config;
+    this.release = release;
     this.run = run;
     this.players = players;
     this.spawned = spawned;
     this.alive = alive;
+    this.resets = resets;
     this.tickNanos = tickNanos.clone();
     this.wallNanos = wallNanos;
     this.stats = stats;
@@ -86,33 +88,49 @@ final class Report {
     JsonObject json = new JsonObject();
     json.addProperty("scenario", name);
     json.addProperty("started", started);
-    json.add("maestro", maestro());
+    json.add("maestro", release == null ? JsonNull.INSTANCE : maestro());
     json.add("spec", GSON.toJsonTree(scenario));
     json.addProperty("players", players);
     JsonObject entities = new JsonObject();
     entities.addProperty("spawned", spawned);
     entities.addProperty("alive", alive);
+    entities.addProperty("resets", resets);
     json.add("entities", entities);
     json.add("ticks", ticks());
-    JsonObject requests = new JsonObject();
-    stats.counts().forEach(requests::addProperty);
-    json.add("requests", requests);
-    json.add("ticksLate", ticksLate());
+    boolean counted = release != null && stats != null;
+    json.add("requests", counted ? requests() : JsonNull.INSTANCE);
+    json.add("ticksLate", counted ? ticksLate() : JsonNull.INSTANCE);
+    json.add("nodeRates", counted ? nodeRates() : JsonNull.INSTANCE);
     return json;
+  }
+
+  private JsonArray nodeRates() {
+    JsonArray rates = new JsonArray();
+    for (Double rate : stats.nodeRates()) {
+      rates.add(rate == null ? null : round(rate));
+    }
+    return rates;
   }
 
   private JsonObject maestro() {
     JsonObject maestro = new JsonObject();
-    maestro.addProperty("version", version);
+    maestro.addProperty("version", release.version());
     maestro.addProperty("offloading", run != 0);
     maestro.addProperty("run", run == 0 ? null : Long.toHexString(run));
-    maestro.addProperty("offload", config.offload().name().toLowerCase(Locale.ROOT));
-    maestro.addProperty("subMode", config.subMode().name().toLowerCase(Locale.ROOT));
-    maestro.addProperty("nodes", config.nodes().size());
-    maestro.addProperty("nodeCapacity", config.nodeCapacity());
-    maestro.addProperty("areaCells", config.areaCells());
-    maestro.addProperty("spares", config.spares());
+    maestro.addProperty("offload", release.offload());
+    maestro.addProperty("subMode", release.subMode());
+    maestro.addProperty("nodes", release.nodes());
+    maestro.addProperty("nodeCapacity", release.nodeCapacity());
+    maestro.addProperty("areaCells", release.areaCells());
+    maestro.addProperty("spares", release.spares());
+    maestro.addProperty("traceSampleRate", release.traceSampleRate());
     return maestro;
+  }
+
+  private JsonObject requests() {
+    JsonObject requests = new JsonObject();
+    stats.counts().forEach(requests::addProperty);
+    return requests;
   }
 
   private JsonObject ticks() {
@@ -121,9 +139,10 @@ final class Report {
     JsonObject ticks = new JsonObject();
     ticks.addProperty("measured", sorted.length);
     ticks.addProperty("wallSeconds", round(wallNanos / 1e9));
-    ticks.addProperty(
-        "meanMillis",
-        sorted.length == 0 ? null : millis(Arrays.stream(sorted).sum() / sorted.length));
+    ticks.addProperty("meanMillis", mean(tickNanos, 0, tickNanos.length));
+    int half = tickNanos.length / 2;
+    ticks.addProperty("firstHalfMeanMillis", mean(tickNanos, 0, half));
+    ticks.addProperty("secondHalfMeanMillis", mean(tickNanos, half, tickNanos.length));
     ticks.addProperty("p50Millis", millis(percentile(sorted, 50)));
     ticks.addProperty("p99Millis", millis(percentile(sorted, 99)));
     ticks.addProperty("maxMillis", sorted.length == 0 ? null : millis(sorted[sorted.length - 1]));
@@ -140,6 +159,11 @@ final class Report {
     stats.ticksLate().forEach(histogram::add);
     late.add("histogram", histogram);
     return late;
+  }
+
+  /** The mean of {@code nanos} from {@code from} up to {@code to}, or null if none lie there. */
+  private static Double mean(long[] nanos, int from, int to) {
+    return to <= from ? null : millis(Arrays.stream(nanos, from, to).sum() / (to - from));
   }
 
   /** The {@code p}th percentile of {@code sorted}, or null if it is empty. */

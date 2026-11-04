@@ -1,0 +1,37 @@
+{
+  "seed": 3,
+  "terrain": [
+    {"x": -256, "z": -256, "radius": 104},
+    {"x": -256, "z": 256, "radius": 104},
+    {"x": 256, "z": -256, "radius": 104},
+    {"x": 256, "z": 256, "radius": 104}
+  ],
+  "players": [
+    {"x": -280, "z": -280, "walk": 12, "hunted": true},
+    {"x": -232, "z": -280, "walk": 12, "hunted": true},
+    {"x": -280, "z": -232, "walk": 12, "hunted": true},
+    {"x": -232, "z": -232, "walk": 12, "hunted": true},
+    {"x": -280, "z": 232, "walk": 12, "hunted": true},
+    {"x": -232, "z": 232, "walk": 12, "hunted": true},
+    {"x": -280, "z": 280, "walk": 12, "hunted": true},
+    {"x": -232, "z": 280, "walk": 12, "hunted": true},
+    {"x": 232, "z": -280, "walk": 12, "hunted": true},
+    {"x": 280, "z": -280, "walk": 12, "hunted": true},
+    {"x": 232, "z": -232, "walk": 12, "hunted": true},
+    {"x": 280, "z": -232, "walk": 12, "hunted": true},
+    {"x": 232, "z": 232, "walk": 12, "hunted": true},
+    {"x": 280, "z": 232, "walk": 12, "hunted": true},
+    {"x": 232, "z": 280, "walk": 12, "hunted": true},
+    {"x": 280, "z": 280, "walk": 12, "hunted": true}
+  ],
+  "groups": [
+    {"entity": "minecraft:husk", "count": 3, "x": -256, "z": -256, "spread": 64, "nbt": "{DeathLootTable:\"minecraft:empty\"}"},
+    {"entity": "minecraft:cow", "count": 2, "x": -256, "z": -256, "spread": 64, "nbt": "{}"},
+    {"entity": "minecraft:husk", "count": 3, "x": -256, "z": 256, "spread": 64, "nbt": "{DeathLootTable:\"minecraft:empty\"}"},
+    {"entity": "minecraft:cow", "count": 2, "x": -256, "z": 256, "spread": 64, "nbt": "{}"},
+    {"entity": "minecraft:husk", "count": 3, "x": 256, "z": -256, "spread": 64, "nbt": "{DeathLootTable:\"minecraft:empty\"}"},
+    {"entity": "minecraft:cow", "count": 2, "x": 256, "z": -256, "spread": 64, "nbt": "{}"},
+    {"entity": "minecraft:husk", "count": 3, "x": 256, "z": 256, "spread": 64, "nbt": "{DeathLootTable:\"minecraft:empty\"}"},
+    {"entity": "minecraft:cow", "count": 2, "x": 256, "z": 256, "spread": 64, "nbt": "{}"}
+  ]
+}

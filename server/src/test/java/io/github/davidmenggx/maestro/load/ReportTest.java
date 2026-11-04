@@ -5,11 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import io.github.davidmenggx.maestro.bridge.OffloadStats;
-import io.github.davidmenggx.maestro.config.MaestroConfig;
 import java.io.StringWriter;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,19 +22,14 @@ class ReportTest {
           3,
           1,
           10,
-          List.of(new Scenario.Player(0, 24)),
-          List.of(new Scenario.Group("minecraft:husk", 2, 0, 0, 4, null)));
+          List.of(),
+          List.of(),
+          List.of(new Scenario.Player(0, 24, 0, false)),
+          List.of(new Scenario.Group("minecraft:husk", 2, 0, 0, 4, null)),
+          new Scenario.Reset(2, 24));
 
-  private static final MaestroConfig CONFIG =
-      new MaestroConfig(
-          MaestroConfig.SubMode.STREAM,
-          MaestroConfig.Offload.SHADOW,
-          List.of(new MaestroConfig.NodeAddress("127.0.0.1", 0, 0, 0)),
-          40,
-          3,
-          1,
-          "http://localhost:4317",
-          0.01);
+  private static final Maestro.Release RELEASE =
+      new Maestro.Release("0.1.0", "shadow", "stream", 1, 40, 3, 1, 0.25);
 
   @Test
   void nearestRankPercentilesOfSortedValues() {
@@ -62,7 +57,7 @@ class ReportTest {
 
   @Test
   void describesTheReleasedModAndTheScenario() {
-    JsonObject json = report(new long[] {1_000_000}, OffloadStats.NONE).toJson();
+    JsonObject json = report(new long[] {1_000_000}, Offloads.NONE).toJson();
 
     assertEquals("e2e", json.get("scenario").getAsString());
     assertEquals("2026-10-27T12:00:00Z", json.get("started").getAsString());
@@ -76,6 +71,7 @@ class ReportTest {
     assertEquals(40, maestro.get("nodeCapacity").getAsInt());
     assertEquals(3, maestro.get("areaCells").getAsInt());
     assertEquals(1, maestro.get("spares").getAsInt());
+    assertEquals(0.25, maestro.get("traceSampleRate").getAsDouble());
     JsonObject spec = json.getAsJsonObject("spec");
     assertEquals(3, spec.get("seed").getAsLong());
     assertEquals(
@@ -84,6 +80,10 @@ class ReportTest {
     assertEquals(1, json.get("players").getAsInt());
     assertEquals(2, json.getAsJsonObject("entities").get("spawned").getAsInt());
     assertEquals(1, json.getAsJsonObject("entities").get("alive").getAsInt());
+    assertEquals(5, json.getAsJsonObject("entities").get("resets").getAsInt());
+    JsonObject reset = spec.getAsJsonObject("reset");
+    assertEquals(2, reset.get("within").getAsInt());
+    assertEquals(24, reset.get("away").getAsInt());
   }
 
   @Test
@@ -95,7 +95,7 @@ class ReportTest {
     // Out of order, as a run records them.
     nanos[0] = 60_000_000;
 
-    JsonObject ticks = report(nanos, OffloadStats.NONE).toJson().getAsJsonObject("ticks");
+    JsonObject ticks = report(nanos, Offloads.NONE).toJson().getAsJsonObject("ticks");
 
     assertEquals(100, ticks.get("measured").getAsInt());
     assertEquals(5.0, ticks.get("wallSeconds").getAsDouble());
@@ -105,14 +105,35 @@ class ReportTest {
     assertEquals(100.0, ticks.get("maxMillis").getAsDouble());
     // 51 through 100, and the 60 put first.
     assertEquals(51, ticks.get("overBudget").getAsInt());
+    // The 60 and 2 through 50, then 51 through 100, as measured.
+    assertEquals(26.68, ticks.get("firstHalfMeanMillis").getAsDouble());
+    assertEquals(75.5, ticks.get("secondHalfMeanMillis").getAsDouble());
+  }
+
+  @Test
+  void anOddTickGoesToTheSecondHalfAndOneTickHasNoFirstHalf() {
+    JsonObject ticks =
+        report(new long[] {10_000_000, 20_000_000, 60_000_000}, Offloads.NONE)
+            .toJson()
+            .getAsJsonObject("ticks");
+
+    assertEquals(10.0, ticks.get("firstHalfMeanMillis").getAsDouble());
+    assertEquals(40.0, ticks.get("secondHalfMeanMillis").getAsDouble());
+
+    JsonObject one =
+        report(new long[] {7_000_000}, Offloads.NONE).toJson().getAsJsonObject("ticks");
+    assertTrue(one.get("firstHalfMeanMillis").isJsonNull());
+    assertEquals(7.0, one.get("secondHalfMeanMillis").getAsDouble());
   }
 
   @Test
   void aRunThatMeasuredNoTickHasNoTickTimes() {
-    JsonObject ticks = report(new long[0], OffloadStats.NONE).toJson().getAsJsonObject("ticks");
+    JsonObject ticks = report(new long[0], Offloads.NONE).toJson().getAsJsonObject("ticks");
 
     assertEquals(0, ticks.get("measured").getAsInt());
     assertTrue(ticks.get("meanMillis").isJsonNull());
+    assertTrue(ticks.get("firstHalfMeanMillis").isJsonNull());
+    assertTrue(ticks.get("secondHalfMeanMillis").isJsonNull());
     assertTrue(ticks.get("p99Millis").isJsonNull());
     assertTrue(ticks.get("maxMillis").isJsonNull());
     assertEquals(0, ticks.get("overBudget").getAsInt());
@@ -124,7 +145,7 @@ class ReportTest {
     counts.put("requested", 120L);
     counts.put("shed", 3L);
     counts.put("failover_full", 2L);
-    OffloadStats stats = new OffloadStats(counts, List.of(90L, 9L, 1L));
+    Offloads stats = new Offloads(counts, List.of(90L, 9L, 1L), Arrays.asList(41.23456, null));
 
     JsonObject json = report(new long[] {1}, stats).toJson();
 
@@ -138,24 +159,29 @@ class ReportTest {
     assertEquals(1, late.get("p99").getAsInt());
     assertEquals(3, late.getAsJsonArray("histogram").size());
     assertEquals(9, late.getAsJsonArray("histogram").get(1).getAsLong());
+    // In fleet order, and null for a node not measured yet.
+    JsonArray rates = json.getAsJsonArray("nodeRates");
+    assertEquals(2, rates.size());
+    assertEquals(41.235, rates.get(0).getAsDouble());
+    assertTrue(rates.get(1).isJsonNull());
   }
 
   @Test
   void withNoFleetNothingIsOffloaded() {
     Report report =
         new Report(
-            "baseline",
+            "idle",
             SCENARIO,
             "2026-10-27T12:00:00Z",
-            "0.1.0",
-            MaestroConfig.DEFAULT,
+            new Maestro.Release("0.1.0", "on", "batch", 0, 100, 5, 1, 0.01),
             0,
             1,
             2,
             2,
+            0,
             new long[] {1},
             50_000_000,
-            OffloadStats.NONE);
+            Offloads.NONE);
 
     JsonObject json = report.toJson();
 
@@ -164,6 +190,7 @@ class ReportTest {
     assertEquals(0, json.getAsJsonObject("requests").size());
     assertEquals(0, json.getAsJsonObject("ticksLate").get("answers").getAsLong());
     assertTrue(json.getAsJsonObject("ticksLate").get("p99").isJsonNull());
+    assertEquals(0, json.getAsJsonArray("nodeRates").size());
 
     // The file keeps the empty values.
     StringWriter file = new StringWriter();
@@ -174,26 +201,78 @@ class ReportTest {
   }
 
   @Test
+  void withoutTheReleasedModWhatItWouldDescribeIsNull() {
+    Report report =
+        new Report(
+            "vanilla",
+            SCENARIO,
+            "2026-10-27T12:00:00Z",
+            null,
+            0,
+            1,
+            2,
+            2,
+            0,
+            new long[] {1_000_000},
+            50_000_000,
+            Offloads.NONE);
+
+    JsonObject json = report.toJson();
+
+    assertTrue(json.get("maestro").isJsonNull());
+    assertTrue(json.get("requests").isJsonNull());
+    assertTrue(json.get("ticksLate").isJsonNull());
+    assertTrue(json.get("nodeRates").isJsonNull());
+    // The rest of the report is measured as with the mod.
+    assertEquals("vanilla", json.get("scenario").getAsString());
+    assertEquals(2, json.getAsJsonObject("entities").get("alive").getAsInt());
+    assertEquals(1.0, json.getAsJsonObject("ticks").get("maxMillis").getAsDouble());
+
+    // The file keeps the empty values.
+    StringWriter file = new StringWriter();
+    report.write(file);
+    JsonObject written = JsonParser.parseString(file.toString()).getAsJsonObject();
+    assertEquals(json, written);
+    assertTrue(written.has("maestro"));
+    assertTrue(written.has("requests"));
+    assertTrue(written.has("ticksLate"));
+    assertTrue(written.has("nodeRates"));
+  }
+
+  @Test
+  void aFleetThatChangedWhileMeasuringLeavesNoRequestCounts() {
+    JsonObject json = report(new long[] {1_000_000}, null).toJson();
+
+    assertTrue(json.get("requests").isJsonNull());
+    assertTrue(json.get("ticksLate").isJsonNull());
+    assertTrue(json.get("nodeRates").isJsonNull());
+    // The fleet the run began measuring with is still described.
+    assertTrue(json.getAsJsonObject("maestro").get("offloading").getAsBoolean());
+    assertEquals("abc", json.getAsJsonObject("maestro").get("run").getAsString());
+    assertEquals(1, json.getAsJsonObject("ticks").get("measured").getAsInt());
+  }
+
+  @Test
   void keepsItsOwnCopyOfTheTickTimes() {
     long[] nanos = {1_000_000};
-    Report report = report(nanos, OffloadStats.NONE);
+    Report report = report(nanos, Offloads.NONE);
     nanos[0] = 9_000_000;
 
     assertEquals(1, report.measuredTicks());
     assertEquals(1.0, report.toJson().getAsJsonObject("ticks").get("maxMillis").getAsDouble());
   }
 
-  private static Report report(long[] tickNanos, OffloadStats stats) {
+  private static Report report(long[] tickNanos, Offloads stats) {
     return new Report(
         "e2e",
         SCENARIO,
         "2026-10-27T12:00:00Z",
-        "0.1.0",
-        CONFIG,
+        RELEASE,
         0xabcL,
         1,
         2,
         1,
+        5,
         tickNanos,
         5_000_000_000L,
         stats);

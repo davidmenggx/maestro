@@ -1,0 +1,21 @@
+{
+  "seed": 4,
+  "terrain": [
+    {"x": 0, "z": 256, "radius": 104}
+  ],
+  "keeps": [
+    {"x": -24, "z": 232, "radius": 3},
+    {"x": 24, "z": 232, "radius": 3},
+    {"x": -24, "z": 280, "radius": 3},
+    {"x": 24, "z": 280, "radius": 3}
+  ],
+  "players": [
+    {"x": -24, "z": 232, "walk": 2, "hunted": true},
+    {"x": 24, "z": 232, "walk": 2, "hunted": true},
+    {"x": -24, "z": 280, "walk": 2, "hunted": true},
+    {"x": 24, "z": 280, "walk": 2, "hunted": true}
+  ],
+  "groups": [
+    {"entity": "minecraft:husk", "count": 1, "x": 0, "z": 256, "spread": 48, "nbt": "{DeathLootTable:\"minecraft:empty\"}"}
+  ]
+}
