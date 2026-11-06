@@ -1,0 +1,16 @@
+{
+  "seed": 6,
+  "terrain": [
+    {"x": 0, "z": 0, "radius": 112}
+  ],
+  "players": [
+    {"x": -40, "z": -40, "walk": 16, "hunted": true},
+    {"x": 40, "z": -40, "walk": 16, "hunted": true},
+    {"x": -40, "z": 40, "walk": 16, "hunted": true},
+    {"x": 40, "z": 40, "walk": 16, "hunted": true}
+  ],
+  "groups": [
+    {"entity": "minecraft:husk", "count": 1, "x": 0, "z": 0, "spread": 96, "nbt": "{DeathLootTable:\"minecraft:empty\",attributes:[{id:\"minecraft:follow_range\",base:64.0d}]}"}
+  ],
+  "reset": {"within": 2, "away": 40}
+}

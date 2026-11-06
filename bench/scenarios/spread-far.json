@@ -1,0 +1,34 @@
+{
+  "seed": 8,
+  "terrain": [
+    {"x": -256, "z": -256, "radius": 104},
+    {"x": -256, "z": 256, "radius": 104},
+    {"x": 256, "z": -256, "radius": 104},
+    {"x": 256, "z": 256, "radius": 104}
+  ],
+  "players": [
+    {"x": -280, "z": -280, "walk": 12, "hunted": true},
+    {"x": -232, "z": -280, "walk": 12, "hunted": true},
+    {"x": -280, "z": -232, "walk": 12, "hunted": true},
+    {"x": -232, "z": -232, "walk": 12, "hunted": true},
+    {"x": -280, "z": 232, "walk": 12, "hunted": true},
+    {"x": -232, "z": 232, "walk": 12, "hunted": true},
+    {"x": -280, "z": 280, "walk": 12, "hunted": true},
+    {"x": -232, "z": 280, "walk": 12, "hunted": true},
+    {"x": 232, "z": -280, "walk": 12, "hunted": true},
+    {"x": 280, "z": -280, "walk": 12, "hunted": true},
+    {"x": 232, "z": -232, "walk": 12, "hunted": true},
+    {"x": 280, "z": -232, "walk": 12, "hunted": true},
+    {"x": 232, "z": 232, "walk": 12, "hunted": true},
+    {"x": 280, "z": 232, "walk": 12, "hunted": true},
+    {"x": 232, "z": 280, "walk": 12, "hunted": true},
+    {"x": 280, "z": 280, "walk": 12, "hunted": true}
+  ],
+  "groups": [
+    {"entity": "minecraft:husk", "count": 1, "x": -256, "z": -256, "spread": 88, "nbt": "{DeathLootTable:\"minecraft:empty\",attributes:[{id:\"minecraft:follow_range\",base:64.0d}]}"},
+    {"entity": "minecraft:husk", "count": 1, "x": -256, "z": 256, "spread": 88, "nbt": "{DeathLootTable:\"minecraft:empty\",attributes:[{id:\"minecraft:follow_range\",base:64.0d}]}"},
+    {"entity": "minecraft:husk", "count": 1, "x": 256, "z": -256, "spread": 88, "nbt": "{DeathLootTable:\"minecraft:empty\",attributes:[{id:\"minecraft:follow_range\",base:64.0d}]}"},
+    {"entity": "minecraft:husk", "count": 1, "x": 256, "z": 256, "spread": 88, "nbt": "{DeathLootTable:\"minecraft:empty\",attributes:[{id:\"minecraft:follow_range\",base:64.0d}]}"}
+  ],
+  "reset": {"within": 2, "away": 40}
+}

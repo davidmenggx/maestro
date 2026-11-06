@@ -1,8 +1,12 @@
+import argparse
 import contextlib
 import hashlib
 import io
 import math
 import json
+import re
+import subprocess
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -155,6 +159,39 @@ class KeepsTest(unittest.TestCase):
         self.assertEqual(bench.keeps_covered(scenarios), [])
 
 
+class ReachTest(unittest.TestCase):
+    # `RegionLayout.CELL` and `Region.HALO`.
+    CELL = 256
+    HALO = 64
+    # A husk's, which a group's `nbt` may raise.
+    DEFAULT_RANGE = 35.0
+
+    def follow_range(self, nbt):
+        found = re.search(r'id:"minecraft:follow_range",base:([0-9.]+)', nbt)
+        return float(found.group(1)) if found else self.DEFAULT_RANGE
+
+    def test_each_bundled_group_searches_within_the_area_of_its_cell(self):
+        # A search that could read past its region's area stays on the server.
+        # A one-cell region is the smallest a layout makes.
+        for path in sorted(bench.SCENARIOS.glob("*.json")):
+            for group in json.loads(path.read_text())["groups"]:
+                # `SearchReach.blocks` for a mob narrower than a block.
+                reach = math.ceil(self.follow_range(group["nbt"])) + 2
+                for at in (group["x"], group["z"]):
+                    area = (at + self.CELL // 2) // self.CELL * self.CELL
+                    low = area - self.CELL // 2 - self.HALO
+                    high = low + self.CELL + 2 * self.HALO
+                    with self.subTest(scenario=path.stem, group=group["entity"]):
+                        self.assertGreaterEqual(at - group["spread"] - reach, low)
+                        self.assertLess(at + group["spread"] + reach, high)
+
+    def test_the_far_scenarios_raise_the_follow_range(self):
+        for name in ("chase-far", "siege-far", "spread-far"):
+            spec = json.loads((bench.SCENARIOS / f"{name}.json").read_text())
+            for group in spec["groups"]:
+                self.assertEqual(self.follow_range(group["nbt"]), 64.0)
+
+
 class LauncherTest(unittest.TestCase):
     def test_keeps_the_launcher_it_expects_and_removes_another(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -172,9 +209,152 @@ class LauncherTest(unittest.TestCase):
 
 
 class ArgumentsTest(unittest.TestCase):
+    def refusal(self, *argv):
+        args = argparse.Namespace(
+            mobs=None,
+            start=250,
+            limit=32000,
+            nodes=1,
+            node_image=None,
+            node_hosts=None,
+            spares=0,
+            chaos=None,
+            chaos_args=None,
+        )
+        for setting in argv:
+            key, value = setting.split("=", 1)
+            setattr(args, key, json.loads(value))
+        return bench.refusal(args)
+
     def test_refuses_a_start_above_the_limit_unless_counts_are_fixed(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             bench.main(["run", "--start", "500", "--limit", "100"])
+        self.assertIsNone(self.refusal("start=500", "limit=100", "mobs=[100]"))
+
+    def test_remote_hosts_need_an_image_and_one_for_each_node(self):
+        self.assertIsNone(self.refusal())
+        hosts = 'node_hosts=["ssh://a", "ssh://b"]'
+        self.assertIn("--node-image", self.refusal(hosts))
+        image = 'node_image="maestro-node"'
+        self.assertIsNone(self.refusal(hosts, image, "nodes=2"))
+        self.assertIsNone(self.refusal(hosts, image, "nodes=1"))
+        self.assertIn("--node-hosts", self.refusal(hosts, image, "nodes=3"))
+
+    def test_spares_leave_a_node_holding_a_region(self):
+        self.assertIsNone(self.refusal("nodes=2", "spares=1"))
+        self.assertIn("--spares", self.refusal("nodes=2", "spares=2"))
+        self.assertIn("--spares", self.refusal("spares=-1"))
+
+    def test_chaos_needs_containers_and_fixed_counts(self):
+        image = 'node_image="maestro-node"'
+        self.assertIsNone(self.refusal("chaos=1", image, "mobs=[500]"))
+        self.assertIn("--node-image", self.refusal("chaos=1", "mobs=[500]"))
+        self.assertIn("--mobs", self.refusal("chaos=1", image))
+        self.assertIn("--chaos", self.refusal('chaos_args="--gap 5"'))
+
+
+class ContainersTest(unittest.TestCase):
+    def test_a_local_node_has_a_fixed_address_and_its_own_cpus(self):
+        self.assertEqual(
+            bench.container_command("maestro-node", 1, None, [3, 4]),
+            ["docker", "run", "--detach", "--name", "maestro-bench-node-1"]
+            + ["--cap-add", "NET_ADMIN"]
+            + ["--network", "maestro-bench", "--ip", "10.213.0.11"]
+            + ["--cpuset-cpus", "3,4", "maestro-node", "--workers", "2"],
+        )
+        self.assertEqual(
+            bench.container_address(1, None),
+            {
+                "host": "10.213.0.11",
+                "worldPort": 25700,
+                "controlPort": 25701,
+                "requestPort": 25702,
+            },
+        )
+
+    def test_a_remote_node_publishes_its_ports_and_has_every_cpu(self):
+        host = "ssh://ubuntu@10.0.1.12"
+        self.assertEqual(
+            bench.container_command("maestro-node", 0, host, None),
+            ["docker", "--host", host, "run", "--detach"]
+            + ["--name", "maestro-bench-node-0", "--cap-add", "NET_ADMIN"]
+            + ["--publish", "25700:25700", "--publish", "25701:25701"]
+            + ["--publish", "25702:25702/udp", "maestro-node"],
+        )
+        self.assertEqual(bench.container_address(0, host)["host"], "10.0.1.12")
+        self.assertEqual(
+            bench.container_address(0, "tcp://node-3:2376")["host"], "node-3"
+        )
+        with self.assertRaises(bench.BenchError):
+            bench.container_address(0, "unix:///var/run/docker.sock")
+
+    def test_local_addresses_never_clash_with_the_networks_gateway(self):
+        addresses = [bench.node_ip(index) for index in range(8)]
+        self.assertEqual(len(set(addresses)), 8)
+        self.assertNotIn("10.213.0.1", addresses)
+
+
+class ChaosTest(unittest.TestCase):
+    def test_runs_the_chaos_tool_on_each_target_with_the_extra_options(self):
+        targets = [
+            bench.chaos_target("maestro-bench-node-0", None),
+            bench.chaos_target("maestro-bench-node-1", "ssh://ubuntu@10.0.1.12"),
+        ]
+        argv = bench.chaos_command(7, 120, targets, "out.jsonl", ["--gap", "30"])
+
+        self.assertEqual(argv[1:4], ["-I", str(bench.CHAOS), "run"])
+        self.assertEqual(
+            argv[4:],
+            ["--seed", "7", "--duration", "120", "--log", "out.jsonl"]
+            + ["--node", "maestro-bench-node-0"]
+            + ["--node", "maestro-bench-node-1@ssh://ubuntu@10.0.1.12"]
+            + ["--gap", "30"],
+        )
+
+    def test_the_bench_plans_faults_the_chaos_tool_accepts(self):
+        argv = bench.chaos_command(7, 120, ["n"], "out.jsonl", ["--gap", "30"])
+        argv[3] = "plan"
+        argv[8:10] = []
+        done = subprocess.run(argv, capture_output=True, text=True, check=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def process(self, code):
+        return subprocess.Popen(
+            [sys.executable, "-I", "-c", code], stdout=subprocess.PIPE, text=True
+        )
+
+    def test_a_stopped_chaos_run_that_healed_its_faults_passes(self):
+        chaos = self.process(
+            "import signal, sys, time\n"
+            "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(30)"
+        )
+        self.assertEqual(chaos.stdout.readline(), "ready\n")
+        bench.end_chaos(chaos, "log")
+        chaos.stdout.close()
+        self.assertEqual(chaos.returncode, 0)
+
+    def test_a_chaos_run_that_failed_a_command_fails_the_bench(self):
+        chaos = self.process("import sys; sys.exit(1)")
+        chaos.wait()
+        chaos.stdout.close()
+        with self.assertRaises(bench.BenchError):
+            bench.end_chaos(chaos, "log")
+
+
+class NodeStateTest(unittest.TestCase):
+    def test_reads_each_change_the_mod_logs(self):
+        prefix = "[12:00:00] [Server thread/INFO] (maestro) "
+        for state in (
+            "not linked",
+            "linked and in service",
+            "linked but out of service",
+        ):
+            line = f"{prefix}Maestro: node-3 is {state}; so far answered=1"
+            self.assertEqual(bench.node_state(line), ("node-3", state))
+        self.assertIsNone(bench.node_state(f"{prefix}Maestro: spare nodes []; so far"))
+        self.assertIsNone(bench.node_state(f"{prefix}Done (3.2s)!"))
 
 
 class ScaledTest(unittest.TestCase):
@@ -476,6 +656,18 @@ class NodeCapacityTest(unittest.TestCase):
         benchmarks = {"benchmarks": [self.row(2, 1000.0)]}
         self.assertEqual(bench.node_capacity(benchmarks, 2), (100, 2000.0))
 
+    def test_without_a_worker_count_takes_the_run_on_the_most_threads(self):
+        benchmarks = {
+            "benchmarks": [
+                self.row(1, 7000.0, "median"),
+                self.row(4, 5000.0, "median"),
+                self.row(4, 9000.0, "mean"),
+            ]
+        }
+        self.assertEqual(bench.node_capacity(benchmarks), (1000, 20000.0))
+        with self.assertRaises(bench.BenchError):
+            bench.node_capacity({"benchmarks": []})
+
     def test_never_below_one_and_refuses_a_missing_thread_count(self):
         self.assertEqual(
             bench.node_capacity({"benchmarks": [self.row(1, 5.0)]}, 1), (1, 5.0)
@@ -608,6 +800,104 @@ class TableTest(unittest.TestCase):
         self.assertRegex(lines[3], r"\sshed/s\s+node rate\s+failover/s\s")
         self.assertRegex(lines[4], r"\s19\.50\s")
         self.assertRegex(lines[4], r"\s140\s+0\s+0\s+capacity,slo$")
+
+    def test_reads_results_written_before_a_metric_was_kept(self):
+        metrics = bench.metrics(report(mean=30.0))
+        for key in ("tps", "nodeRate", "drift", "overBudget", "resetsPerSecond"):
+            del metrics[key]
+        results = {
+            "nodes": {"capacity": 100},
+            "scenarios": {
+                "crowd": {
+                    "batch": {
+                        "most": 500,
+                        "firstFailed": None,
+                        "searched": False,
+                        "points": [
+                            {
+                                "mobs": 500,
+                                "runs": [{"held": True, "failed": [], "metrics": metrics}],
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+
+        lines = bench.table(results).splitlines()
+
+        self.assertEqual(lines[0], "? node(s) at nodeCapacity 100")
+        self.assertRegex(lines[4], r"^batch\s+500\s+1/1\s+30\.0\s")
+
+
+class FakeServer:
+    """A server whose output is `lines`, given out as the bench waits, where
+    None is a wait that times out. It keeps the commands it is sent."""
+
+    def __init__(self, lines):
+        self.lines = list(lines)
+        self.commands = []
+
+    def skip(self):
+        pass
+
+    def command(self, text):
+        self.commands.append(text)
+
+    def wait_for(self, pattern, timeout, what, required=True):
+        regex = bench.re.compile(pattern)
+        while self.lines:
+            line = self.lines.pop(0)
+            if line is None:
+                break
+            match = regex.search(line)
+            if match:
+                return match
+        if required:
+            raise bench.BenchError(f"no {what}")
+        return None
+
+
+class RunOnceTest(unittest.TestCase):
+    def bench(self, out, **settings):
+        args = argparse.Namespace(
+            warmup=1, duration=1, chaos=None, chaos_args=None, stop_timeout=1
+        )
+        for key, value in settings.items():
+            setattr(args, key, value)
+        made = bench.Bench.__new__(bench.Bench)
+        made.args = args
+        made.out = Path(out)
+        made.scenarios = {"crowd": {"groups": [{"count": 1}]}}
+        return made
+
+    def test_a_run_that_never_starts_measuring_under_chaos_is_stopped(self):
+        # The server falls too far behind to start measuring in time.
+        server = FakeServer(
+            [None, "Maestro load failed: scenario=crowd: stopped before measuring"]
+        )
+        nodes = unittest.mock.Mock(addresses=[{}], targets=lambda: ["n"])
+        with tempfile.TemporaryDirectory() as out, unittest.mock.patch.object(
+            bench, "SERVER_DIR", Path(out)
+        ):
+            made = self.bench(out, chaos=1)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run = made.run_once("batch", "crowd", server, nodes, 16, 0)
+
+        self.assertEqual(server.commands, ["maestro load start crowd", "maestro load stop"])
+        self.assertEqual(run["failure"], "stopped before measuring")
+        self.assertNotIn("chaos", run)
+
+    def test_a_failed_search_benchmark_is_a_bench_error(self):
+        with tempfile.TemporaryDirectory() as out:
+            (Path(out) / "logs").mkdir()
+            made = self.bench(out, node_image="maestro-node")
+            failed = subprocess.CompletedProcess([], 125, stdout=b"")
+            with unittest.mock.patch.object(
+                bench.subprocess, "run", return_value=failed
+            ), self.assertRaisesRegex(bench.BenchError, "status 125"):
+                made.search_rates("ssh://ubuntu@10.0.1.12", None)
+
 
 if __name__ == "__main__":
     unittest.main()

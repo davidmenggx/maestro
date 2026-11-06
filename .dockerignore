@@ -1,0 +1,6 @@
+*
+!tools/CMakeLists.txt
+!schema/
+!node/
+!fixtures/parity/
+node/generated/

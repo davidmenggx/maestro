@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <csignal>
 #include <cstddef>
 #include <exception>
@@ -34,6 +35,13 @@ int main(int Argc, char **Argv) {
               << Node.worldPort() << ", control " << Node.controlPort()
               << ", requests " << Node.requestPort() << ", "
               << Opts.Server.Node.Workers << " workers\n";
+    const maestro::net::SocketBuffers Granted = Node.requestBuffers();
+    if (std::min(Granted.Receive, Granted.Send) < Opts.Server.DatagramBuffer)
+      std::clog << "maestro-node: the request socket has " << Granted.Receive
+                << " bytes to receive and " << Granted.Send
+                << " to send, under the " << Opts.Server.DatagramBuffer
+                << " asked, so a burst of requests may be dropped; raise "
+                   "net.core.rmem_max and net.core.wmem_max\n";
     Io.run();
     std::clog << "maestro-node: stopped after " << Node.searches()
               << " searches\n";

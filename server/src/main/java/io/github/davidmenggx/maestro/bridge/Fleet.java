@@ -138,7 +138,11 @@ public final class Fleet implements AutoCloseable {
     }
     OtelMetrics metrics = new OtelMetrics();
     NettyTransport transport =
-        new NettyTransport(nodes, NettyTransport.MAX_PENDING_BYTES, clock::nowNanos);
+        new NettyTransport(
+            nodes,
+            NettyTransport.MAX_PENDING_BYTES,
+            NettyTransport.DATAGRAM_BUFFER_BYTES,
+            clock::nowNanos);
     PoolOffload offload = new PoolOffload(OFFLOAD_THREADS, metrics, clock::nowNanos);
     ControllerEnv env =
         new ControllerEnv(

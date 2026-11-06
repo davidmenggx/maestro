@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+#include <sys/socket.h>
+
 #include <asio/buffer.hpp>
 #include <asio/post.hpp>
 #include <asio/read.hpp>
@@ -152,12 +154,28 @@ Server::Server(asio::io_context &Io, const ServerOptions &Opts)
   WorldPort = WorldAcceptor.local_endpoint().port();
   ControlPort = ControlAcceptor.local_endpoint().port();
   RequestPort = Requests.local_endpoint().port();
+  Requests.set_option(
+      asio::socket_base::receive_buffer_size(Opts.DatagramBuffer));
+  Requests.set_option(asio::socket_base::send_buffer_size(Opts.DatagramBuffer));
   // A full send buffer drops the answer rather than stall the I/O thread.
   Requests.non_blocking(true);
   accept(WorldAcceptor, WorldBackoff, serve::Port::World);
   accept(ControlAcceptor, ControlBackoff, serve::Port::Control);
   receiveRequests();
   scheduleHeartbeat();
+}
+
+SocketBuffers Server::requestBuffers() {
+  // Read directly, as asio halves the size Linux reports.
+  const auto Read = [this](int Option) {
+    int Size = 0;
+    socklen_t Length = sizeof(Size);
+    if (::getsockopt(Requests.native_handle(), SOL_SOCKET, Option, &Size,
+                     &Length) != 0)
+      return 0;
+    return Size;
+  };
+  return {Read(SO_RCVBUF), Read(SO_SNDBUF)};
 }
 
 void Server::stop() {

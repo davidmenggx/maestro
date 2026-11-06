@@ -21,8 +21,8 @@ MAESTRO_SANITIZE ?=
 MAESTRO_BUILD_BENCH ?= OFF
 
 .PHONY: all help flatc schema schema-cpp schema-java \
-        node node-configure node-test \
-        server server-test tools-test fuzz test test-boot test-load test-game test-e2e capture conformance run-node run-server \
+        node node-configure node-test node-image \
+        server server-test tools-test fuzz test test-boot test-load test-game test-e2e test-image capture conformance run-node run-server \
         bench bench-node obs-up obs-down coverage clean distclean
 
 all: node server ## Build the C++ node and the Java mod
@@ -69,6 +69,15 @@ node-test: node ## Run the C++ unit tests
 
 run-node: node ## Print the node binary's usage
 	$(BUILD)/node/maestro-node --help
+
+# The node's container image, which `make bench IMAGE=...` runs the nodes from.
+NODE_IMAGE = $(or $(IMAGE),maestro-node)
+
+node-image: ## Build the node's container image (IMAGE=name, default maestro-node)
+	docker build -f node/Dockerfile -t $(NODE_IMAGE) .
+
+test-image: node-image ## Build the node image and check its binaries, and each chaos fault, in a container
+	IMAGE=$(NODE_IMAGE) tools/image-smoke-test.sh
 
 # ---------------------------------------------------------------------------
 # Java Fabric server mod
@@ -118,16 +127,20 @@ conformance: schema-java ## Write the node conformance fixture into fixtures/con
 BENCH_ARGS = $(if $(CONFIGS),--configs $(CONFIGS)) $(if $(SCENARIOS),--scenarios $(SCENARIOS)) \
 	$(if $(NODES),--nodes $(NODES)) $(if $(SERVER_CPUS),--server-cpus $(SERVER_CPUS)) \
 	$(if $(NODE_CPUS),--node-cpus $(NODE_CPUS)) $(if $(REPEATS),--repeats $(REPEATS)) \
-	$(if $(MOBS),--mobs $(MOBS))
+	$(if $(MOBS),--mobs $(MOBS)) $(if $(IMAGE),--node-image $(IMAGE)) \
+	$(if $(NODE_HOSTS),--node-hosts $(NODE_HOSTS)) $(if $(SPARES),--spares $(SPARES)) \
+	$(if $(CHAOS),--chaos $(CHAOS))
 
 # Inherited by `node`, so its build makes `maestro-bench`.
 bench bench-node: MAESTRO_BUILD_BENCH = ON
 
-# The node is built only when CONFIGS names one that offloads, as every config does by default.
+# The node is built only when CONFIGS names one that offloads, as every config does by default:
+# as a binary, or with IMAGE as an image, which remote NODE_HOSTS pull themselves.
 comma := ,
 BENCH_OFFLOADS := $(if $(CONFIGS),$(filter batch stream,$(subst $(comma), ,$(CONFIGS))),all)
+BENCH_NODE := $(if $(BENCH_OFFLOADS),$(if $(IMAGE),$(if $(NODE_HOSTS),,node-image),node))
 
-bench: $(if $(BENCH_OFFLOADS),node) schema-java ## Find the most mobs a server holds at 20 TPS, vanilla and with Maestro (CONFIGS= SCENARIOS= NODES= SERVER_CPUS= NODE_CPUS= REPEATS= MOBS= BENCH_FLAGS=)
+bench: $(BENCH_NODE) schema-java ## Find the most mobs a server holds at 20 TPS, vanilla and with Maestro (CONFIGS= SCENARIOS= NODES= SERVER_CPUS= NODE_CPUS= REPEATS= MOBS= IMAGE= NODE_HOSTS= SPARES= CHAOS= BENCH_FLAGS=)
 	cd server && $(GRADLE) benchMods
 	python3 -I tools/bench.py run $(BENCH_ARGS) $(BENCH_FLAGS)
 

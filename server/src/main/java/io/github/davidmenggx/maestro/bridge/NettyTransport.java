@@ -17,6 +17,7 @@ import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.nio.NioIoHandler;
+import io.netty.channel.socket.DatagramChannelConfig;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioDatagramChannel;
@@ -58,6 +59,12 @@ public final class NettyTransport implements Transport, AutoCloseable {
   public static final int MAX_PENDING_BYTES = 64 << 20;
 
   static final int CONNECT_TIMEOUT_MILLIS = 2_000;
+
+  /**
+   * Kernel buffer asked for each way of each request socket, so a burst of answers is not dropped.
+   * The kernel caps it at {@code net.core.rmem_max} and {@code net.core.wmem_max}.
+   */
+  public static final int DATAGRAM_BUFFER_BYTES = 8 << 20;
 
   /** Largest frame a node sends on a connection. Its replies are a few dozen bytes. */
   static final int MAX_REPLY_BYTES = 64 << 10;
@@ -103,12 +110,16 @@ public final class NettyTransport implements Transport, AutoCloseable {
   private volatile Listener listener;
 
   /**
-   * Resolves every node's addresses and binds its request socket. {@code nanoTime} stamps each
-   * frame when heard, on the controller clock's scale. Throws {@link IllegalArgumentException} if a
-   * host does not resolve or two nodes take requests at one address.
+   * Resolves every node's addresses and binds its request socket, asking for {@code
+   * datagramBufferBytes} of kernel buffer each way. {@code nanoTime} stamps each frame when heard,
+   * on the controller clock's scale. Throws {@link IllegalArgumentException} if a host does not
+   * resolve or two nodes take requests at one address.
    */
   public NettyTransport(
-      Map<NodeId, NodeAddress> nodes, int maxPendingBytes, LongSupplier nanoTime) {
+      Map<NodeId, NodeAddress> nodes,
+      int maxPendingBytes,
+      int datagramBufferBytes,
+      LongSupplier nanoTime) {
     this.maxPendingBytes = maxPendingBytes;
     this.nanoTime = nanoTime;
     Set<InetSocketAddress> requestAddresses = new HashSet<>();
@@ -134,6 +145,8 @@ public final class NettyTransport implements Transport, AutoCloseable {
                 .channel(NioDatagramChannel.class)
                 // Read a whole datagram at once. The default buffer would cut an answer short.
                 .option(ChannelOption.RCVBUF_ALLOCATOR, new FixedRecvByteBufAllocator(1 << 16))
+                .option(ChannelOption.SO_RCVBUF, datagramBufferBytes)
+                .option(ChannelOption.SO_SNDBUF, datagramBufferBytes)
                 .handler(new Datagrams(node))
                 .bind(0)
                 .syncUninterruptibly()
@@ -146,6 +159,34 @@ public final class NettyTransport implements Transport, AutoCloseable {
       group.shutdownGracefully(0, 0, TimeUnit.SECONDS);
       throw e;
     }
+    warnIfCapped(datagramBufferBytes);
+  }
+
+  /**
+   * Logs once if the kernel gave a request socket less buffer than {@code asked}. Linux reports
+   * twice the size it was asked for, up to twice its cap.
+   */
+  private void warnIfCapped(int asked) {
+    for (NodeId node : datagrams.keySet()) {
+      DatagramChannelConfig config = requestConfig(node);
+      int receive = config.getReceiveBufferSize();
+      int send = config.getSendBufferSize();
+      if (Math.min(receive, send) < asked) {
+        LOG.warn(
+            "Maestro: request sockets have {} bytes to receive and {} to send, under the {} asked,"
+                + " so a burst of answers may be dropped; raise net.core.rmem_max and"
+                + " net.core.wmem_max",
+            receive,
+            send,
+            asked);
+        return;
+      }
+    }
+  }
+
+  /** The node's request socket's settings, as the kernel holds them. */
+  DatagramChannelConfig requestConfig(NodeId node) {
+    return (DatagramChannelConfig) datagrams.get(node).config();
   }
 
   /** The local address of the node's request socket, which its answers come back to. */

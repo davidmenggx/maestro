@@ -4,15 +4,19 @@ import argparse
 import collections
 import datetime
 import hashlib
+import ipaddress
 import json
 import os
 import platform
 import re
+import shlex
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -23,6 +27,7 @@ MODS = ROOT / "server" / "build" / "bench-mods"
 GRADLE_PROPERTIES = ROOT / "server" / "gradle.properties"
 NODE_BIN = ROOT / "build" / "node" / "maestro-node"
 BENCH_BIN = ROOT / "build" / "node" / "maestro-bench"
+CHAOS = ROOT / "tools" / "chaos.py"
 # Kept across runs, so the launcher's downloads are made once.
 SERVER_DIR = ROOT / "build" / "bench" / "server"
 
@@ -58,6 +63,30 @@ FAILOVER_COUNTS = ("failover_recent", "failover_full", "failover_cheap")
 # Every config's server runs on these, so a collection pauses it for well under
 # a tick and a slow tick is the server's own work.
 SERVER_JVM_FLAGS = ("-XX:+UseZGC", "-XX:+AlwaysPreTouch")
+# How maestro-bench measures the search rate.
+SEARCH_BENCH_FLAGS = (
+    "--benchmark_filter=^search/all/",
+    "--benchmark_min_time=2s",
+    "--benchmark_repetitions=3",
+    "--benchmark_report_aggregates_only=true",
+)
+# Local node containers sit on this Docker network, each at a fixed address, so
+# one that tools/chaos.py restarts comes back where the server expects it.
+NODE_NETWORK = "maestro-bench"
+NODE_SUBNET = "10.213.0.0/24"
+# A node's own ports, which a container on a remote Docker host publishes.
+NODE_PORTS = {"worldPort": 25700, "controlPort": 25701, "requestPort": 25702}
+# Where `node/Dockerfile` puts the parity fixtures maestro-bench replays.
+IMAGE_FIXTURES = "/usr/local/share/maestro/parity"
+# Seconds the nodes may take to come back into service after a run's faults.
+RECOVERY_SECONDS = 120
+# Seconds tools/chaos.py may take to heal what it has on once told to stop.
+CHAOS_STOP_SECONDS = 300
+# The mod's line when a node's link or service changes.
+NODE_STATE = re.compile(
+    r"Maestro: (node-\d+) is (not linked|linked and in service|linked but out of service);"
+)
+IN_SERVICE = "linked and in service"
 
 SERVER_PROPERTIES = {
     "level-type": "minecraft:flat",
@@ -312,15 +341,21 @@ def decided(held, failed, repeats):
     return held * 2 > repeats or failed * 2 >= repeats
 
 
-def node_capacity(benchmarks, workers):
+def node_capacity(benchmarks, workers=None):
     """Requests a node with `workers` workers serves a tick, and its searches a
-    second, from maestro-bench's JSON output."""
-    for row in benchmarks["benchmarks"]:
-        if (
-            row["run_name"].startswith("search/all/")
-            and row["threads"] == workers
-            and row.get("aggregate_name", "median") == "median"
-        ):
+    second, from maestro-bench's JSON output. With `workers` None, the node has
+    a worker per thread of the run on the most threads, as maestro-bench and
+    the node both default to one per CPU they may use."""
+    rows = [
+        row
+        for row in benchmarks["benchmarks"]
+        if row["run_name"].startswith("search/all/")
+        and row.get("aggregate_name", "median") == "median"
+    ]
+    if workers is None and rows:
+        workers = max(row["threads"] for row in rows)
+    for row in rows:
+        if row["threads"] == workers:
             # A multi-threaded run's rate is per thread.
             rate = row["items_per_second"] * workers
             return max(1, int(rate // TICKS_PER_SECOND)), rate
@@ -362,7 +397,9 @@ def table(results):
     text = []
     nodes = results["nodes"]
     if nodes is not None:
-        text.append(f"{nodes['count']} node(s) at nodeCapacity {nodes['capacity']}")
+        text.append(
+            f"{nodes.get('count', '?')} node(s) at nodeCapacity {nodes.get('capacity')}"
+        )
         text.append("")
     for scenario, configs in results["scenarios"].items():
         most = []
@@ -380,8 +417,8 @@ def table(results):
                 spread = (
                     f" ({min(means):.1f}-{max(means):.1f})" if len(means) > 1 else ""
                 )
-                over = median(run["overBudget"] for run in runs)
-                drifted = median(run["drift"] for run in runs)
+                over = median(run.get("overBudget") for run in runs)
+                drifted = median(run.get("drift") for run in runs)
                 missed = median(late_share(run) for run in runs)
                 failed = sorted(
                     {why for run in point["runs"] for why in run["failed"]}
@@ -392,18 +429,18 @@ def table(results):
                         str(point["mobs"]),
                         f"{sum(run['held'] for run in point['runs'])}/{len(point['runs'])}",
                         number(median(means)) + spread,
-                        number(median(run["p50Millis"] for run in runs)),
-                        number(median(run["p99Millis"] for run in runs)),
+                        number(median(run.get("p50Millis") for run in runs)),
+                        number(median(run.get("p99Millis") for run in runs)),
                         number(None if over is None else over * 100, 1, "%"),
                         "-" if drifted is None else f"{drifted * 100:+.1f}%",
-                        number(median(run["tps"] for run in runs), 2),
+                        number(median(run.get("tps") for run in runs), 2),
                         number(median(run.get("lateP99") for run in runs), 0),
                         number(None if missed is None else missed * 100, 2, "%"),
                         number(median(run.get("answeredPerSecond") for run in runs), 0),
                         number(median(run.get("shedPerSecond") for run in runs), 0),
-                        number(median(run["nodeRate"] for run in runs), 0),
+                        number(median(run.get("nodeRate") for run in runs), 0),
                         number(median(run.get("failoverPerSecond") for run in runs), 0),
-                        number(median(run["resetsPerSecond"] for run in runs), 0),
+                        number(median(run.get("resetsPerSecond") for run in runs), 0),
                         ",".join(failed),
                     ]
                 )
@@ -463,6 +500,12 @@ def check_launcher(path):
         )
 
 
+def node_state(line):
+    """The node and its new state if `line` logs a change to one, or None."""
+    match = NODE_STATE.search(line)
+    return match.groups() if match else None
+
+
 class Server:
     """A server run from SERVER_DIR, its console on stdin and its output in
     `log`."""
@@ -482,11 +525,21 @@ class Server:
         self.reader = open(log_file, "rb")
         self.partial = b""
         self.unread = collections.deque()
+        # Each node's link and service, by its name, from the last line on it.
+        self.states = {}
 
     def _read(self):
         self.partial += self.reader.read()
         *lines, self.partial = self.partial.split(b"\n")
-        self.unread.extend(line.decode("utf-8", "replace") for line in lines)
+        for line in lines:
+            text = line.decode("utf-8", "replace")
+            state = node_state(text)
+            if state:
+                self.states[state[0]] = state[1]
+            self.unread.append(text)
+
+    def in_service(self):
+        return sum(state == IN_SERVICE for state in self.states.values())
 
     def skip(self):
         """Forgets the output so far, so a wait sees only what follows."""
@@ -514,6 +567,23 @@ class Server:
                         f"no {what} within {timeout:.0f}s; see {self.log_file}"
                     )
                 return None
+            time.sleep(0.2)
+
+    def wait_until(self, done, timeout, what):
+        """Waits until `done()`, which the output read so far may change."""
+        deadline = time.monotonic() + timeout
+        while True:
+            self._read()
+            if done():
+                return
+            if self.process.poll() is not None:
+                raise BenchError(
+                    f"the server exited waiting for {what}; see {self.log_file}"
+                )
+            if time.monotonic() > deadline:
+                raise BenchError(
+                    f"no {what} within {timeout:.0f}s; see {self.log_file}"
+                )
             time.sleep(0.2)
 
     def command(self, text):
@@ -585,11 +655,181 @@ class Nodes:
                 process.wait()
 
 
+def docker(host):
+    """The Docker CLI, aimed at `host`, or at the local daemon if None."""
+    return ["docker"] + (["--host", host] if host else [])
+
+
+def container_name(index):
+    return f"maestro-bench-node-{index}"
+
+
+def node_ip(index):
+    """Local node container `index`'s address on NODE_NETWORK."""
+    return str(ipaddress.ip_network(NODE_SUBNET).network_address + 10 + index)
+
+
+def container_address(index, host):
+    """Where the server reaches node container `index` on `host`: its own
+    address on NODE_NETWORK if local, or else the host, which publishes its
+    ports."""
+    if host is None:
+        return {"host": node_ip(index), **NODE_PORTS}
+    hostname = urllib.parse.urlsplit(host).hostname
+    if not hostname:
+        raise BenchError(f"'{host}' names no host the server can reach")
+    return {"host": hostname, **NODE_PORTS}
+
+
+def container_command(image, index, host, cpus):
+    """The command that starts node container `index` of `image` on `host`,
+    pinned to `cpus` with a worker each, or else on every CPU. It may run `tc`,
+    and a remote one stays on a bridge network too, so `tc` slows only the node
+    and not the SSH it is driven over."""
+    argv = docker(host) + ["run", "--detach", "--name", container_name(index)]
+    argv += ["--cap-add", "NET_ADMIN"]
+    if host is None:
+        argv += ["--network", NODE_NETWORK, "--ip", node_ip(index)]
+    else:
+        world, control, request = NODE_PORTS.values()
+        for port in (f"{world}:{world}", f"{control}:{control}"):
+            argv += ["--publish", port]
+        argv += ["--publish", f"{request}:{request}/udp"]
+    if cpus:
+        argv += ["--cpuset-cpus", cpu_list(cpus)]
+    argv.append(image)
+    if cpus:
+        argv += ["--workers", str(len(cpus))]
+    return argv
+
+
+def checked(argv, what):
+    """The output of `argv`, or a BenchError naming `what` failed."""
+    done = subprocess.run(argv, capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        raise BenchError(f"could not {what}: {done.stderr.strip()}")
+    return done.stdout
+
+
+class Containers:
+    """Nodes run as containers of `image`, one per placement: a Docker host,
+    None for the local one, and the CPUs to pin it to, or None for all."""
+
+    def __init__(self, image, placements, logs):
+        self.placements = placements
+        self.logs = logs
+        self.names = [container_name(index) for index in range(len(placements))]
+        self.addresses = [
+            container_address(index, host) for index, (host, _) in enumerate(placements)
+        ]
+        if any(host is None for host, _ in placements):
+            present = subprocess.run(
+                docker(None) + ["network", "inspect", NODE_NETWORK],
+                capture_output=True,
+                check=False,
+            )
+            if present.returncode != 0:
+                checked(
+                    docker(None)
+                    + ["network", "create", "--subnet", NODE_SUBNET, NODE_NETWORK],
+                    f"create the Docker network {NODE_NETWORK}",
+                )
+        self.started = []
+        try:
+            for index, (host, cpus) in enumerate(placements):
+                # One left by an interrupted run.
+                subprocess.run(
+                    docker(host) + ["rm", "--force", self.names[index]],
+                    capture_output=True,
+                    check=False,
+                )
+                checked(
+                    container_command(image, index, host, cpus),
+                    f"start {self.names[index]}",
+                )
+                self.started.append(index)
+        except BaseException:
+            self.stop()
+            raise
+
+    def targets(self):
+        return [
+            chaos_target(name, host)
+            for name, (host, _) in zip(self.names, self.placements)
+        ]
+
+    def check(self):
+        for name, (host, _) in zip(self.names, self.placements):
+            running = checked(
+                docker(host) + ["inspect", "--format", "{{.State.Running}}", name],
+                f"inspect {name}",
+            )
+            if running.strip() != "true":
+                raise BenchError(f"{name} is not running")
+
+    def stop(self):
+        """Stops each container, keeping its output in `logs`, and removes
+        it."""
+        for index in self.started:
+            host, _ = self.placements[index]
+            name = self.names[index]
+            subprocess.run(
+                docker(host) + ["stop", "--time", "10", name],
+                capture_output=True,
+                check=False,
+            )
+            with open(self.logs / f"node-{index}.log", "wb") as output:
+                subprocess.run(
+                    docker(host) + ["logs", name],
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+            subprocess.run(
+                docker(host) + ["rm", "--force", name], capture_output=True, check=False
+            )
+        self.started = []
+
+
+def chaos_target(name, host):
+    """Container `name` on Docker host `host` as tools/chaos.py names it."""
+    return name if host is None else f"{name}@{host}"
+
+
+def chaos_command(seed, duration, targets, log, extra):
+    """The tools/chaos.py run of `seed` over `duration` seconds on `targets`,
+    logging to `log`, with `extra` arguments."""
+    argv = [sys.executable, "-I", str(CHAOS), "run", "--seed", str(seed)]
+    argv += ["--duration", str(duration), "--log", str(log)]
+    for target in targets:
+        argv += ["--node", target]
+    return argv + list(extra)
+
+
+def end_chaos(chaos, chaos_log):
+    """Stops tools/chaos.py, which first heals the faults it has on."""
+    if chaos.poll() is None:
+        chaos.send_signal(signal.SIGTERM)
+    try:
+        chaos.wait(CHAOS_STOP_SECONDS)
+    except subprocess.TimeoutExpired:
+        chaos.kill()
+        chaos.wait()
+        raise BenchError(f"faults may still be on; see {chaos_log}")
+    if chaos.returncode != 0:
+        raise BenchError(f"a fault did not apply or heal; see {chaos_log}")
+
+
 class Bench:
     def __init__(self, args):
         self.args = args
         self.server_cpus = parse_cpus(args.server_cpus)
-        self.node_cpus = split_cpus(parse_cpus(args.node_cpus), args.nodes)
+        # Nodes on remote hosts have their hosts' CPUs, and local ones a share
+        # of --node-cpus each.
+        self.hosts = args.node_hosts[: args.nodes] if args.node_hosts else None
+        self.node_cpus = (
+            None if self.hosts else split_cpus(parse_cpus(args.node_cpus), args.nodes)
+        )
         self.out = Path(args.out)
         self.scenarios = {}
         for name in args.scenarios:
@@ -618,10 +858,17 @@ class Bench:
             "scenarios": {name: {} for name in args.scenarios},
         }
 
+    def placements(self):
+        """Each node's Docker host, None for the local one, and its CPUs, None
+        for all of them."""
+        if self.hosts:
+            return [(host, None) for host in self.hosts]
+        return [(None, cpus) for cpus in self.node_cpus]
+
     def check(self):
         allowed = os.sched_getaffinity(0)
-        node_cpus = [cpu for cpus in self.node_cpus for cpu in cpus]
-        if any(not cpus for cpus in self.node_cpus):
+        node_cpus = [cpu for cpus in self.node_cpus or [] for cpu in cpus]
+        if self.node_cpus and any(not cpus for cpus in self.node_cpus):
             raise BenchError(f"{self.args.nodes} nodes need at least as many node CPUs")
         if set(self.server_cpus) & set(node_cpus):
             raise BenchError("the server and node CPUs overlap")
@@ -646,11 +893,29 @@ class Bench:
                 raise BenchError(
                     f"no {MODS / jar} (run `make bench` or `gradlew benchMods`)"
                 )
-        if any(config in OFFLOADING for config in self.args.configs):
+        offloading = any(config in OFFLOADING for config in self.args.configs)
+        image = self.args.node_image
+        if offloading and image:
+            if shutil.which("docker") is None:
+                raise BenchError("docker is not installed")
+            # A remote host pulls the image if it lacks it.
+            if not self.hosts:
+                checked(
+                    docker(None) + ["image", "inspect", image],
+                    f"find the image {image} (run `make node-image`)",
+                )
+        elif offloading:
             if not os.access(NODE_BIN, os.X_OK):
                 raise BenchError(f"no {NODE_BIN} (run `make node`)")
             if not self.args.node_capacity and not os.access(BENCH_BIN, os.X_OK):
                 raise BenchError(f"no {BENCH_BIN} (run `make bench-node`)")
+        if self.args.chaos is not None:
+            checked(
+                [sys.executable, "-I", str(CHAOS), "plan", "--node", "node"]
+                + ["--duration", str(self.args.duration)]
+                + self.chaos_args(),
+                "plan faults from --chaos-args",
+            )
 
     def save(self):
         partial = self.out / "results.json.part"
@@ -671,40 +936,69 @@ class Bench:
         log(f"results in {self.out / 'results.json'}")
 
     def capacity(self):
-        """The `nodeCapacity` of every node, measured on the smallest's CPUs
-        unless --node-capacity sets it."""
+        """The `nodeCapacity` of every node, measured on the smallest's CPUs,
+        or the first remote node's host, unless --node-capacity sets it."""
         if self.results["nodes"] is None:
-            smallest = min(self.node_cpus, key=len)
             nodes = {"count": self.args.nodes, "cpus": self.node_cpus}
+            if self.args.node_image:
+                nodes["image"] = self.args.node_image
+            if self.hosts:
+                nodes["hosts"] = self.hosts
             if self.args.node_capacity:
                 nodes["capacity"] = self.args.node_capacity
             else:
-                log(f"measuring the search rate on CPUs {cpu_list(smallest)}")
-                out = self.out / "node-bench.json"
-                with open(self.out / "logs" / "node-bench.log", "wb") as output:
-                    subprocess.run(
-                        ["taskset", "-c", cpu_list(smallest), str(BENCH_BIN)]
-                        + ["--benchmark_filter=^search/all/", "--benchmark_min_time=2s"]
-                        + [
-                            "--benchmark_repetitions=3",
-                            "--benchmark_report_aggregates_only=true",
-                        ]
-                        + [f"--benchmark_out={out}", "--benchmark_out_format=json"],
-                        check=True,
-                        stdout=output,
-                        stderr=subprocess.STDOUT,
-                    )
+                host, cpus = (
+                    self.placements()[0]
+                    if self.hosts
+                    else (None, min(self.node_cpus, key=len))
+                )
+                where = host or f"CPUs {cpu_list(cpus)}"
+                log(f"measuring the search rate on {where}")
                 capacity, rate = node_capacity(
-                    json.loads(out.read_text()), len(smallest)
+                    self.search_rates(host, cpus), len(cpus) if cpus else None
                 )
                 nodes["capacity"] = capacity
                 nodes["searchesPerSecond"] = round(rate)
-                log(
-                    f"{round(rate)} searches/s on {len(smallest)} workers: nodeCapacity {capacity}"
-                )
+                log(f"{round(rate)} searches/s on {where}: nodeCapacity {capacity}")
             self.results["nodes"] = nodes
             self.save()
         return self.results["nodes"]["capacity"]
+
+    def search_rates(self, host, cpus):
+        """maestro-bench's results on `host`'s `cpus`, from the node image if
+        the nodes run in containers, also kept in --out."""
+        out = self.out / "node-bench.json"
+        bench_log = self.out / "logs" / "node-bench.log"
+        with open(bench_log, "wb") as output:
+            if self.args.node_image:
+                pinned = ["--cpuset-cpus", cpu_list(cpus)] if cpus else []
+                done = subprocess.run(
+                    docker(host)
+                    + ["run", "--rm", *pinned, "--entrypoint", "maestro-bench"]
+                    + [self.args.node_image, *SEARCH_BENCH_FLAGS]
+                    + ["--benchmark_format=json", IMAGE_FIXTURES],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=output,
+                )
+                out.write_bytes(done.stdout)
+            else:
+                done = subprocess.run(
+                    ["taskset", "-c", cpu_list(cpus), str(BENCH_BIN)]
+                    + list(SEARCH_BENCH_FLAGS)
+                    + [f"--benchmark_out={out}", "--benchmark_out_format=json"],
+                    check=False,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                )
+        if done.returncode != 0:
+            raise BenchError(
+                f"maestro-bench exited with status {done.returncode}; see {bench_log}"
+            )
+        return json.loads(out.read_text())
+
+    def chaos_args(self):
+        return shlex.split(self.args.chaos_args or "")
 
     def prepare(self, config, logs, world):
         """Sets SERVER_DIR up for `config` on a fresh copy of `world`, then
@@ -736,14 +1030,17 @@ class Bench:
             settings_file.write_text(json.dumps(settings, indent=2) + "\n")
             return None
         capacity = self.capacity()
-        nodes = Nodes(self.node_cpus, logs)
+        if self.args.node_image:
+            nodes = Containers(self.args.node_image, self.placements(), logs)
+        else:
+            nodes = Nodes(self.node_cpus, logs)
         settings.update(
             subMode=config,
             offload="on",
             nodes=nodes.addresses,
             nodeCapacity=capacity,
             areaCells=self.args.area_cells,
-            spares=0,
+            spares=self.args.spares,
         )
         settings_file.write_text(json.dumps(settings, indent=2) + "\n")
         return nodes
@@ -799,21 +1096,18 @@ class Bench:
             self.args.java, jar, self.server_cpus, self.args.heap, logs / "server.log"
         )
         try:
-            # The nodes may come into service before the server is done starting.
+            # The states count what is read before the server is done starting,
+            # as the nodes may come into service first.
             deadline = time.monotonic() + self.args.startup_timeout
-            wanted = len(nodes.processes) if nodes else 0
-            started, in_service = False, set()
-            while not started or len(in_service) < wanted:
-                waiting = "the nodes in service" if started else "the server to start"
-                match = server.wait_for(
-                    r"Done \(|Maestro: (node-\d+) is linked and in service;",
-                    max(0.0, deadline - time.monotonic()),
-                    waiting,
-                )
-                if match.group(1):
-                    in_service.add(match.group(1))
-                else:
-                    started = True
+            server.wait_for(
+                r"Done \(", self.args.startup_timeout, "the server to start"
+            )
+            wanted = len(nodes.addresses) if nodes else 0
+            server.wait_until(
+                lambda: server.in_service() >= wanted,
+                max(0.0, deadline - time.monotonic()),
+                "the nodes in service",
+            )
         except BaseException:
             server.stop()
             raise
@@ -856,7 +1150,7 @@ class Bench:
             for repeat in range(self.args.repeats):
                 if nodes:
                     nodes.check()
-                run = self.run_once(config, scenario, server, mobs, repeat)
+                run = self.run_once(config, scenario, server, nodes, mobs, repeat)
                 point["runs"].append(run)
                 self.save()
                 time.sleep(self.args.settle)
@@ -879,29 +1173,72 @@ class Bench:
                 holds_at, self.args.start, self.args.limit, self.args.precision
             )
 
-    def run_once(self, config, scenario, server, mobs, repeat):
-        """One load run of `mobs` mobs: its report and what it measured."""
+    def run_once(self, config, scenario, server, nodes, mobs, repeat):
+        """One load run of `mobs` mobs: its report and what it measured. With
+        --chaos, faults seeded by it plus `repeat` hit the nodes while the run
+        measures, so each config and mob count meets the same faults, and the
+        nodes are all back in service before it returns."""
         args = self.args
         spec = scaled(self.scenarios[scenario], mobs, args.warmup, args.duration)
         spec_file = SERVER_DIR / "maestro-load" / "scenarios" / f"{scenario}.json"
         spec_file.parent.mkdir(parents=True, exist_ok=True)
         spec_file.write_text(json.dumps(spec, indent=2) + "\n")
+        reports = self.out / "reports" / config
+        reports.mkdir(parents=True, exist_ok=True)
+        name = f"{scenario}-{mobs}-{repeat + 1}"
 
-        ended = rf"Maestro load (done|failed): scenario={re.escape(scenario)}\b(.*)"
+        run = {"report": None, "metrics": None, "held": False, "failed": ["run"]}
+        named = rf"scenario={re.escape(scenario)}\b(.*)"
+        ended = rf"Maestro load (done|failed): {named}"
         server.skip()
         server.command(f"maestro load start {scenario}")
         expected = (
             mobs / SPAWNS_PER_TICK / TICKS_PER_SECOND + args.warmup + args.duration
         )
-        match = server.wait_for(
-            ended, 2 * expected + 60, "end of the load run", required=False
-        )
-        if match is None:
-            # The server fell too far behind to finish in time; what it measured stands.
-            server.command("maestro load stop")
-            match = server.wait_for(ended, args.stop_timeout, "end of the load run")
+        timeout = 2 * expected + 60
+        chaos = None
+        try:
+            if args.chaos is not None and nodes:
+                match = server.wait_for(
+                    rf"Maestro load (measuring|done|failed): {named}",
+                    timeout,
+                    "the load run to measure",
+                    required=False,
+                )
+                if match is not None and match.group(1) == "measuring":
+                    chaos_log = reports / f"{name}-chaos.jsonl"
+                    run["chaos"] = str(chaos_log.relative_to(self.out))
+                    log(f"{config} {name}: faults seeded {args.chaos + repeat}")
+                    chaos = subprocess.Popen(
+                        chaos_command(
+                            args.chaos + repeat,
+                            args.duration,
+                            nodes.targets(),
+                            chaos_log,
+                            self.chaos_args(),
+                        )
+                    )
+                    match = server.wait_for(
+                        ended, timeout, "end of the load run", required=False
+                    )
+            else:
+                match = server.wait_for(
+                    ended, timeout, "end of the load run", required=False
+                )
+            if match is None:
+                # The server fell too far behind to finish in time; what it measured stands.
+                server.command("maestro load stop")
+                match = server.wait_for(ended, args.stop_timeout, "end of the load run")
+        finally:
+            if chaos:
+                end_chaos(chaos, chaos_log)
+        if chaos:
+            server.wait_until(
+                lambda: server.in_service() >= len(nodes.addresses),
+                RECOVERY_SECONDS,
+                "every node back in service after the faults",
+            )
 
-        run = {"report": None, "metrics": None, "held": False, "failed": ["run"]}
         if match.group(1) == "failed":
             run["failure"] = match.group(2).lstrip(": ")
             log(
@@ -911,8 +1248,7 @@ class Bench:
         report_file = Path(re.search(r"report=(\S+)", match.group(2)).group(1))
         if not report_file.is_absolute():
             report_file = SERVER_DIR / report_file
-        kept = self.out / "reports" / config / f"{scenario}-{mobs}-{repeat + 1}.json"
-        kept.parent.mkdir(parents=True, exist_ok=True)
+        kept = reports / f"{name}.json"
         shutil.copy2(report_file, kept)
         run["report"] = str(kept.relative_to(self.out))
         run["metrics"] = metrics(json.loads(kept.read_text()))
@@ -932,6 +1268,25 @@ class Bench:
             + f": {verdict}"
         )
         return run
+
+
+def refusal(args):
+    """What is wrong with the settings of a `run`, or None."""
+    if not args.mobs and args.start > args.limit:
+        return "--start must not be above --limit"
+    if args.node_hosts is not None and not args.node_image:
+        return "--node-hosts needs --node-image"
+    if args.node_hosts is not None and args.nodes > len(args.node_hosts):
+        return f"--nodes {args.nodes} needs as many --node-hosts"
+    if not 0 <= args.spares < args.nodes:
+        return "--spares must leave a node holding a region"
+    if args.chaos is not None and not args.node_image:
+        return "--chaos needs --node-image"
+    if args.chaos is not None and not args.mobs:
+        return "--chaos needs --mobs, as faults decide no mob count"
+    if args.chaos_args is not None and args.chaos is None:
+        return "--chaos-args needs --chaos"
+    return None
 
 
 def java_version(java):
@@ -979,7 +1334,7 @@ Finds the most mobs a server holds at 20 TPS, on vanilla and with Maestro.
 
   vanilla  fabric-api and the load mod, without the released mod
   idle     the released mod with no nodes, so nothing is offloaded
-  batch    the released mod offloading to local nodes, batch sub-mode
+  batch    the released mod offloading to --nodes nodes, batch sub-mode
   stream   the same in stream sub-mode
 
 and each scenario of bench/scenarios, a fresh one per scenario so no
@@ -994,6 +1349,14 @@ hills, mesas, walls and ruins, and its husks hunt players walking around it:
   spread   four crowds of husks and cows, each hunting four players in
            another cell
   siege    husks around four players on keeps they cannot climb
+
+The `-far` ones search further, as their husks hunt from up to 64 blocks, not
+35, so each search may visit 1024 nodes, not 560:
+
+  chase-far   husks hunting four players, each sent at least 40 blocks from
+              every player once it catches one
+  siege-far   husks around four players on keeps, from further out
+  spread-far  a chase of husks and four players in each of four cells
 
 Before the configs, a vanilla server builds every scenario's terrain into a
 copy of the world, which each server then starts from, so no measured server
@@ -1021,6 +1384,24 @@ fleet sheds before it must. A run that missed the SLO shedding while every
 node reported at least 10% above `nodeCapacity` also fails on `capacity`, and
 the table's `node rate` column shows the rate to rerun with in
 --node-capacity. No request is traced unless --trace-sample-rate says so.
+Every node holds a region unless --spares keeps some spare.
+
+With --node-image the nodes run as containers of that image (`make
+node-image`), pinned to their CPUs the same way, and maestro-bench runs from
+it. With --node-hosts too, the first --nodes of those Docker hosts run one
+each on all of its CPUs, publishing the node's ports, which the server reaches
+at the host's address; each host must have the image or be able to pull it,
+and the first measures the search rate. The nodes and the server ask for 8 MiB
+UDP buffers, so every host should allow them (`sysctl net.core.rmem_max=8388608
+net.core.wmem_max=8388608`); their logs warn if one does not.
+
+With --chaos, tools/chaos.py faults the containers while each run measures:
+pauses, crashes and restarts, and `tc` delay, loss and partitions (see
+`tools/chaos.py --help`, whose plan options --chaos-args takes). A run's
+faults are seeded by --chaos plus its repeat, so every config and mob count
+meets the same ones, and its fault log lands beside its report. The verdict
+is the same, so the table shows what the faults cost, and the next run waits
+for every node to be back in service.
 
 Every run's load report, the logs and results.json land in --out, and a table
 is printed at the end, with what the runs of each count that did not hold
@@ -1047,6 +1428,24 @@ def main(argv):
     )
     run.add_argument(
         "--node-cpus", default="3-5", help="CPUs split among the nodes (default 3-5)"
+    )
+    run.add_argument("--node-image", help="run the nodes as containers of this image")
+    run.add_argument(
+        "--node-hosts",
+        type=lambda text: [host for host in text.split(",") if host],
+        help="Docker hosts the first --nodes of which run a node each, such as "
+        "ssh://ubuntu@10.0.1.12, instead of the local one",
+    )
+    run.add_argument(
+        "--spares", type=int, default=0, help="nodes that start with no region"
+    )
+    run.add_argument(
+        "--chaos",
+        type=int,
+        help="fault the nodes while runs measure, seeded by this plus the repeat",
+    )
+    run.add_argument(
+        "--chaos-args", help="further tools/chaos.py plan options, such as '--gap 30'"
     )
     run.add_argument(
         "--repeats", type=positive, default=3, help="runs per mob count (default 3)"
@@ -1105,8 +1504,10 @@ def main(argv):
     shown.add_argument("results", type=Path)
 
     args = parser.parse_args(argv)
-    if args.command == "run" and not args.mobs and args.start > args.limit:
-        parser.error("--start must not be above --limit")
+    if args.command == "run":
+        refused = refusal(args)
+        if refused:
+            parser.error(refused)
     if args.command == "table":
         print(table(json.loads(args.results.read_text())))
         return 0

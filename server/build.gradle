@@ -160,6 +160,10 @@ sourceSets.test.runtimeClasspath += sourceSets.load.output
 
 test {
   useJUnitPlatform()
+  // The scenarios `tools/bench.py` runs, which `BundledScenariosTest` reads.
+  def benchScenarios = file("${rootDir}/../bench/scenarios")
+  inputs.dir benchScenarios
+  systemProperty 'maestro.scenarios', benchScenarios.absolutePath
 }
 
 tasks.register('mixinTest', Test) {

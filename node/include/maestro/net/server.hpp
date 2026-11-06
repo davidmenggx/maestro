@@ -29,7 +29,17 @@ struct ServerOptions {
   std::uint16_t RequestPort = 25702;
   /// The node's own heartbeat interval: 20 ticks.
   std::chrono::milliseconds HeartbeatInterval{1000};
+  /// Kernel buffer asked for each way of the request socket, so a burst of
+  /// datagrams is not dropped. The kernel caps it at `net.core.rmem_max` and
+  /// `net.core.wmem_max`.
+  int DatagramBuffer = 8 << 20;
   serve::NodeOptions Node;
+};
+
+/// Kernel buffer sizes of a socket, as the kernel reports them.
+struct SocketBuffers {
+  int Receive = 0;
+  int Send = 0;
 };
 
 /// The network side of a compute node: TCP acceptors for the world and control
@@ -49,6 +59,10 @@ public:
   std::uint16_t worldPort() const { return WorldPort; }
   std::uint16_t controlPort() const { return ControlPort; }
   std::uint16_t requestPort() const { return RequestPort; }
+
+  /// The request socket's buffers as the kernel reports them. Linux reports
+  /// twice the size asked, up to twice its cap, counting its own bookkeeping.
+  SocketBuffers requestBuffers();
 
   /// Searches run over the area held, since the node started.
   std::uint64_t searches() const { return Core.searches(); }

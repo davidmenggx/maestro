@@ -9,6 +9,7 @@ import io.github.davidmenggx.maestro.config.MaestroConfig.NodeAddress;
 import io.github.davidmenggx.maestro.controller.env.NodeId;
 import io.github.davidmenggx.maestro.controller.env.Transport;
 import io.github.davidmenggx.maestro.controller.env.Transport.Channel;
+import io.netty.channel.socket.DatagramChannelConfig;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -146,6 +147,7 @@ class NettyTransportTest {
         new NettyTransport(
             Map.of(NODE, first.address(), other, second.address()),
             NettyTransport.MAX_PENDING_BYTES,
+            NettyTransport.DATAGRAM_BUFFER_BYTES,
             System::nanoTime);
     closing.add(transport);
     Recorder heard = listen(transport);
@@ -273,6 +275,7 @@ class NettyTransportTest {
             new NettyTransport(
                 Map.of(NODE, new NodeAddress("no-such-host.invalid", 1, 2, 3)),
                 NettyTransport.MAX_PENDING_BYTES,
+                NettyTransport.DATAGRAM_BUFFER_BYTES,
                 System::nanoTime));
     assertThrows(
         IllegalArgumentException.class,
@@ -280,7 +283,25 @@ class NettyTransportTest {
             new NettyTransport(
                 Map.of(NODE, node.address(), NodeId.of(1), node.address()),
                 NettyTransport.MAX_PENDING_BYTES,
+                NettyTransport.DATAGRAM_BUFFER_BYTES,
                 System::nanoTime));
+  }
+
+  @Test
+  void eachRequestSocketTakesTheBuffersAsked() {
+    // Far below any system default, which the socket would otherwise keep.
+    NettyTransport transport =
+        new NettyTransport(
+            Map.of(NODE, fakeNode().address()),
+            NettyTransport.MAX_PENDING_BYTES,
+            4096,
+            System::nanoTime);
+    closing.add(transport);
+
+    DatagramChannelConfig config = transport.requestConfig(NODE);
+    for (int granted : new int[] {config.getReceiveBufferSize(), config.getSendBufferSize()}) {
+      assertTrue(granted >= 4096 && granted < 65536, "granted " + granted);
+    }
   }
 
   /** The node's side of a link. */
@@ -391,7 +412,9 @@ class NettyTransportTest {
   }
 
   private NettyTransport transport(NodeAddress address, int cap, LongSupplier nanoTime) {
-    NettyTransport transport = new NettyTransport(Map.of(NODE, address), cap, nanoTime);
+    NettyTransport transport =
+        new NettyTransport(
+            Map.of(NODE, address), cap, NettyTransport.DATAGRAM_BUFFER_BYTES, nanoTime);
     closing.add(transport);
     return transport;
   }

@@ -130,6 +130,16 @@ jobs:
           path: server/build/e2e-*.log
           if-no-files-found: ignore
 
+  image:
+    name: Node image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and check the image
+        run: make test-image
+
   sanitize:
     name: Node under ${{ matrix.sanitizer }}
     runs-on: ubuntu-latest

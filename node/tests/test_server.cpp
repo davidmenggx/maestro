@@ -826,6 +826,18 @@ TEST_F(ServerTest, AMalformedDatagramIsIgnored) {
   EXPECT_FALSE(Control.closedByNode(Quiet));
 }
 
+TEST_F(ServerTest, TheRequestSocketTakesTheBuffersAsked) {
+  // Far below any system default, which the socket would otherwise keep.
+  net::ServerOptions Opts = testOptions();
+  Opts.DatagramBuffer = 4096;
+  start(Opts);
+  const net::SocketBuffers Granted = Node->requestBuffers();
+  EXPECT_GE(Granted.Receive, 4096);
+  EXPECT_LT(Granted.Receive, 65536);
+  EXPECT_GE(Granted.Send, 4096);
+  EXPECT_LT(Granted.Send, 65536);
+}
+
 TEST_F(ServerTest, StopsWithRequestsStillWaiting) {
   start(testOptions(/*Workers=*/1));
   Connection Control = control();
