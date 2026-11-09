@@ -15,9 +15,11 @@ permissions:
 env:
   JAVA_VERSION: "25"
 
+# A pushed head commit whose message contains `[no-ci]` runs only formatting.
 jobs:
   test:
     name: Build and test
+    if: ${{ !contains(github.event.head_commit.message, '[no-ci]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -72,6 +74,7 @@ jobs:
 
   e2e:
     name: End to end ${{ matrix.offload }} ${{ matrix.submode }} ${{ matrix.faults }}
+    if: ${{ !contains(github.event.head_commit.message, '[no-ci]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -132,6 +135,7 @@ jobs:
 
   image:
     name: Node image
+    if: ${{ !contains(github.event.head_commit.message, '[no-ci]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -142,6 +146,7 @@ jobs:
 
   sanitize:
     name: Node under ${{ matrix.sanitizer }}
+    if: ${{ !contains(github.event.head_commit.message, '[no-ci]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -174,6 +179,7 @@ jobs:
 
   coverage:
     name: Coverage
+    if: ${{ !contains(github.event.head_commit.message, '[no-ci]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -210,6 +216,7 @@ jobs:
 
   fuzz:
     name: Fuzz ${{ matrix.tier }} ${{ matrix.shard }}
+    if: ${{ !contains(github.event.head_commit.message, '[no-ci]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
