@@ -3,9 +3,10 @@
 # Maestro
 Maestro is a server-side Minecraft mod that offloads mob pathfinding to a fleet of C++ compute nodes. Using Maestro, *servers can handle up to 30 times more mobs while keeping p99 tick time below 50 ms*.
 
-> For the system design in detail and my thinking in building this project, please [read the blog on my personal website](https://davidmenggx.github.io/blog/maestro.html).
+> [!TIP]
+> ***For the system design in detail and my thinking in building this project, please [read the blog on my personal website](https://davidmenggx.github.io/blog/maestro.html).***
 
-*This project is mostly intended as a learning exercise in distributed systems. It is not intended as a complete gameplay mod.*
+This project is mostly intended as a learning exercise in distributed systems. It is not intended as a complete gameplay mod.
 
 ## Overview
 
